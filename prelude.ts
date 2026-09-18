@@ -5,11 +5,38 @@
  * Everything except $ is synchronous: models often call helpers like these without await.
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
  * and build output are left out on every platform.
+ *
+ * Each $ command and helper call is logged to the runner's log (~/.cache/pi-code/runs.jsonl) as it
+ * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
  */
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
-import { $, Glob } from "bun";
+import { $ as bunShell, Glob } from "bun";
+
+function log(event: string, details: Record<string, unknown>) {
+	const { PI_CODE_LOG, PI_CODE_RUN } = process.env;
+	if (!PI_CODE_LOG) return;
+	appendFileSync(PI_CODE_LOG, `${JSON.stringify({ time: new Date().toISOString(), run: PI_CODE_RUN, event, ...details })}\n`);
+}
+
+/** Runs a helper, logging how long it took and how many results it returned. */
+function logged<T>(helper: string, args: unknown[], run: () => T): T {
+	const startedAt = performance.now();
+	const result = run();
+	const results = Array.isArray(result) ? result.length : result;
+	log("helper", { helper, args: JSON.stringify(args).slice(0, 200), ms: Math.round(performance.now() - startedAt), results });
+	return result;
+}
+
+/** Bun's shell, logging each command as it starts. */
+const $ = new Proxy(bunShell, {
+	apply(target, thisArg, args: Parameters<typeof bunShell>) {
+		const [strings, ...values] = args;
+		log("command", { command: String.raw({ raw: strings.raw }, ...values).slice(0, 200) });
+		return Reflect.apply(target, thisArg, args);
+	},
+});
 
 /** Files git sees under dir that match a glob pattern, relative to the working directory, sorted. */
 function glob(pattern: string, dir = "."): string[] {
@@ -147,8 +174,6 @@ function toMatch(file: string, node: SgNode, source: string, pattern: string | N
 	return { file, line: node.range().start.line + 1, text: node.text(), vars, node };
 }
 
-const sg = { find, rewrite };
-
 // ── GritQL ────────────────────────────────────────────────────────────────────────
 
 /**
@@ -175,4 +200,13 @@ function grit(pattern: string, paths: string | string[] = ".", options: { lang?:
 	return files;
 }
 
-Object.assign(globalThis, { $, glob, grep, sg, grit });
+Object.assign(globalThis, {
+	$,
+	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
+	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
+	sg: {
+		find: (...args: Parameters<typeof find>) => logged("sg.find", args, () => find(...args)),
+		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
+	},
+	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
+});

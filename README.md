@@ -42,6 +42,7 @@ grit("`console.log($x)` => `logger.info($x)`", "src")
 - On macOS your repo is briefly swapped for the overlay while a program runs (about 150 ms), so your
   editor may notice. On Linux nothing outside the program sees it (about 15 ms).
 - To try it with only `read` and `code`: `pi --tools read,code`.
+- To watch runs as they happen, including each command a program starts: `tail -f ~/.cache/pi-code/runs.jsonl`.
 
 ## Developing
 

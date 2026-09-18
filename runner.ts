@@ -39,6 +39,7 @@ export interface RunResult {
 	changes: FileChange[]; // everything the program changed
 	applied: string[]; // the changed files that were applied
 	rolledBack: string[]; // rollback "file": changed files left half-written, so not applied
+	stillRunning: string[]; // on timeout: commands the program was still running, e.g. "find / -name x (running 58s)"
 }
 
 export interface FileChange {
@@ -110,6 +111,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			changes: changes.map((change) => describe(shown(change.file), change)),
 			applied: applied.map((change) => shown(change.file)),
 			rolledBack: rolledBack.map((change) => shown(change.file)),
+			stillRunning: program.stillRunning,
 		};
 	} finally {
 		await fs.rm(tempDir, { recursive: true, force: true });
@@ -157,6 +159,7 @@ interface ProgramRun {
 	timedOut: boolean;
 	output: string;
 	openForWriting: string[]; // on timeout: files it still had open for writing
+	stillRunning: string[]; // on timeout: the commands it was still running
 }
 
 async function runProgram(
@@ -189,8 +192,8 @@ async function runProgram(
 	const killAll = () => killGroup(child);
 	abort.addEventListener("abort", killAll);
 
-	const { exitCode, timedOut, openForWriting } = await waitWithTimeout(child, options.timeoutMs, repo);
-	log("program exited", { exitCode, timedOut, aborted: abort.aborted });
+	const { exitCode, timedOut, openForWriting, stillRunning } = await waitWithTimeout(child, options.timeoutMs, repo);
+	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning });
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
 	await output.close();
@@ -205,12 +208,13 @@ async function runProgram(
 		.replaceAll(programPath, "program.ts")
 		.replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
 
-	return { exitCode, timedOut, output: text, openForWriting };
+	return { exitCode, timedOut, output: text, openForWriting, stillRunning };
 }
 
 /**
  * Waits for the program to exit, or kills it after timeoutMs. Before killing it, notes which files
- * it (or anything it started) still has open for writing: they may be half-written.
+ * it (or anything it started) still has open for writing, since they may be half-written, and which
+ * commands it was still running, since one of them is probably why it timed out.
  */
 async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: string) {
 	const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
@@ -220,12 +224,35 @@ async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: str
 	});
 	const winner = await Promise.race([exited, timeout]);
 	clearTimeout(timer);
-	if (winner !== "timeout") return { exitCode: winner, timedOut: false, openForWriting: [] };
+	if (winner !== "timeout") return { exitCode: winner, timedOut: false, openForWriting: [], stillRunning: [] };
 
-	const openForWriting = await filesOpenForWriting(repo, child.pid!);
+	const [openForWriting, stillRunning] = await Promise.all([
+		filesOpenForWriting(repo, child.pid!),
+		commandsRunning(child.pid!),
+	]);
 	killGroup(child);
 	await exited;
-	return { exitCode: null, timedOut: true, openForWriting };
+	return { exitCode: null, timedOut: true, openForWriting, stillRunning };
+}
+
+/**
+ * The commands running in a process group, with how long each has been running, e.g.
+ * "find / -name x (running 58s)". Leaves out the program itself and bubblewrap, which wraps it.
+ */
+async function commandsRunning(processGroup: number): Promise<string[]> {
+	const pids = (await $`pgrep -g ${processGroup}`.nothrow().quiet().text()).split("\n").filter(Boolean);
+	if (pids.length === 0) return [];
+	const output = await $`ps -o etime=,command= -p ${pids.join(",")}`.nothrow().quiet().text();
+
+	const commands: string[] = [];
+	for (const line of output.split("\n")) {
+		const match = line.trim().match(/^(\S+)\s+(.+)$/);
+		if (!match) continue;
+		const [, elapsed, command] = match;
+		if (command.includes(PROGRAM_FILE) || /^\S*bwrap /.test(command)) continue;
+		commands.push(`${command.slice(0, 200)} (running ${elapsed})`);
+	}
+	return commands;
 }
 
 function killGroup(child: ChildProcess) {
@@ -245,6 +272,8 @@ function programEnvironment(excludesFile: string) {
 	return {
 		PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`,
 		NO_COLOR: "1",
+		PI_CODE_LOG: LOG_FILE, // the prelude logs each command and helper call here
+		PI_CODE_RUN: RUN_ID,
 		GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it
 		GIT_CONFIG_COUNT: String(count + 1),
 		[`GIT_CONFIG_KEY_${count}`]: "core.excludesFile",

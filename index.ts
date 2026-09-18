@@ -87,6 +87,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push(theme.fg("warning", `rolled back (half-written): ${run.rolledBack.join(", ")}`));
 			}
 			for (const warning of run.warnings) lines.push(theme.fg("warning", `warning: ${warning}`));
+			for (const command of run.stillRunning) lines.push(theme.fg("warning", `still running when killed: ${command}`));
 
 			// Output: the tail on failure, all of it when expanded.
 			if (expanded && run.output.trim()) {
@@ -203,6 +204,9 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	for (const warning of run.warnings) lines.push(`warning: ${warning}`);
 	if (run.rolledBack.length > 0) {
 		lines.push(`Rolled back, because they were half-written when the program was killed: ${run.rolledBack.join(", ")}`);
+	}
+	if (run.stillRunning.length > 0) {
+		lines.push("Still running when it was killed:", ...run.stillRunning.map((command) => `  ${command}`));
 	}
 
 	const output = outputForModel(run, toolCallId);
