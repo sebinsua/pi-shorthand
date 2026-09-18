@@ -1,7 +1,7 @@
 /** How results look in Pi, checked as plain text against hand-built results. */
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { initTheme, type Theme } from "@mariozechner/pi-coding-agent";
+import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { callLine, resultLines } from "../display.ts";
 import type { FileChange, RunResult } from "../runner.ts";
 

@@ -7,7 +7,7 @@
  * on failure the output, then what would have changed; for an exploration, just the output.
  */
 
-import { keyHint, renderDiff, type Theme } from "@mariozechner/pi-coding-agent";
+import { keyHint, renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
 import type { FileChange, RunResult } from "./runner.ts";
 
 const OUTPUT_PREVIEW_LINES = 5; // like Pi's bash tool

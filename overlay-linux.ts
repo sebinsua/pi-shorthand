@@ -65,11 +65,14 @@ async function writtenFiles(upper: string) {
  */
 async function deletedFiles(repo: string, wrap: (command: string[], cwd: string) => string[]) {
 	const untracked = ["git", "ls-files", "-z", "--others", "--exclude-standard"];
-	const [trackedGone, untrackedBefore, untrackedAfter] = await Promise.all([
-		$`${wrap(["git", "ls-files", "-z", "--deleted"], repo)}`.env({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).text(),
-		$`${untracked}`.cwd(repo).text(),
-		$`${wrap(untracked, repo)}`.env({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).text(),
-	]);
+	const inOverlay = (command: string[]) =>
+		$`${wrap(command, repo)}`.env({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).text();
+
+	const before = $`${untracked}`.cwd(repo).text(); // outside the overlay, so it can run alongside
+	// Inside the overlay, one mount at a time: overlayfs won't let two mounts share a work directory.
+	const trackedGone = await inOverlay(["git", "ls-files", "-z", "--deleted"]);
+	const untrackedAfter = await inOverlay(untracked);
+	const untrackedBefore = await before;
 
 	const stillThere = new Set(untrackedAfter.split("\0"));
 	const deleted = [...trackedGone.split("\0"), ...untrackedBefore.split("\0").filter((file) => !stillThere.has(file))];

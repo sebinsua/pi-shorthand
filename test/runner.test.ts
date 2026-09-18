@@ -285,6 +285,16 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		]);
 	});
 
+	test("glob and sg skip a tracked file the program has deleted", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`await Bun.file("src/b.ts").delete();\nconsole.log(JSON.stringify([glob("src/*.ts"), sg.find("oldApi($A)", "src").length]));`,
+		);
+
+		expect(JSON.parse(result.output)).toEqual([["src/a.ts", "src/api.ts"], 1]);
+	});
+
 	test("grep's regular expressions support \\d and similar", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, String.raw`console.log(grep(/oldApi\(\d/).length);`);

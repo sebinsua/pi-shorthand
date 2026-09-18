@@ -13,7 +13,7 @@
  * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
  */
 
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
@@ -58,7 +58,9 @@ function glob(pattern: string, where: string | { cwd?: string } = "."): string[]
 	const dir = typeof where === "string" ? where : (where.cwd ?? ".");
 	const output = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", dir]);
 	const matcher = new Glob(dir === "." ? pattern : `${dir.replace(/\/$/, "")}/${pattern}`);
-	return [...new Set(output.split("\0"))].filter((file) => file && matcher.match(file)).toSorted();
+	// git still lists a tracked file the program has deleted, so check it's there.
+	const files = [...new Set(output.split("\0"))].filter((file) => file && matcher.match(file) && existsSync(file));
+	return files.toSorted();
 }
 
 /**

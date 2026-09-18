@@ -7,9 +7,9 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, truncateHead, truncateTail } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { callLine, countLines, resultLines } from "./display.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
@@ -31,7 +31,7 @@ The program runs in the working directory, and sees the repository at its usual 
 - sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (its captures are on it: m.X) and returns the new text, or null to leave it.
 - sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
 - grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[], e.g. grit("\`a($x)\` => \`b($x)\`", "src")
-Bun's shell $ needs await: await $\`bun test src/foo.test.ts\`. You can also run the ast-grep, grit and git CLIs with it. For pattern syntax, see the code-patterns skill.
+Bun's shell $ needs await: await $\`bun test src/foo.test.ts\`. You can also run the ast-grep, grit and git CLIs with it. For how to write these programs, see the shorthand skill.
 
 Throw or exit non-zero to fail. rollback decides what a failure undoes:
 - "all" (default): nothing is applied; you get the error and the candidate diff.

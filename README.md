@@ -1,6 +1,6 @@
 # pi-shorthand
 
-A [Pi](https://github.com/badlogic/pi-mono) tool for token-efficient writes. The model writes a whole
+A [Pi](https://github.com/earendil-works/pi) tool for token-efficient writes. The model writes a whole
 change as one small Bun program, in shorthand, instead of calling `read`, `edit` and `bash` over
 and over: fewer tokens, and fewer round trips.
 
