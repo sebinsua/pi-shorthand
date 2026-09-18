@@ -1,0 +1,21 @@
+{
+  "name": "pi-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi tool: make a change with one Bun program. Its writes are held in an overlay and applied only if it succeeds.",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "@ast-grep/cli": "^0.45.3",
+    "@ast-grep/napi": "^0.45.3",
+    "@getgrit/cli": "0.1.0-alpha.1743007075",
+    "diff": "^9.0.0"
+  }
+}
