@@ -1,8 +1,28 @@
 {
 	"name": "pi-shorthand",
 	"version": "0.1.0",
-	"private": true,
 	"description": "Pi tool for token-efficient writes: the model makes a whole change with one Bun program, whose writes are held in an overlay and applied only if it succeeds.",
+	"keywords": [
+		"ast-grep",
+		"bun",
+		"code-mode",
+		"gritql",
+		"overlay",
+		"pi",
+		"pi-extension",
+		"pi-package"
+	],
+	"homepage": "https://github.com/sebinsua/pi-shorthand#readme",
+	"bugs": "https://github.com/sebinsua/pi-shorthand/issues",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/sebinsua/pi-shorthand.git"
+	},
+	"files": [
+		"*.ts",
+		"skills",
+		"README.md"
+	],
 	"type": "module",
 	"scripts": {
 		"test": "bun test",
@@ -10,7 +30,7 @@
 		"lint": "oxlint --deny-warnings",
 		"format": "oxfmt",
 		"check": "tsc -p . && oxlint --deny-warnings && oxfmt --check",
-		"prepare": "git config core.hooksPath .githooks"
+		"prepare": "git config core.hooksPath .githooks 2>/dev/null || true"
 	},
 	"dependencies": {
 		"@ast-grep/cli": "^0.45.3",
@@ -25,6 +45,26 @@
 		"oxfmt": "^0.68.0",
 		"oxlint": "^1.83.0",
 		"typescript": "^7.0.2"
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-ai": "*",
+		"@mariozechner/pi-coding-agent": "*",
+		"@mariozechner/pi-tui": "*",
+		"typebox": "*"
+	},
+	"peerDependenciesMeta": {
+		"@mariozechner/pi-ai": {
+			"optional": true
+		},
+		"@mariozechner/pi-coding-agent": {
+			"optional": true
+		},
+		"@mariozechner/pi-tui": {
+			"optional": true
+		},
+		"typebox": {
+			"optional": true
+		}
 	},
 	"pi": {
 		"extensions": [

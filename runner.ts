@@ -72,7 +72,9 @@ interface Change {
 
 const PROGRAM_FILE = ".pi-shorthand-program.ts";
 const PRELUDE = path.join(import.meta.dir, "prelude.ts");
-const BIN_DIR = path.join(import.meta.dir, "node_modules", ".bin");
+// Our dependencies are in the nearest node_modules that has them: our own, or, when npm hoisted them
+// (e.g. Pi's project installs), one further up. Like `npm run`, look in every one from here up.
+const NODE_MODULES = ancestors(import.meta.dir).map((dir) => path.join(dir, "node_modules"));
 const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much the model sees
 const LOG_FILE = path.join(homedir(), ".cache", "pi-shorthand", "runs.jsonl");
 let RUN_ID = ""; // set from RunOptions when the runner starts
@@ -313,11 +315,11 @@ function killGroup(child: ChildProcess) {
 function programEnvironment(excludesFile: string) {
 	const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
 	return {
-		PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`,
+		PATH: [...NODE_MODULES.map((dir) => path.join(dir, ".bin")), process.env.PATH].join(path.delimiter),
 		NO_COLOR: "1",
 		// So programs can import the extension's own packages, e.g. "@ast-grep/napi". A repository's own
 		// node_modules still wins: NODE_PATH is only a fallback.
-		NODE_PATH: [path.join(import.meta.dir, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
+		NODE_PATH: [...NODE_MODULES, process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
 		PI_SHORTHAND_LOG: LOG_FILE, // the prelude logs each command and helper call here
 		PI_SHORTHAND_RUN: RUN_ID,
 		GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it
@@ -420,6 +422,12 @@ function describe(file: string, { before, after }: Change): FileChange {
 
 function isBinary(bytes: Uint8Array): boolean {
 	return bytes.subarray(0, 8000).includes(0);
+}
+
+/** dir and each directory above it, up to the root. */
+function ancestors(dir: string): string[] {
+	const parent = path.dirname(dir);
+	return parent === dir ? [dir] : [dir, ...ancestors(parent)];
 }
 
 /** A regular file's contents, or null if there's no regular file there. */
