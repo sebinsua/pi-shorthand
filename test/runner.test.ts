@@ -201,6 +201,25 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "src/x.ts")).text()).toBe("bar();\nbar(1, 2);\n");
 	});
 
+	test("sg accepts a list of directories, and null to leave a match alone", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`console.log(sg.rewrite("oldApi($A)", (m) => (m.vars.A === "1" ? null : \`newApi(\${m.vars.A})\`), ["."]));`,
+		);
+
+		expect(result.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toContain("oldApi(1)");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("newApi(2)");
+	});
+
+	test("sg warns when the files it's given contain no JS/TS files", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `sg.find("oldApi($A)", ["docs"]);`);
+
+		expect(result.output).toContain('warning: sg.find found no JS/TS files in ["docs"]');
+	});
+
 	test("sg.rewrite warns when it matches nothing", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, `sg.rewrite("doesNotExist($$$A)", "x", "src");`);

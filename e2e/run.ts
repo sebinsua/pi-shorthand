@@ -47,7 +47,8 @@ const source = await prepareSource(args.repo, workDir);
 for (let n = 1; n <= Number(args.runs); n++) {
 	const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${args.setup}-${n}`;
 	const copy = path.join(workDir, name);
-	await $`cp -R ${source} ${copy}`.quiet(); // on macOS APFS this is a cheap clone
+	const clone = process.platform === "darwin" ? "-cR" : "-R"; // -c: a copy-on-write clone on APFS
+	await $`cp ${clone} ${source} ${copy}`.quiet();
 
 	const summary = await runPi(copy, name);
 	console.log(JSON.stringify(summary));

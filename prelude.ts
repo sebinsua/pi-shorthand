@@ -104,18 +104,25 @@ interface SgMatch {
 	node: SgNode;
 }
 
-/** `files` may be a list of files, a single file, a directory (the JS/TS files in it) or a glob. */
-function sourceFiles(files: string | string[]): string[] {
-	if (Array.isArray(files)) return files;
-	const stats = statSync(files, { throwIfNoEntry: false });
-	if (stats?.isFile()) return [files];
-	if (stats?.isDirectory()) return glob("**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}", files);
-	return glob(files);
+/**
+ * The JS/TS files to search. `files` is a file, a directory (the JS/TS files in it), a glob, or a list
+ * of any of those. Warns if there are none, since that's almost always a mistake.
+ */
+function sourceFiles(helper: string, files: string | string[]): string[] {
+	const found = [files].flat().flatMap((entry) => {
+		const stats = statSync(entry, { throwIfNoEntry: false });
+		if (stats?.isFile()) return [entry];
+		if (stats?.isDirectory()) return glob("**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}", entry);
+		return glob(entry);
+	});
+	const sourceFiles = found.filter((file) => LANGUAGES[file.split(".").pop()!]);
+	if (sourceFiles.length === 0) console.error(`warning: ${helper} found no JS/TS files in ${JSON.stringify(files)}`);
+	return sourceFiles;
 }
 
 function find(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch[] {
 	const matches: SgMatch[] = [];
-	for (const file of sourceFiles(files)) {
+	for (const file of sourceFiles("sg.find", files)) {
 		const parsed = parseFile(file);
 		if (!parsed) continue;
 		for (const node of parsed.root.findAll(pattern)) matches.push(toMatch(file, node, parsed.source, pattern));
@@ -125,16 +132,16 @@ function find(pattern: string | NapiConfig, files: string | string[] = "."): SgM
 
 /**
  * Rewrite matches in place. `replacement` is either a template using the same $X / $$$X
- * metavariables, or a function returning the new text (or undefined to leave the match alone).
+ * metavariables, or a function returning the new text (or null/undefined to leave the match alone).
  * Returns the number of matches rewritten.
  */
 function rewrite(
 	pattern: string | NapiConfig,
-	replacement: string | ((match: SgMatch) => string | undefined),
+	replacement: string | ((match: SgMatch) => string | null | undefined),
 	files: string | string[] = ".",
 ): number {
 	let count = 0;
-	for (const file of sourceFiles(files)) {
+	for (const file of sourceFiles("sg.rewrite", files)) {
 		const parsed = parseFile(file);
 		if (!parsed) continue;
 
@@ -145,7 +152,7 @@ function rewrite(
 				typeof replacement === "function"
 					? replacement(match)
 					: replacement.replace(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g, (text, _, name) => match.vars[name] ?? text);
-			if (newText !== undefined) edits.push(node.replace(newText));
+			if (newText != null) edits.push(node.replace(newText)); // null or undefined: leave it alone
 		}
 		if (edits.length === 0) continue;
 
