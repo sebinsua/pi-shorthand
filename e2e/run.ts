@@ -41,7 +41,7 @@ const setupArgs = SETUPS[args.setup!];
 if (!setupArgs) throw new Error(`--setup must be one of: ${Object.keys(SETUPS).join(", ")}`);
 
 mkdirSync(RESULTS, { recursive: true });
-const workDir = await mkdtemp(path.join(tmpdir(), "pi-code-e2e-"));
+const workDir = await mkdtemp(path.join(tmpdir(), "pi-shorthand-e2e-"));
 const source = await prepareSource(args.repo, workDir);
 
 for (let n = 1; n <= Number(args.runs); n++) {

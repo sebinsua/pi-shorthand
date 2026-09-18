@@ -15,7 +15,7 @@ import { callLine, countLines, resultLines } from "./display.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
 // Where runner.ts logs each step. (Not imported from runner.ts, which only runs under Bun.)
-const LOG_FILE = path.join(homedir(), ".cache", "pi-code", "runs.jsonl");
+const LOG_FILE = path.join(homedir(), ".cache", "pi-shorthand", "runs.jsonl");
 
 // Runs typically take well under a second. Programs that run tests or builds pass a longer timeout.
 const DEFAULT_TIMEOUT_SECONDS = 2;
@@ -238,7 +238,7 @@ function outputForModel(run: RunResult, toolCallId: string): string[] {
 	const truncated = truncateTail(output);
 	if (!truncated.truncated) return ["", "output:", output];
 
-	const fullOutputPath = path.join(tmpdir(), `pi-code-${toolCallId}.output`);
+	const fullOutputPath = path.join(tmpdir(), `pi-shorthand-${toolCallId}.output`);
 	writeFileSync(fullOutputPath, output);
 	const notice = `[output truncated: the last ${truncated.outputLines} of ${truncated.totalLines} lines; full output: ${fullOutputPath}]`;
 	return ["", "output:", notice, truncated.content];
@@ -251,7 +251,7 @@ function diffForModel(run: RunResult, toolCallId: string): string[] {
 	const truncated = truncateHead(diff);
 	const lines = ["", truncated.content];
 	if (truncated.truncated) {
-		const fullDiffPath = path.join(tmpdir(), `pi-code-${toolCallId}.diff`);
+		const fullDiffPath = path.join(tmpdir(), `pi-shorthand-${toolCallId}.diff`);
 		writeFileSync(fullDiffPath, diff);
 		lines.push(
 			`[diff truncated at ${truncated.outputLines} of ${truncated.totalLines} lines; full diff: ${fullDiffPath}]`,

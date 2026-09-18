@@ -107,7 +107,7 @@ async function listSharedEntries(repo: string): Promise<string[]> {
  * a template, and each run gets an instant copy-on-write clone of that.
  */
 async function createDatabase(agentfs: string, base: string, tempDir: string): Promise<string> {
-	const templateDir = path.join(homedir(), ".cache", "pi-code", Bun.hash(base).toString(16));
+	const templateDir = path.join(homedir(), ".cache", "pi-shorthand", Bun.hash(base).toString(16));
 	const templateFiles = path.join(templateDir, ".agentfs"); // where `agentfs init` puts them
 	if (!(await Bun.file(path.join(templateFiles, "template.db")).exists())) {
 		await fs.mkdir(templateDir, { recursive: true });

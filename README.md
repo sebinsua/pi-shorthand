@@ -1,7 +1,8 @@
-# code
+# pi-shorthand
 
-A [Pi](https://github.com/badlogic/pi-mono) tool that lets the model make a change by writing one
-small Bun program, instead of calling `read`, `edit` and `bash` over and over.
+A [Pi](https://github.com/badlogic/pi-mono) tool for token-efficient writes. The model writes a whole
+change as one small Bun program, in shorthand, instead of calling `read`, `edit` and `bash` over
+and over: fewer tokens, and fewer round trips.
 
 The program sees your repo as normal, but its writes are held back. If it succeeds, they're applied
 and the model gets the diff. If it fails, nothing changes.
@@ -9,9 +10,10 @@ and the model gets the diff. If it fails, nothing changes.
 ## Install
 
 ```sh
-cd code && npm install
-pi install ~/dev/pi-extensions/code
+pi install git:github.com/sebinsua/pi-shorthand
 ```
+
+Or from a local clone: `npm install`, then `pi install /path/to/pi-shorthand`.
 
 You also need Bun, git, and either [bubblewrap](https://github.com/containers/bubblewrap) 0.9+
 (Linux) or [AgentFS](https://github.com/tursodatabase/agentfs) (macOS:
@@ -43,7 +45,7 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 - On macOS your repo is briefly swapped for the overlay while a program runs (about 150 ms), so your
   editor may notice. On Linux nothing outside the program sees it (about 15 ms).
 - To try it with only `read` and `code`: `pi --tools read,code`.
-- To watch runs as they happen, including each command a program starts: `tail -f ~/.cache/pi-code/runs.jsonl`.
+- To watch runs as they happen, including each command a program starts: `tail -f ~/.cache/pi-shorthand/runs.jsonl`.
 
 ## Developing
 

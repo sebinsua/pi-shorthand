@@ -9,7 +9,7 @@
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
  * and build output are left out on every platform.
  *
- * Each $ command and helper call is logged to the runner's log (~/.cache/pi-code/runs.jsonl) as it
+ * Each $ command and helper call is logged to the runner's log (~/.cache/pi-shorthand/runs.jsonl) as it
  * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
  */
 
@@ -19,11 +19,11 @@ import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
 
 function log(event: string, details: Record<string, unknown>) {
-	const { PI_CODE_LOG, PI_CODE_RUN } = process.env;
-	if (!PI_CODE_LOG) return;
+	const { PI_SHORTHAND_LOG, PI_SHORTHAND_RUN } = process.env;
+	if (!PI_SHORTHAND_LOG) return;
 	appendFileSync(
-		PI_CODE_LOG,
-		`${JSON.stringify({ time: new Date().toISOString(), run: PI_CODE_RUN, event, ...details })}\n`,
+		PI_SHORTHAND_LOG,
+		`${JSON.stringify({ time: new Date().toISOString(), run: PI_SHORTHAND_RUN, event, ...details })}\n`,
 	);
 }
 

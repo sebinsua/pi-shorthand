@@ -4,7 +4,7 @@
  *
  * Usage: echo '<RunOptions as JSON>' | bun runner.ts   → prints a RunResult as JSON
  * SIGTERM aborts: the program is killed, the overlay is closed and nothing is applied.
- * Each step is logged to ~/.cache/pi-code/runs.jsonl, so `tail -f` shows what a run is doing.
+ * Each step is logged to ~/.cache/pi-shorthand/runs.jsonl, so `tail -f` shows what a run is doing.
  *
  * If the program fails:
  * - rollback "all": nothing is applied;
@@ -70,11 +70,11 @@ interface Change {
 	after: Uint8Array | null;
 }
 
-const PROGRAM_FILE = ".pi-code-program.ts";
+const PROGRAM_FILE = ".pi-shorthand-program.ts";
 const PRELUDE = path.join(import.meta.dir, "prelude.ts");
 const BIN_DIR = path.join(import.meta.dir, "node_modules", ".bin");
 const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much the model sees
-const LOG_FILE = path.join(homedir(), ".cache", "pi-code", "runs.jsonl");
+const LOG_FILE = path.join(homedir(), ".cache", "pi-shorthand", "runs.jsonl");
 let RUN_ID = ""; // set from RunOptions when the runner starts
 
 /** Appends one event to the log, e.g. log("program exited", { exitCode: 0 }). */
@@ -86,7 +86,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	const startedAt = performance.now();
 	const cwd = await fs.realpath(options.cwd);
 	const repo = await findRepository(cwd);
-	const tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-code-"));
+	const tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
 
 	try {
 		log("started", { repo, cwd, timeoutMs: options.timeoutMs, rollback: options.rollback });
@@ -318,8 +318,8 @@ function programEnvironment(excludesFile: string) {
 		// So programs can import the extension's own packages, e.g. "@ast-grep/napi". A repository's own
 		// node_modules still wins: NODE_PATH is only a fallback.
 		NODE_PATH: [path.join(import.meta.dir, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
-		PI_CODE_LOG: LOG_FILE, // the prelude logs each command and helper call here
-		PI_CODE_RUN: RUN_ID,
+		PI_SHORTHAND_LOG: LOG_FILE, // the prelude logs each command and helper call here
+		PI_SHORTHAND_RUN: RUN_ID,
 		GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it
 		GIT_CONFIG_COUNT: String(count + 1),
 		[`GIT_CONFIG_KEY_${count}`]: "core.excludesFile",
@@ -387,7 +387,7 @@ async function applyChanges(repo: string, changes: Change[]) {
 			continue;
 		}
 		// Write next to the target, then rename, so each file is replaced atomically.
-		const temp = `${target}.pi-code.tmp`;
+		const temp = `${target}.pi-shorthand.tmp`;
 		await Bun.write(temp, after);
 		const original = await fs.stat(target).catch(() => null);
 		if (original) await fs.chmod(temp, original.mode);

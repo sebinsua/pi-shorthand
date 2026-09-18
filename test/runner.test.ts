@@ -25,7 +25,7 @@ afterEach(async () => {
 
 /** A new git repository with these files committed. */
 async function makeRepo(files: Record<string, string>): Promise<string> {
-	const repo = path.join(await realpath(await mkdtemp(path.join(tmpdir(), "pi-code-test-"))), "repo");
+	const repo = path.join(await realpath(await mkdtemp(path.join(tmpdir(), "pi-shorthand-test-"))), "repo");
 	await mkdir(repo);
 	for (const [file, contents] of Object.entries(files)) await Bun.write(path.join(repo, file), contents);
 	await $`git init -q && git add -A && git -c user.name=test -c user.email=test@test commit -qm init`.cwd(repo);
