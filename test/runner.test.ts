@@ -40,7 +40,7 @@ function startRunner(repo: string, program: string, options: Partial<RunOptions>
 
 async function run(repo: string, program: string, options: Partial<RunOptions> = {}): Promise<RunResult> {
 	const runner = startRunner(repo, program, options);
-	const [stdout, stderr] = await Promise.all([runner.stdout.text(), runner.stderr.text()]);
+	const [stdout, stderr] = await Promise.all([new Response(runner.stdout).text(), new Response(runner.stderr).text()]);
 	if ((await runner.exited) !== 0) throw new Error(`runner failed: ${stderr}`);
 	return JSON.parse(stdout);
 }
@@ -135,7 +135,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		});
 		await Bun.sleep(1500);
 		runner.kill("SIGTERM");
-		const result: RunResult = JSON.parse(await runner.stdout.text());
+		const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
 
 		expect(result.applied).toEqual([]);
 		expect(await gitStatus(repo)).toBe("");
@@ -238,7 +238,7 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 			stdout: "pipe",
 			env: { ...process.env, XDG_CONFIG_HOME: config },
 		});
-		const result: RunResult = JSON.parse(await runner.stdout.text());
+		const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
 
 		expect(result.output.trim()).toBe('""');
 	});
