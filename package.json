@@ -1,6 +1,6 @@
 {
 	"name": "pi-shorthand",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Pi tool for token-efficient writes: the model makes a whole change with one Bun program, whose writes are held in an overlay and applied only if it succeeds.",
 	"keywords": [
 		"ast-grep",
@@ -77,6 +77,7 @@
 		],
 		"skills": [
 			"./skills"
-		]
+		],
+		"image": "https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png"
 	}
 }
