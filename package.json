@@ -14,6 +14,8 @@
 	],
 	"homepage": "https://github.com/sebinsua/pi-shorthand#readme",
 	"bugs": "https://github.com/sebinsua/pi-shorthand/issues",
+	"license": "MIT",
+	"author": "Seb Insua",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/sebinsua/pi-shorthand.git"
