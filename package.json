@@ -5,6 +5,7 @@
 	"description": "Pi tool: make a change with one Bun program. Its writes are held in an overlay and applied only if it succeeds.",
 	"type": "module",
 	"scripts": {
+		"test": "bun test",
 		"typecheck": "tsc -p .",
 		"lint": "oxlint",
 		"format": "oxfmt",

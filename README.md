@@ -48,3 +48,6 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 
 `npm run check` type-checks (TypeScript 7), lints (oxlint) and checks formatting (oxfmt). A pre-commit
 hook runs it; `npm run format` fixes formatting.
+
+`npm test` runs the tests against real overlays (it needs AgentFS on macOS, bubblewrap on Linux).
+`test/linux.sh` runs them on Linux in Docker.

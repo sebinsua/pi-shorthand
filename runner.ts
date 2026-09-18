@@ -318,8 +318,10 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 	);
 
 	const changes: Change[] = [];
+	const seen = new Set<string>(); // an overlay may report a file twice, e.g. a deleted directory and the files in it
 	for (const { file, contents: after } of candidates) {
-		if (ignored.has(file)) continue;
+		if (ignored.has(file) || seen.has(file)) continue;
+		seen.add(file);
 		const before = await readFile(path.join(overlay.originalDir, file));
 		if (!before && !after) continue;
 		if (before && after && Buffer.from(before).equals(after)) continue; // read, not changed

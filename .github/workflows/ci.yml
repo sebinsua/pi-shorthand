@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The same Debian container with bubblewrap that `test/linux.sh` uses locally.
+      - run: ./test/linux.sh
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install AgentFS
+        run: |
+          curl -fsSL https://agentfs.ai/install | AGENTFS_UNMANAGED_INSTALL="$HOME/agentfs" sh
+          echo "$HOME/agentfs" >> "$GITHUB_PATH"
+      - run: bun test
