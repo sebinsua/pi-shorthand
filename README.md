@@ -15,6 +15,8 @@ pi install npm:pi-shorthand
 
 Or from GitHub (`pi install git:github.com/sebinsua/pi-shorthand`), or a local clone: `npm install`, then `pi install /path/to/pi-shorthand`.
 
+A project install (`pi install -l`) only loads once you trust the project: Pi asks, or run `pi --approve`.
+
 You also need Bun, git, and either [bubblewrap](https://github.com/containers/bubblewrap) 0.9+
 (Linux) or [AgentFS](https://github.com/tursodatabase/agentfs) (macOS:
 `curl -fsSL https://agentfs.ai/install | bash`).
