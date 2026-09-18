@@ -4,6 +4,7 @@
  *
  * Usage: echo '<RunOptions as JSON>' | bun runner.ts   → prints a RunResult as JSON
  * SIGTERM aborts: the program is killed, the overlay is closed and nothing is applied.
+ * Each step is logged to ~/.cache/pi-code/runs.jsonl, so `tail -f` shows what a run is doing.
  *
  * If the program fails:
  * - rollback "all": nothing is applied;
@@ -11,10 +12,13 @@
  *   had open for writing when it was killed may be half-written, so they're rolled back.
  */
 
+import { type ChildProcess, spawn } from "node:child_process";
+import { appendFileSync, mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
-import { $, type Subprocess } from "bun";
+import { Lang, parse } from "@ast-grep/napi";
+import { $ } from "bun";
 import { structuredPatch } from "diff";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
@@ -30,7 +34,8 @@ export interface RunResult {
 	exitCode: number | null; // null if it was killed
 	timedOut: boolean;
 	durationMs: number;
-	output: string; // stdout, then stderr
+	output: string; // stdout and stderr
+	warnings: string[]; // likely mistakes spotted in the program before it ran
 	changes: FileChange[]; // everything the program changed
 	applied: string[]; // the changed files that were applied
 	rolledBack: string[]; // rollback "file": changed files left half-written, so not applied
@@ -62,7 +67,14 @@ interface Change {
 const PROGRAM_FILE = ".pi-code-program.ts";
 const PRELUDE = path.join(import.meta.dir, "prelude.ts");
 const BIN_DIR = path.join(import.meta.dir, "node_modules", ".bin");
-const MAX_OUTPUT_CHARS = 64 * 1024;
+const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much the model sees
+const LOG_FILE = path.join(homedir(), ".cache", "pi-code", "runs.jsonl");
+const RUN_ID = Math.random().toString(36).slice(2, 8);
+
+/** Appends one event to the log, e.g. log("program exited", { exitCode: 0 }). */
+function log(event: string, details: Record<string, unknown> = {}) {
+	appendFileSync(LOG_FILE, `${JSON.stringify({ time: new Date().toISOString(), run: RUN_ID, event, ...details })}\n`);
+}
 
 async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> {
 	const startedAt = performance.now();
@@ -71,8 +83,10 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	const tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-code-"));
 
 	try {
+		log("started", { repo, cwd, timeoutMs: options.timeoutMs, rollback: options.rollback });
 		const open = process.platform === "darwin" ? openMacOverlay : openLinuxOverlay;
 		const overlay = await open(repo, tempDir);
+		log("overlay opened");
 		let program: ProgramRun;
 		let changes: Change[];
 		try {
@@ -84,6 +98,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 
 		const { applied, rolledBack } = whatToApply(changes, program, options.rollback, abort.aborted);
 		await applyChanges(repo, applied);
+		log("finished", { changed: changes.map((change) => change.file), applied: applied.map((change) => change.file) });
 
 		const shown = (file: string) => path.relative(cwd, path.join(repo, file));
 		return {
@@ -91,6 +106,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			timedOut: program.timedOut,
 			durationMs: Math.round(performance.now() - startedAt),
 			output: program.output,
+			warnings: lint(options.program),
 			changes: changes.map((change) => describe(shown(change.file), change)),
 			applied: applied.map((change) => shown(change.file)),
 			rolledBack: rolledBack.map((change) => shown(change.file)),
@@ -100,13 +116,32 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	}
 }
 
-/** Everything if the program succeeded. If it failed, nothing, unless rollback is "file". */
+/** Nothing if aborted. Everything if the program succeeded. If it failed, nothing, unless rollback is "file". */
 function whatToApply(changes: Change[], program: ProgramRun, rollback: RunOptions["rollback"], aborted: boolean) {
+	if (aborted) return { applied: [], rolledBack: [] };
 	if (program.exitCode === 0) return { applied: changes, rolledBack: [] };
-	if (rollback === "all" || aborted) return { applied: [], rolledBack: [] };
+	if (rollback === "all") return { applied: [], rolledBack: [] };
 
 	const halfWritten = (change: Change) => program.openForWriting.includes(change.file);
 	return { applied: changes.filter((change) => !halfWritten(change)), rolledBack: changes.filter(halfWritten) };
+}
+
+/** A `$` command that isn't awaited never runs: Bun's shell starts a command when it's awaited. */
+const UNAWAITED_SHELL = {
+	rule: {
+		kind: "call_expression",
+		has: { field: "function", regex: "^\\$$" },
+		not: { inside: { any: [{ kind: "await_expression" }, { kind: "return_statement" }], stopBy: { kind: "statement_block" } } },
+	},
+};
+
+/** Likely mistakes in the program, found without running it. */
+function lint(program: string): string[] {
+	const root = parse(Lang.TypeScript, program).root();
+	return root.findAll(UNAWAITED_SHELL).map((node) => {
+		const line = node.range().start.line + 1;
+		return `line ${line}: ${node.text().split("\n")[0]} isn't awaited, so the command may not have run`;
+	});
 }
 
 async function findRepository(cwd: string): Promise<string> {
@@ -137,62 +172,96 @@ async function runProgram(
 	await Bun.write(programFile, options.program);
 
 	const excludesFile = path.join(tempDir, "exclude");
-	await Bun.write(excludesFile, [PROGRAM_FILE, ...overlay.gitExcludes].join("\n"));
+	await Bun.write(excludesFile, [PROGRAM_FILE, ...overlay.gitExcludes, await globalGitExcludes()].join("\n"));
 
-	const child = Bun.spawn({
-		cmd: overlay.wrap([process.execPath, "--preload", PRELUDE, programPath], options.cwd),
+	// Output goes to a file rather than a pipe, so a process the program leaves running can't hold it open.
+	// detached: the program gets its own process group, so killing the group kills anything it started too.
+	const outputFile = path.join(tempDir, "output");
+	const output = await fs.open(outputFile, "w");
+	const [command, ...args] = overlay.wrap([process.execPath, "--preload", PRELUDE, programPath], options.cwd);
+	log("program started", { output: outputFile, timeoutMs: options.timeoutMs });
+	const child = spawn(command, args, {
 		cwd: options.cwd,
-		stdout: "pipe",
-		stderr: "pipe",
-		signal: abort, // kills the program
-		env: {
-			...process.env,
-			PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`,
-			NO_COLOR: "1",
-			GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it
-			GIT_CONFIG_COUNT: "1",
-			GIT_CONFIG_KEY_0: "core.excludesFile",
-			GIT_CONFIG_VALUE_0: excludesFile,
-		},
+		detached: true,
+		stdio: ["ignore", output.fd, output.fd],
+		env: { ...process.env, ...programEnvironment(excludesFile) },
 	});
-	const [stdout, stderr, { timedOut, openForWriting }] = await Promise.all([
-		child.stdout.text(),
-		child.stderr.text(),
-		waitWithTimeout(child, options.timeoutMs, repo),
-	]);
+	const killAll = () => killGroup(child);
+	abort.addEventListener("abort", killAll);
+
+	const { exitCode, timedOut, openForWriting } = await waitWithTimeout(child, options.timeoutMs, repo);
+	log("program exited", { exitCode, timedOut, aborted: abort.aborted });
+	killAll(); // anything it left running
+	abort.removeEventListener("abort", killAll);
+	await output.close();
 	await fs.rm(programFile, { force: true });
 
 	// Keep the tail, where errors are. Show stack traces as "program.ts:3:11", and drop Bun's version footer.
-	const output = (stdout + stderr)
-		.slice(-MAX_OUTPUT_CHARS)
+	let text = await Bun.file(outputFile).text();
+	if (text.length > MAX_OUTPUT_CHARS) {
+		text = `[${text.length - MAX_OUTPUT_CHARS} earlier characters dropped]\n${text.slice(-MAX_OUTPUT_CHARS)}`;
+	}
+	text = text
 		.replaceAll(programPath, "program.ts")
 		.replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
 
-	return { exitCode: timedOut ? null : child.exitCode, timedOut, output, openForWriting };
+	return { exitCode, timedOut, output: text, openForWriting };
 }
 
 /**
  * Waits for the program to exit, or kills it after timeoutMs. Before killing it, notes which files
- * it still has open for writing: they may be half-written.
+ * it (or anything it started) still has open for writing: they may be half-written.
  */
-async function waitWithTimeout(child: Subprocess, timeoutMs: number, repo: string) {
+async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: string) {
+	const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
 	let timer: Timer | undefined;
 	const timeout = new Promise<"timeout">((resolve) => {
 		timer = setTimeout(() => resolve("timeout"), timeoutMs);
 	});
-	const winner = await Promise.race([child.exited, timeout]);
+	const winner = await Promise.race([exited, timeout]);
 	clearTimeout(timer);
-	if (winner !== "timeout") return { timedOut: false, openForWriting: [] };
+	if (winner !== "timeout") return { exitCode: winner, timedOut: false, openForWriting: [] };
 
-	const openForWriting = await filesOpenForWriting(repo);
-	child.kill("SIGKILL");
-	await child.exited;
-	return { timedOut: true, openForWriting };
+	const openForWriting = await filesOpenForWriting(repo, child.pid!);
+	killGroup(child);
+	await exited;
+	return { exitCode: null, timedOut: true, openForWriting };
 }
 
-/** Files under dir that any process in our process group has open for writing, relative to dir. */
-async function filesOpenForWriting(dir: string): Promise<string[]> {
-	const processGroup = (await $`ps -o pgid= -p ${process.pid}`.text()).trim();
+function killGroup(child: ChildProcess) {
+	try {
+		process.kill(-child.pid!, "SIGKILL");
+	} catch {
+		// already gone
+	}
+}
+
+/**
+ * Adds our git excludes on top of any GIT_CONFIG_* the user already set. core.excludesFile
+ * replaces the user's global excludes file, so globalGitExcludes() copies that file's patterns in.
+ */
+function programEnvironment(excludesFile: string) {
+	const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+	return {
+		PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`,
+		NO_COLOR: "1",
+		GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it
+		GIT_CONFIG_COUNT: String(count + 1),
+		[`GIT_CONFIG_KEY_${count}`]: "core.excludesFile",
+		[`GIT_CONFIG_VALUE_${count}`]: excludesFile,
+	};
+}
+
+/** The patterns in the user's global git excludes file, if they have one. */
+async function globalGitExcludes(): Promise<string> {
+	const configured = (await $`git config --global --path --get core.excludesFile`.nothrow().quiet().text()).trim();
+	const xdgConfig = process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config");
+	const file = Bun.file(configured || path.join(xdgConfig, "git", "ignore"));
+	return (await file.exists()) ? file.text() : "";
+}
+
+/** Files under dir that any process in a process group has open for writing, relative to dir. */
+async function filesOpenForWriting(dir: string, processGroup: number): Promise<string[]> {
 	// -F an: one field per line. "a" is the access mode (r, w, or u for read/write), "n" the file name.
 	const output = await $`lsof -n -P -F an -g ${processGroup}`.nothrow().quiet().text();
 
@@ -220,7 +289,7 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 		if (before && after && Buffer.from(before).equals(after)) continue; // read, not changed
 		changes.push({ file, before, after });
 	}
-	return changes.sort((a, b) => a.file.localeCompare(b.file));
+	return changes.toSorted((a, b) => a.file.localeCompare(b.file));
 }
 
 async function gitIgnored(dir: string, files: string[]): Promise<Set<string>> {
@@ -280,8 +349,14 @@ async function readFile(file: string): Promise<Uint8Array | null> {
 }
 
 if (import.meta.main) {
+	mkdirSync(path.dirname(LOG_FILE), { recursive: true });
 	const abort = new AbortController();
 	process.on("SIGTERM", () => abort.abort());
 	const options: RunOptions = await Bun.stdin.json();
-	console.log(JSON.stringify(await run(options, abort.signal)));
+	try {
+		console.log(JSON.stringify(await run(options, abort.signal)));
+	} catch (error) {
+		log("failed", { error: String(error) });
+		throw error;
+	}
 }

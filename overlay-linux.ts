@@ -4,9 +4,9 @@
  * is also where the changes are read from. There's nothing to undo afterwards.
  */
 
-import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { $ } from "bun";
 import type { Overlay } from "./runner.ts";
 
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
@@ -18,48 +18,56 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	await fs.mkdir(upper);
 	await fs.mkdir(work);
 
+	const wrap = (command: string[], cwd: string) => [
+		bwrap,
+		"--die-with-parent", // so killing bwrap also kills the program
+		"--dev-bind", "/", "/",
+		"--overlay-src", repo,
+		"--overlay", upper, work, repo,
+		"--chdir", cwd, // resolve the working directory again, inside the overlay
+		"--",
+		...command,
+	];
+
 	return {
 		originalDir: repo,
 		writableDir: upper,
 		gitExcludes: [],
-		wrap: (command, cwd) => [
-			bwrap,
-			"--die-with-parent", // so killing bwrap on timeout also kills the program
-			"--dev-bind", "/", "/",
-			"--overlay-src", repo,
-			"--overlay", upper, work, repo,
-			"--chdir", cwd, // resolve the working directory again, inside the overlay
-			"--",
-			...command,
-		],
-		changes: () => changesInUpperDir(upper),
+		wrap,
+		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(repo, wrap))],
 		close: async () => {},
 	};
 }
 
-/**
- * Every file in the upper directory has changed. Deletions are recorded as "whiteouts". Writes git
- * made to .git (e.g. refreshing its index) are left out: they stay in the overlay.
- */
-async function changesInUpperDir(upper: string) {
-	const changes: { file: string; contents: Uint8Array | null }[] = [];
+/** Regular files in the upper directory, except git's own writes to .git (e.g. refreshing its index). */
+async function writtenFiles(upper: string) {
+	const written: { file: string; contents: Uint8Array | null }[] = [];
 	for (const entry of await fs.readdir(upper, { recursive: true, withFileTypes: true })) {
 		const fullPath = path.join(entry.parentPath, entry.name);
-		if (entry.isDirectory() || path.relative(upper, fullPath).startsWith(".git/")) continue;
-		const stats = await fs.lstat(fullPath);
-		const contents = isWhiteout(stats) ? null : await readFile(fullPath);
-		changes.push({ file: path.relative(upper, fullPath), contents });
+		const file = path.relative(upper, fullPath);
+		if (!entry.isFile() || file.startsWith(".git/")) continue;
+		written.push({ file, contents: await Bun.file(fullPath).bytes() });
 	}
-	return changes;
+	return written;
 }
 
-/** overlayfs records a deletion as a character device with device number 0/0. */
-function isWhiteout(stats: Stats) {
-	return stats.isCharacterDevice() && stats.rdev === 0;
-}
+/**
+ * Files git saw before that are gone in the overlay, found by asking git inside it. (overlayfs's own
+ * records aren't enough: deleting a directory leaves one "whiteout" for all of it, and recreating a
+ * directory hides everything that was in it.)
+ */
+async function deletedFiles(repo: string, wrap: (command: string[], cwd: string) => string[]) {
+	const untracked = ["git", "ls-files", "-z", "--others", "--exclude-standard"];
+	const [trackedGone, untrackedBefore, untrackedAfter] = await Promise.all([
+		$`${wrap(["git", "ls-files", "-z", "--deleted"], repo)}`.env({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).text(),
+		$`${untracked}`.cwd(repo).text(),
+		$`${wrap(untracked, repo)}`.env({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).text(),
+	]);
 
-/** A regular file's contents, or null if there's no regular file there. */
-async function readFile(file: string): Promise<Uint8Array | null> {
-	const stats = await fs.lstat(file).catch(() => null);
-	return stats?.isFile() ? Bun.file(file).bytes() : null;
+	const stillThere = new Set(untrackedAfter.split("\0"));
+	const deleted = [
+		...trackedGone.split("\0"),
+		...untrackedBefore.split("\0").filter((file) => !stillThere.has(file)),
+	];
+	return deleted.filter(Boolean).map((file) => ({ file, contents: null }));
 }

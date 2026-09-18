@@ -22,12 +22,12 @@ You also need Bun, git, and either [bubblewrap](https://github.com/containers/bu
 Anything in Bun or Node, plus these globals (no imports):
 
 ```ts
-await $`bun test src/api.test.ts`                   // Bun's shell
-await glob("src/**/*.ts")                           // → ["src/a.ts", …]
-await grep("oldApi(", "src")                        // → [{ file, line, text }, …]
-await sg.find("oldApi($$$ARGS)", "src")             // ast-grep search
-await sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src")
-await grit("`console.log($x)` => `logger.info($x)`", "src")
+await $`bun test src/api.test.ts`                  // Bun's shell (the only async one)
+glob("src/**/*.ts")                                // → ["src/a.ts", …]
+grep("oldApi(", "src")                             // → [{ file, line, text }, …]
+sg.find("oldApi($$$ARGS)", "src")                  // ast-grep search
+sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src")
+grit("`console.log($x)` => `logger.info($x)`", "src")
 ```
 
 ## Options
@@ -40,5 +40,9 @@ await grit("`console.log($x)` => `logger.info($x)`", "src")
 
 - Only files git tracks, or would track, are applied.
 - On macOS your repo is briefly swapped for the overlay while a program runs (about 150 ms), so your
-  editor may notice. On Linux nothing outside the program sees it (about 10 ms).
+  editor may notice. On Linux nothing outside the program sees it (about 15 ms).
 - To try it with only `read` and `code`: `pi --tools read,code`.
+
+## Developing
+
+`npm run check` type-checks (TypeScript 7) and lints (oxlint).

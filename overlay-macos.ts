@@ -5,7 +5,8 @@
  *    symlinked back, so reading them bypasses the overlay (AgentFS copies every file it opens);
  * 3. AgentFS serves an overlay of the base over NFS, mounted at the repository's path;
  * 4. the program runs under sandbox-exec, which stops it writing to the base or to .git.
- * close() puts everything back. If a run crashed part-way, the next one puts everything back first.
+ * close() puts everything back. <repo>.pi-shared doubles as a lock: another run on the same repository
+ * waits for this one, and if a run crashed part-way, the next one puts everything back first.
  */
 
 import * as fs from "node:fs/promises";
@@ -25,7 +26,7 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 	if (!agentfs) throw new Error("The code tool needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
 
 	const dirs = { repo, base: `${repo}.pi-base`, shared: `${repo}.pi-shared` };
-	await restore(dirs);
+	await takeLock(dirs);
 	try {
 		const shared = await moveAside(dirs);
 		const database = await createDatabase(agentfs, dirs.base, tempDir);
@@ -47,11 +48,31 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 	}
 }
 
+/**
+ * Creating a directory is atomic, so whoever creates <repo>.pi-shared owns the repository until
+ * restore() removes it. Waits while another run is alive; repairs a run that crashed.
+ */
+async function takeLock(dirs: Dirs) {
+	for (let attempt = 0; attempt < 3000; attempt++) {
+		try {
+			await fs.mkdir(dirs.shared);
+			await writeState(dirs, { runnerPid: process.pid, shared: [] });
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		const state = await readState(dirs).catch(() => null);
+		const crashed = state ? !isAlive(state.runnerPid) : await olderThan(dirs.shared, 1000);
+		if (crashed) await restore(dirs);
+		else await Bun.sleep(20);
+	}
+	throw new Error("Another code run on this repository didn't finish within a minute.");
+}
+
 /** Steps 1 and 2. Records what it did in <repo>.pi-shared/state.json, so restore() can undo it. */
 async function moveAside(dirs: Dirs): Promise<string[]> {
 	const shared = await listSharedEntries(dirs.repo);
-	await fs.mkdir(dirs.shared);
-	await writeState(dirs, { shared });
+	await writeState(dirs, { ...(await readState(dirs)), shared });
 
 	await fs.rename(dirs.repo, dirs.base);
 	await fs.mkdir(dirs.repo);
@@ -73,7 +94,7 @@ async function listSharedEntries(repo: string): Promise<string[]> {
 	const tracked = trackedOutput.split("\0");
 
 	const shared = [".git"];
-	for (const dir of ignoredDirs.map((entry) => entry.slice(0, -1)).sort()) {
+	for (const dir of ignoredDirs.map((entry) => entry.slice(0, -1)).toSorted()) {
 		const insideShared = shared.some((entry) => dir.startsWith(`${entry}/`));
 		const containsTracked = tracked.some((file) => file.startsWith(`${dir}/`));
 		if (!insideShared && !containsTracked) shared.push(dir);
@@ -151,10 +172,10 @@ async function filesUnder(original: string): Promise<string[]> {
 	return fs.readdir(original, { recursive: true });
 }
 
-/** Unmounts, stops the server and renames everything back. Does nothing if there's nothing to undo. */
+/** Unmounts, stops the server, renames everything back and releases the lock. */
 async function restore(dirs: Dirs) {
-	if (!(await Bun.file(path.join(dirs.shared, "state.json")).exists())) return;
-	const state = await readState(dirs);
+	if (!(await exists(dirs.shared))) return;
+	const state = await readState(dirs).catch((): State => ({ runnerPid: 0, shared: [] }));
 
 	await $`umount -f ${dirs.repo}`.nothrow().quiet(); // -f: a leftover subprocess may still have files open
 	if (state.serverPid) {
@@ -176,13 +197,14 @@ async function restore(dirs: Dirs) {
 	}
 
 	// Never delete <repo>.pi-shared recursively: during a run it holds the real node_modules and .git.
-	await fs.rm(path.join(dirs.shared, "state.json"));
+	await fs.rm(path.join(dirs.shared, "state.json"), { force: true });
 	await removeEmptyDirectories(dirs.shared);
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────────────
 
 interface State {
+	runnerPid: number;
 	shared: string[];
 	serverPid?: number;
 }
@@ -215,6 +237,20 @@ async function removeEmptyDirectories(dir: string) {
 async function readFile(file: string): Promise<Uint8Array | null> {
 	const stats = await fs.lstat(file).catch(() => null);
 	return stats?.isFile() ? Bun.file(file).bytes() : null;
+}
+
+function isAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0); // signal 0 only checks the process exists
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function olderThan(file: string, ms: number): Promise<boolean> {
+	const stats = await fs.stat(file).catch(() => null);
+	return !stats || Date.now() - stats.mtimeMs > ms;
 }
 
 async function exists(file: string): Promise<boolean> {
