@@ -213,6 +213,34 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("newApi(2)");
 	});
 
+	test("sg has ast-grep's own API, and programs can import @ast-grep/napi", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`import { parse, Lang } from "@ast-grep/napi";
+			const source = await Bun.file("src/a.ts").text();
+			console.log(sg.parse(sg.Lang.TypeScript, source).root().findAll("oldApi($A)").length);
+			console.log(parse(Lang.TypeScript, source).root().findAll("oldApi($A)").length);`,
+		);
+
+		expect(result.output.trim()).toBe("1\n1");
+	});
+
+	test("a replacement function can read captures from the match itself, and return false to skip", async () => {
+		const repo = await makeRepo(FILES);
+		await run(repo, `sg.rewrite("oldApi($A)", (m) => m.A === "1" && \`newApi(\${m.A})\`, "src");`);
+
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toContain("newApi(1)");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("oldApi(2)");
+	});
+
+	test("glob takes the directory as a string or as { cwd }", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `console.log(JSON.stringify([glob("a.ts", "src"), glob("a.ts", { cwd: "src" })]));`);
+
+		expect(JSON.parse(result.output)).toEqual([["src/a.ts"], ["src/a.ts"]]);
+	});
+
 	test("sg warns when the files it's given contain no JS/TS files", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, `sg.find("oldApi($A)", ["docs"]);`);

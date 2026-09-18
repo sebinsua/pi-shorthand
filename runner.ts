@@ -276,6 +276,9 @@ function programEnvironment(excludesFile: string) {
 	return {
 		PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`,
 		NO_COLOR: "1",
+		// So programs can import the extension's own packages, e.g. "@ast-grep/napi". A repository's own
+		// node_modules still wins: NODE_PATH is only a fallback.
+		NODE_PATH: [path.join(import.meta.dir, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
 		PI_CODE_LOG: LOG_FILE, // the prelude logs each command and helper call here
 		PI_CODE_RUN: RUN_ID,
 		GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it

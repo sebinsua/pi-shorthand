@@ -27,6 +27,7 @@ glob("src/**/*.ts"); // → ["src/a.ts", …]
 grep("oldApi(", "src"); // → [{ file, line, text }, …]
 sg.find("oldApi($$$ARGS)", "src"); // ast-grep search
 sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src");
+sg.parse(sg.Lang.TypeScript, source); // ast-grep's own API (or import from "@ast-grep/napi")
 grit("`console.log($x)` => `logger.info($x)`", "src");
 ```
 

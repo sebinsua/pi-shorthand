@@ -2,6 +2,9 @@
  * Preloaded into every `code` program. On top of ordinary Bun and Node it adds these globals:
  * $ (Bun shell), glob, grep, sg (ast-grep) and grit (GritQL).
  *
+ * sg is ast-grep's own JavaScript API (@ast-grep/napi: sg.parse, sg.Lang, sg.findInFiles, …) plus two
+ * shortcuts, sg.find and sg.rewrite. Programs can also import "@ast-grep/napi" directly.
+ *
  * Everything except $ is synchronous: models often call helpers like these without await.
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
  * and build output are left out on every platform.
@@ -11,6 +14,7 @@
  */
 
 import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
 
@@ -46,8 +50,12 @@ const $ = new Proxy(bunShell, {
 	},
 });
 
-/** Files git sees under dir that match a glob pattern, relative to the working directory, sorted. */
-function glob(pattern: string, dir = "."): string[] {
+/**
+ * Files git sees under a directory that match a glob pattern, relative to the working directory,
+ * sorted. The directory can also be given as { cwd }, as with Bun's Glob.
+ */
+function glob(pattern: string, where: string | { cwd?: string } = "."): string[] {
+	const dir = typeof where === "string" ? where : (where.cwd ?? ".");
 	const output = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", dir]);
 	const matcher = new Glob(dir === "." ? pattern : `${dir.replace(/\/$/, "")}/${pattern}`);
 	return [...new Set(output.split("\0"))].filter((file) => file && matcher.match(file)).toSorted();
@@ -96,13 +104,17 @@ const LANGUAGES: Record<string, Lang> = {
 	css: Lang.Css,
 };
 
-interface SgMatch {
+/**
+ * A match. Its captures are in `vars` and also directly on it (capture names are uppercase, so they
+ * can't clash with the other fields): both `m.vars.ARGS` and `m.ARGS` work.
+ */
+type SgMatch = {
 	file: string;
 	line: number;
 	text: string;
 	vars: Record<string, string>; // captured metavariables, e.g. vars.ARGS for $$$ARGS
 	node: SgNode;
-}
+} & Record<string, unknown>;
 
 /**
  * The JS/TS files to search. `files` is a file, a directory (the JS/TS files in it), a glob, or a list
@@ -115,9 +127,9 @@ function sourceFiles(helper: string, files: string | string[]): string[] {
 		if (stats?.isDirectory()) return glob("**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}", entry);
 		return glob(entry);
 	});
-	const sourceFiles = found.filter((file) => LANGUAGES[file.split(".").pop()!]);
-	if (sourceFiles.length === 0) console.error(`warning: ${helper} found no JS/TS files in ${JSON.stringify(files)}`);
-	return sourceFiles;
+	const parseable = found.filter((file) => LANGUAGES[file.split(".").pop()!]);
+	if (parseable.length === 0) console.error(`warning: ${helper} found no JS/TS files in ${JSON.stringify(files)}`);
+	return parseable;
 }
 
 function find(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch[] {
@@ -132,12 +144,13 @@ function find(pattern: string | NapiConfig, files: string | string[] = "."): SgM
 
 /**
  * Rewrite matches in place. `replacement` is either a template using the same $X / $$$X
- * metavariables, or a function returning the new text (or null/undefined to leave the match alone).
+ * metavariables, or a function returning the new text. A function returning anything other than a
+ * string (undefined, null, false) leaves that match alone, so `(m) => cond && \`…\`` works.
  * Returns the number of matches rewritten.
  */
 function rewrite(
 	pattern: string | NapiConfig,
-	replacement: string | ((match: SgMatch) => string | null | undefined),
+	replacement: string | ((match: SgMatch) => unknown),
 	files: string | string[] = ".",
 ): number {
 	let count = 0;
@@ -152,7 +165,7 @@ function rewrite(
 				typeof replacement === "function"
 					? replacement(match)
 					: replacement.replace(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g, (text, _, name) => match.vars[name] ?? text);
-			if (newText != null) edits.push(node.replace(newText)); // null or undefined: leave it alone
+			if (typeof newText === "string") edits.push(node.replace(newText)); // anything else (undefined, null, false) leaves it
 		}
 		if (edits.length === 0) continue;
 
@@ -186,7 +199,7 @@ function toMatch(file: string, node: SgNode, source: string, pattern: string | N
 			if (captured) vars[name] = captured.text();
 		}
 	}
-	return { file, line: node.range().start.line + 1, text: node.text(), vars, node };
+	return { ...vars, file, line: node.range().start.line + 1, text: node.text(), vars, node };
 }
 
 // ── GritQL ────────────────────────────────────────────────────────────────────────
@@ -220,6 +233,7 @@ Object.assign(globalThis, {
 	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
 	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
 	sg: {
+		...astGrep,
 		find: (...args: Parameters<typeof find>) => logged("sg.find", args, () => find(...args)),
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},

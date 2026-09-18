@@ -29,8 +29,9 @@ Use it when a change takes several deterministic steps (reads, searches, multi-f
 The program runs in the working directory, and sees the repository at its usual path. Top-level await works, and so do ordinary Bun and Node APIs. These globals are synchronous, and see the files git sees (not node_modules or ignored files):
 - glob(pattern, dir?) → string[]
 - grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
-- sg.find(pattern, files?) → {file, line, text, vars}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a directory, glob or list (JS/TS).
-- sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X.
+- sg.find(pattern, files?) → {file, line, text, vars}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a file, directory, glob or a list of them (JS/TS).
+- sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (its captures are on it: m.X) and returns the new text, or null to leave it.
+- sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
 - grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[], e.g. grit("\`a($x)\` => \`b($x)\`", "src")
 Bun's shell $ needs await: await $\`bun test src/foo.test.ts\`. You can also run the ast-grep, grit and git CLIs with it. For pattern syntax, see the code-patterns skill.
 

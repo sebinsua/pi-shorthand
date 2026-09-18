@@ -7,9 +7,9 @@
 	"scripts": {
 		"test": "bun test",
 		"typecheck": "tsc -p .",
-		"lint": "oxlint",
+		"lint": "oxlint --deny-warnings",
 		"format": "oxfmt",
-		"check": "tsc -p . && oxlint && oxfmt --check",
+		"check": "tsc -p . && oxlint --deny-warnings && oxfmt --check",
 		"prepare": "git config core.hooksPath .githooks"
 	},
 	"dependencies": {

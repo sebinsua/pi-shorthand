@@ -7,7 +7,8 @@ description: Pattern syntax for the code tool's sg and grit helpers. Use when wr
 
 The `code` tool's description covers its API. Read these only when you need them:
 
-- [ast-grep.md](ast-grep.md): `sg.find` / `sg.rewrite` patterns, rule objects, and other languages.
+- [ast-grep.md](ast-grep.md): `sg.find` / `sg.rewrite` patterns, rule objects, ast-grep's own API
+  (`sg.parse`, …) for edits a pattern can't express, and other languages.
 - [gritql.md](gritql.md): `grit` patterns, rewrites and `where` clauses.
 
 With the default rollback, a failed program changes nothing, so fix the pattern and run it again
