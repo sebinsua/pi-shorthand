@@ -8,16 +8,14 @@ import { closeSync, openSync, readSync, statSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, keyHint, truncateHead, truncateTail } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, truncateHead, truncateTail } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
+import { callLine, countLines, resultLines } from "./display.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
 // Where runner.ts logs each step. (Not imported from runner.ts, which only runs under Bun.)
 const LOG_FILE = path.join(homedir(), ".cache", "pi-code", "runs.jsonl");
-
-// Diffs up to this many lines are shown in full; longer ones are collapsed to a file list.
-const MAX_INLINE_DIFF_LINES = 150;
 
 // Runs typically take well under a second. Programs that run tests or builds pass a longer timeout.
 const DEFAULT_TIMEOUT_SECONDS = 2;
@@ -41,6 +39,13 @@ Throw or exit non-zero to fail. rollback decides what a failure undoes:
 The default timeout is 2 seconds; pass a longer timeout when the program runs tests or builds. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Print what you need to know (counts, assertions), not whole files.`;
 
 export default function (pi: ExtensionAPI) {
+	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
+	// rather than throwing, since a thrown error loses them.)
+	pi.on("tool_result", async (event) => {
+		const run = event.details as RunResult | undefined;
+		if (event.toolName === "code" && run && run.exitCode !== 0) return { isError: true };
+	});
+
 	pi.registerTool({
 		name: "code",
 		label: "Code",
@@ -93,7 +98,7 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("code ")) + theme.fg("muted", args.title ?? ""), 0, 0);
+			return new Text(callLine(args, theme), 0, 0);
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
@@ -103,31 +108,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const run = result.details as RunResult | undefined;
 			if (!run) return new Text(theme.fg("muted", "running…"), 0, 0);
-			const ok = run.exitCode === 0;
-
-			const lines = [theme.fg(ok ? "success" : "error", summaryLine(run))];
-			if (run.rolledBack.length > 0) {
-				lines.push(theme.fg("warning", `rolled back (half-written): ${run.rolledBack.join(", ")}`));
-			}
-			for (const warning of run.warnings) lines.push(theme.fg("warning", `warning: ${warning}`));
-			for (const command of run.stillRunning) lines.push(theme.fg("warning", `still running when killed: ${command}`));
-
-			// Output: the tail on failure, all of it when expanded.
-			if (expanded && run.output.trim()) {
-				lines.push(theme.fg(ok ? "dim" : "error", run.output.trimEnd()));
-			} else if (!ok && run.output.trim()) {
-				lines.push(theme.fg("error", run.output.trim().split("\n").slice(-8).join("\n")));
-			}
-
-			const diffLines = run.changes.flatMap((change) => change.patch.split("\n"));
-			if (expanded || diffLines.length <= MAX_INLINE_DIFF_LINES) {
-				for (const line of diffLines) lines.push(theme.fg(diffLineColor(line), line));
-			} else {
-				for (const change of run.changes) lines.push(theme.fg("muted", fileLine(change)));
-				lines.push(theme.fg("dim", `${diffLines.length}-line diff (${keyHint("app.tools.expand", "to expand")})`));
-			}
-
-			return new Text(lines.join("\n"), 0, 0);
+			return new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
 		},
 	});
 }
@@ -223,27 +204,6 @@ function fileLine(change: FileChange): string {
 	return `  ${letter} ${change.path} +${additions} −${deletions}`;
 }
 
-/** Added and removed lines in a patch. Only lines after the first "@@" count, not the ---/+++ headers. */
-function countLines(patch: string) {
-	let additions = 0;
-	let deletions = 0;
-	let inHunks = false;
-	for (const line of patch.split("\n")) {
-		if (line.startsWith("@@")) inHunks = true;
-		else if (inHunks && line.startsWith("+")) additions++;
-		else if (inHunks && line.startsWith("-")) deletions++;
-	}
-	return { additions, deletions };
-}
-
-function diffLineColor(line: string) {
-	if (line.startsWith("diff ")) return "accent";
-	if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) return "dim";
-	if (line.startsWith("+")) return "toolDiffAdded";
-	if (line.startsWith("-")) return "toolDiffRemoved";
-	return "toolDiffContext";
-}
-
 function textForModel(run: RunResult, toolCallId: string): string {
 	const lines = [summaryLine(run)];
 
@@ -257,6 +217,8 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	}
 	if (run.stillRunning.length > 0) {
 		lines.push("Still running when it was killed:", ...run.stillRunning.map((command) => `  ${command}`));
+	} else if (run.lastStep) {
+		lines.push(`Its last logged step before the timeout: ${run.lastStep}`);
 	}
 
 	const output = outputForModel(run, toolCallId);

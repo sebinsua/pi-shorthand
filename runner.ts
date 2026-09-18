@@ -40,7 +40,11 @@ export interface RunResult {
 	changes: FileChange[]; // everything the program changed
 	applied: string[]; // the changed files that were applied
 	rolledBack: string[]; // rollback "file": changed files left half-written, so not applied
-	stillRunning: string[]; // on timeout: commands the program was still running, e.g. "find / -name x (running 58s)"
+	stillRunning: string[]; // on timeout: commands the program was still running, e.g. "find / -name x (for 58s)"
+	lastStep?: string; // on timeout: the last step the program logged, e.g. "$ find / -name x" or "grep (18 ms)"
+	errorLine?: string; // on failure: the program's line the error came from, e.g. "line 3: throw new Error(…)"
+	timeoutMs: number;
+	rollback: RunOptions["rollback"];
 }
 
 export interface FileChange {
@@ -113,6 +117,10 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			applied: applied.map((change) => shown(change.file)),
 			rolledBack: rolledBack.map((change) => shown(change.file)),
 			stillRunning: program.stillRunning,
+			lastStep: program.timedOut ? await lastLoggedStep() : undefined,
+			errorLine: program.exitCode !== 0 ? failingLine(options.program, program.output) : undefined,
+			timeoutMs: options.timeoutMs,
+			rollback: options.rollback,
 		};
 	} finally {
 		await fs.rm(tempDir, { recursive: true, force: true });
@@ -254,9 +262,40 @@ async function commandsRunning(processGroup: number): Promise<string[]> {
 		if (!match) continue;
 		const [, elapsed, command] = match;
 		if (command.includes(PROGRAM_FILE) || /^\S*bwrap /.test(command)) continue;
-		commands.push(`${command.slice(0, 200)} (running ${elapsed})`);
+		commands.push(`${command.slice(0, 200)} (for ${seconds(elapsed)}s)`);
 	}
 	return commands;
+}
+
+/**
+ * The line of the program an error came from, found from Bun's "at program.ts:3:11" rather than its
+ * source excerpt, which leaves out long lines and then mislabels the ones around them.
+ */
+function failingLine(program: string, output: string): string | undefined {
+	const location = output.match(/\bprogram\.ts:(\d+):\d+/);
+	if (!location) return undefined;
+	const text = program.split("\n")[Number(location[1]) - 1]?.trim();
+	return text ? `line ${location[1]}: ${text}`.slice(0, 160) : undefined;
+}
+
+/** ps's elapsed time, "[[dd-]hh:]mm:ss", in seconds. */
+function seconds(elapsed: string): number {
+	const [days, clock] = elapsed.includes("-") ? elapsed.split("-") : ["0", elapsed];
+	const parts = clock.split(":").map(Number);
+	const [hours, minutes, secs] = [0, 0, ...parts].slice(-3);
+	return Number(days) * 86400 + hours * 3600 + minutes * 60 + secs;
+}
+
+/** The last command or helper call this run's program logged, e.g. "$ find / -name x". */
+async function lastLoggedStep(): Promise<string | undefined> {
+	const lines = (await Bun.file(LOG_FILE).text()).trimEnd().split("\n").slice(-500);
+	for (const line of lines.toReversed()) {
+		const event = JSON.parse(line);
+		if (event.run !== RUN_ID) continue;
+		if (event.event === "command") return `$ ${event.command}`;
+		if (event.event === "helper") return `${event.helper}(${event.args.slice(1, -1)}) (${event.ms} ms)`;
+	}
+	return undefined;
 }
 
 function killGroup(child: ChildProcess) {

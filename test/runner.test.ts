@@ -185,6 +185,23 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(await gitStatus(repo)).toBe("");
 	});
 
+	test("reports the program line an error came from, even a long one", async () => {
+		const repo = await makeRepo(FILES);
+		const long = `if (true) throw new Error("${"x".repeat(150)}");`;
+		const result = await run(repo, `const a = 1;\nconst b = 2;\n${long}`);
+
+		expect(result.errorLine?.startsWith("line 3: if (true) throw new Error(")).toBe(true);
+	});
+
+	test("reports the last step a program logged before timing out in its own code", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `grep("oldApi", "src");\nwhile (true) {}`, { timeoutMs: 1000 });
+
+		expect(result.timedOut).toBe(true);
+		expect(result.stillRunning).toEqual([]);
+		expect(result.lastStep).toMatch(/^grep\("oldApi","src"\) \(\d+ ms\)$/);
+	});
+
 	test("warns about $ commands that aren't awaited", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, "$`touch src/never.ts`;");
