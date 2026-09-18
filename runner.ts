@@ -24,6 +24,7 @@ import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 
 export interface RunOptions {
+	runId: string; // identifies this run's events in the log
 	cwd: string;
 	program: string;
 	timeoutMs: number;
@@ -70,7 +71,7 @@ const PRELUDE = path.join(import.meta.dir, "prelude.ts");
 const BIN_DIR = path.join(import.meta.dir, "node_modules", ".bin");
 const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much the model sees
 const LOG_FILE = path.join(homedir(), ".cache", "pi-code", "runs.jsonl");
-const RUN_ID = Math.random().toString(36).slice(2, 8);
+let RUN_ID = ""; // set from RunOptions when the runner starts
 
 /** Appends one event to the log, e.g. log("program exited", { exitCode: 0 }). */
 function log(event: string, details: Record<string, unknown> = {}) {
@@ -388,6 +389,7 @@ if (import.meta.main) {
 	const abort = new AbortController();
 	process.on("SIGTERM", () => abort.abort());
 	const options: RunOptions = await Bun.stdin.json();
+	RUN_ID = options.runId;
 	try {
 		console.log(JSON.stringify(await run(options, abort.signal)));
 	} catch (error) {

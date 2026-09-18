@@ -4,14 +4,17 @@
  */
 
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { type ExtensionAPI, keyHint, truncateHead, truncateTail } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
+
+// Where runner.ts logs each step. (Not imported from runner.ts, which only runs under Bun.)
+const LOG_FILE = path.join(homedir(), ".cache", "pi-code", "runs.jsonl");
 
 // Diffs up to this many lines are shown in full; longer ones are collapsed to a file list.
 const MAX_INLINE_DIFF_LINES = 150;
@@ -59,16 +62,29 @@ export default function (pi: ExtensionAPI) {
 			timeout: Type.Optional(Type.Number({ description: "Seconds before the program is killed (default 2)" })),
 		}),
 
-		async execute(toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			// While it runs, show how long it's been going and the latest step from the log.
+			const runId = Math.random().toString(36).slice(2, 10);
+			const startedAt = Date.now();
+			const progress = setInterval(() => {
+				const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)} s`;
+				const latest = latestStep(runId);
+				onUpdate?.({
+					content: [{ type: "text", text: "running" }],
+					details: { progress: latest ? `${elapsed} · ${latest}` : elapsed },
+				});
+			}, 500);
+
 			const result = await runWithBun(
 				{
+					runId,
 					cwd: ctx.cwd,
 					program: params.program,
 					timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
 					rollback: params.rollback ?? "all",
 				},
 				signal,
-			);
+			).finally(() => clearInterval(progress));
 			return {
 				content: [{ type: "text", text: textForModel(result, toolCallId) }],
 				details: result,
@@ -80,8 +96,12 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
+			if (isPartial) {
+				const progress = (result.details as { progress?: string } | undefined)?.progress;
+				return new Text(theme.fg("muted", progress ? `running… ${progress}` : "running…"), 0, 0);
+			}
 			const run = result.details as RunResult | undefined;
-			if (isPartial || !run) return new Text(theme.fg("muted", "running…"), 0, 0);
+			if (!run) return new Text(theme.fg("muted", "running…"), 0, 0);
 			const ok = run.exitCode === 0;
 
 			const lines = [theme.fg(ok ? "success" : "error", summaryLine(run))];
@@ -144,6 +164,33 @@ function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<RunResul
 
 		runner.stdin.end(JSON.stringify(options));
 	});
+}
+
+/**
+ * The latest step logged for a run, e.g. "$ find / -name x" or "grep (18 ms)". Reads only the end of
+ * the log, which is shared by every run.
+ */
+function latestStep(runId: string): string | undefined {
+	let tail: string;
+	try {
+		const size = statSync(LOG_FILE).size;
+		const length = Math.min(size, 64 * 1024);
+		const buffer = Buffer.alloc(length);
+		const file = openSync(LOG_FILE, "r");
+		readSync(file, buffer, 0, length, size - length);
+		closeSync(file);
+		tail = buffer.toString("utf8");
+	} catch {
+		return undefined; // no log yet
+	}
+
+	const lines = tail.split("\n").filter((line) => line.includes(`"run":"${runId}"`));
+	const last = lines.at(-1);
+	if (!last) return undefined;
+	const event = JSON.parse(last);
+	if (event.event === "command") return `$ ${event.command}`;
+	if (event.event === "helper") return `${event.helper} (${event.ms} ms)`;
+	return event.event;
 }
 
 /** e.g. "✓ exit 0 · 326 ms · 6 files · +48 −17 · applied" */
