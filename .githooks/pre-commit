@@ -1,0 +1,3 @@
+#!/bin/sh
+# Type-check, lint and check formatting before each commit. Fix formatting with `npm run format`.
+exec npm run --silent check

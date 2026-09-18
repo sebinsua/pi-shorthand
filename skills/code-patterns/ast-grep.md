@@ -9,8 +9,8 @@ expression or statement (`oldApi($$$A)`, `const $X = $Y`), not a fragment.
 - `$_` matches one node without capturing it.
 
 ```ts
-sg.find("oldApi($$$ARGS)", "src");                              // [{ file, line, text, vars, node }]
-sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src");         // template
+sg.find("oldApi($$$ARGS)", "src"); // [{ file, line, text, vars, node }]
+sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src"); // template
 sg.rewrite("oldApi($A)", (m) => (m.vars.A === "0" ? undefined : `newApi(${m.vars.A})`), "src");
 ```
 
@@ -23,7 +23,13 @@ property names (`obj.oldName`, `{ oldName: 1 }`, interface fields). To rename a 
 appears in code (but not in strings), match it by kind:
 
 ```ts
-const anyName = ["identifier", "property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern", "type_identifier"];
+const anyName = [
+	"identifier",
+	"property_identifier",
+	"shorthand_property_identifier",
+	"shorthand_property_identifier_pattern",
+	"type_identifier",
+];
 sg.rewrite({ rule: { regex: "^oldName$", any: anyName.map((kind) => ({ kind })) } }, "newName", "src");
 ```
 
@@ -34,7 +40,10 @@ When a pattern alone can't say it, pass a rule instead:
 ```ts
 sg.find({ rule: { kind: "import_statement" } }, "src");
 sg.find({ rule: { pattern: "console.log($$$A)", inside: { kind: "function_declaration", stopBy: "end" } } }, "src");
-sg.find({ rule: { pattern: "console.log($$$A)", not: { inside: { kind: "function_declaration", stopBy: "end" } } } }, "src");
+sg.find(
+	{ rule: { pattern: "console.log($$$A)", not: { inside: { kind: "function_declaration", stopBy: "end" } } } },
+	"src",
+);
 ```
 
 `kind` names come from tree-sitter (`function_declaration`, `call_expression`, `import_statement`,
@@ -46,5 +55,5 @@ sg.find({ rule: { pattern: "console.log($$$A)", not: { inside: { kind: "function
 
 ```ts
 const matches = await $`ast-grep run -p 'print($A)' -l python --json=compact src`.json();
-await $`ast-grep run -p 'print($A)' -r 'log($A)' -l python -U src`;  // -U applies the rewrite
+await $`ast-grep run -p 'print($A)' -r 'log($A)' -l python -U src`; // -U applies the rewrite
 ```

@@ -41,7 +41,8 @@ export default function (pi: ExtensionAPI) {
 		name: "code",
 		label: "Code",
 		description: DESCRIPTION,
-		promptSnippet: "Make a change with one Bun program, run as a transaction: its edits are kept only if it exits 0, so put your checks inside it",
+		promptSnippet:
+			"Make a change with one Bun program, run as a transaction: its edits are kept only if it exits 0, so put your checks inside it",
 		promptGuidelines: [
 			"Use code when several related reads, searches, edits or checks can be done without looking at intermediate results: put that logic in one program rather than many read/edit/bash calls.",
 			"Don't use code to explore when you need to see results before deciding what to do.",
@@ -51,7 +52,8 @@ export default function (pi: ExtensionAPI) {
 			program: Type.String({ description: "TypeScript program run with Bun (top-level await allowed)" }),
 			rollback: Type.Optional(
 				StringEnum(["all", "file"] as const, {
-					description: 'On failure: "all" (default) applies nothing; "file" applies finished files and rolls back half-written ones',
+					description:
+						'On failure: "all" (default) applies nothing; "file" applies finished files and rolls back half-written ones',
 				}),
 			),
 			timeout: Type.Optional(Type.Number({ description: "Seconds before the program is killed (default 2)" })),
@@ -241,7 +243,9 @@ function diffForModel(run: RunResult, toolCallId: string): string[] {
 	if (truncated.truncated) {
 		const fullDiffPath = path.join(tmpdir(), `pi-code-${toolCallId}.diff`);
 		writeFileSync(fullDiffPath, diff);
-		lines.push(`[diff truncated at ${truncated.outputLines} of ${truncated.totalLines} lines; full diff: ${fullDiffPath}]`);
+		lines.push(
+			`[diff truncated at ${truncated.outputLines} of ${truncated.totalLines} lines; full diff: ${fullDiffPath}]`,
+		);
 	}
 	return lines;
 }

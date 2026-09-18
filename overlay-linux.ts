@@ -21,10 +21,17 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	const wrap = (command: string[], cwd: string) => [
 		bwrap,
 		"--die-with-parent", // so killing bwrap also kills the program
-		"--dev-bind", "/", "/",
-		"--overlay-src", repo,
-		"--overlay", upper, work, repo,
-		"--chdir", cwd, // resolve the working directory again, inside the overlay
+		"--dev-bind",
+		"/",
+		"/",
+		"--overlay-src",
+		repo,
+		"--overlay",
+		upper,
+		work,
+		repo,
+		"--chdir",
+		cwd, // resolve the working directory again, inside the overlay
 		"--",
 		...command,
 	];
@@ -65,9 +72,6 @@ async function deletedFiles(repo: string, wrap: (command: string[], cwd: string)
 	]);
 
 	const stillThere = new Set(untrackedAfter.split("\0"));
-	const deleted = [
-		...trackedGone.split("\0"),
-		...untrackedBefore.split("\0").filter((file) => !stillThere.has(file)),
-	];
+	const deleted = [...trackedGone.split("\0"), ...untrackedBefore.split("\0").filter((file) => !stillThere.has(file))];
 	return deleted.filter(Boolean).map((file) => ({ file, contents: null }));
 }

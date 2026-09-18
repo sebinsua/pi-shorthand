@@ -22,12 +22,12 @@ You also need Bun, git, and either [bubblewrap](https://github.com/containers/bu
 Anything in Bun or Node, plus these globals (no imports):
 
 ```ts
-await $`bun test src/api.test.ts`                  // Bun's shell (the only async one)
-glob("src/**/*.ts")                                // → ["src/a.ts", …]
-grep("oldApi(", "src")                             // → [{ file, line, text }, …]
-sg.find("oldApi($$$ARGS)", "src")                  // ast-grep search
-sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src")
-grit("`console.log($x)` => `logger.info($x)`", "src")
+await $`bun test src/api.test.ts`; // Bun's shell (the only async one)
+glob("src/**/*.ts"); // → ["src/a.ts", …]
+grep("oldApi(", "src"); // → [{ file, line, text }, …]
+sg.find("oldApi($$$ARGS)", "src"); // ast-grep search
+sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src");
+grit("`console.log($x)` => `logger.info($x)`", "src");
 ```
 
 ## Options
@@ -46,4 +46,5 @@ grit("`console.log($x)` => `logger.info($x)`", "src")
 
 ## Developing
 
-`npm run check` type-checks (TypeScript 7) and lints (oxlint).
+`npm run check` type-checks (TypeScript 7), lints (oxlint) and checks formatting (oxfmt). A pre-commit
+hook runs it; `npm run format` fixes formatting.

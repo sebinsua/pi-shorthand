@@ -133,7 +133,12 @@ const UNAWAITED_SHELL = {
 	rule: {
 		kind: "call_expression",
 		has: { field: "function", regex: "^\\$$" },
-		not: { inside: { any: [{ kind: "await_expression" }, { kind: "return_statement" }], stopBy: { kind: "statement_block" } } },
+		not: {
+			inside: {
+				any: [{ kind: "await_expression" }, { kind: "return_statement" }],
+				stopBy: { kind: "statement_block" },
+			},
+		},
 	},
 };
 
@@ -204,9 +209,7 @@ async function runProgram(
 	if (text.length > MAX_OUTPUT_CHARS) {
 		text = `[${text.length - MAX_OUTPUT_CHARS} earlier characters dropped]\n${text.slice(-MAX_OUTPUT_CHARS)}`;
 	}
-	text = text
-		.replaceAll(programPath, "program.ts")
-		.replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
+	text = text.replaceAll(programPath, "program.ts").replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
 
 	return { exitCode, timedOut, output: text, openForWriting, stillRunning };
 }
@@ -308,7 +311,10 @@ async function filesOpenForWriting(dir: string, processGroup: number): Promise<s
 /** Compares what the overlay reports with the originals. Only files git sees count. */
 async function findChanges(overlay: Overlay): Promise<Change[]> {
 	const candidates = (await overlay.changes()).filter(({ file }) => path.basename(file) !== PROGRAM_FILE);
-	const ignored = await gitIgnored(overlay.originalDir, candidates.map(({ file }) => file));
+	const ignored = await gitIgnored(
+		overlay.originalDir,
+		candidates.map(({ file }) => file),
+	);
 
 	const changes: Change[] = [];
 	for (const { file, contents: after } of candidates) {

@@ -17,7 +17,10 @@ import { $ as bunShell, Glob } from "bun";
 function log(event: string, details: Record<string, unknown>) {
 	const { PI_CODE_LOG, PI_CODE_RUN } = process.env;
 	if (!PI_CODE_LOG) return;
-	appendFileSync(PI_CODE_LOG, `${JSON.stringify({ time: new Date().toISOString(), run: PI_CODE_RUN, event, ...details })}\n`);
+	appendFileSync(
+		PI_CODE_LOG,
+		`${JSON.stringify({ time: new Date().toISOString(), run: PI_CODE_RUN, event, ...details })}\n`,
+	);
 }
 
 /** Runs a helper, logging how long it took and how many results it returned. */
@@ -25,7 +28,12 @@ function logged<T>(helper: string, args: unknown[], run: () => T): T {
 	const startedAt = performance.now();
 	const result = run();
 	const results = Array.isArray(result) ? result.length : result;
-	log("helper", { helper, args: JSON.stringify(args).slice(0, 200), ms: Math.round(performance.now() - startedAt), results });
+	log("helper", {
+		helper,
+		args: JSON.stringify(args).slice(0, 200),
+		ms: Math.round(performance.now() - startedAt),
+		results,
+	});
 	return result;
 }
 

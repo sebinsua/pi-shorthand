@@ -3,10 +3,10 @@
 Code goes in backticks. `$x` captures a node, `=>` rewrites, and `where` adds conditions.
 
 ```ts
-grit("`oldApi($args)`", "src", { dryRun: true });                  // find: [{ file, matches }]
-grit("`console.log($m)` => `logger.info($m)`", "src");             // rewrite in place
+grit("`oldApi($args)`", "src", { dryRun: true }); // find: [{ file, matches }]
+grit("`console.log($m)` => `logger.info($m)`", "src"); // rewrite in place
 grit("`$f($x)` where { $f <: `oldApi` }", "src", { dryRun: true }); // conditions
-grit("`print($x)` => `log($x)`", "src", { lang: "python" });       // other languages
+grit("`print($x)` => `log($x)`", "src", { lang: "python" }); // other languages
 ```
 
 It defaults to JavaScript/TypeScript. Other languages include python, go, rust, java, ruby, css,
