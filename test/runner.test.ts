@@ -430,6 +430,38 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect((await $`git rev-parse HEAD`.cwd(repo).text()).trim()).toBe(head);
 	});
 
+	test("a linked worktree cannot mutate its external Git metadata", async () => {
+		for (const shouldFail of [false, true]) {
+			const main = await makeRepo(FILES);
+			const linkedRoot = await realpath(await mkdtemp(path.join(tmpdir(), "pi-shorthand-linked-")));
+			const linked = path.join(linkedRoot, "repo");
+			await $`git worktree add -q -b ${`issue-1-${randomUUID()}`} ${linked}`.cwd(main);
+			repos.push(linked);
+
+			const gitDir = (await $`git rev-parse --absolute-git-dir`.cwd(linked).text()).trim();
+			const indexBefore = await Bun.file(path.join(gitDir, "index")).bytes();
+			const headBefore = (await $`git rev-parse HEAD`.cwd(linked).text()).trim();
+			const probeRef = `refs/heads/shorthand-probe-${randomUUID()}`;
+			const result = await run(
+				linked,
+				`await Bun.write("src/a.ts", "program edit\\n");
+				const add = await $\`git add src/a.ts\`.nothrow().quiet();
+				const ref = await $\`git update-ref ${probeRef} HEAD\`.nothrow().quiet();
+				console.log({ add: add.exitCode, ref: ref.exitCode });
+				${shouldFail ? 'throw new Error("fail after Git writes");' : ""}`,
+			);
+
+			expect(result.output).not.toContain("add: 0");
+			expect(result.output).not.toContain("ref: 0");
+			expect(await Bun.file(path.join(gitDir, "index")).bytes()).toEqual(indexBefore);
+			expect((await $`git rev-parse HEAD`.cwd(linked).text()).trim()).toBe(headBefore);
+			expect((await $`git show-ref --verify --quiet ${probeRef}`.cwd(linked).nothrow()).exitCode).not.toBe(0);
+			expect(await Bun.file(path.join(linked, "src/a.ts")).text()).toBe(
+				shouldFail ? FILES["src/a.ts"] : "program edit\n",
+			);
+		}
+	});
+
 	test("applies deleting a whole directory", async () => {
 		const repo = await makeRepo({ ...FILES, "src/lib/x.ts": "export {};\n", "src/lib/y.ts": "export {};\n" });
 		const result = await run(repo, "await $`rm -rf src/lib`;");

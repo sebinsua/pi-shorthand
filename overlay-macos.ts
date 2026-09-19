@@ -16,6 +16,7 @@ import type { FilesystemEntry, Overlay } from "./runner.ts";
 export async function openMacOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const agentfs = process.env.AGENTFS_BIN ?? Bun.which("agentfs");
 	if (!agentfs) throw new Error("The code tool needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
+	const gitMetadata = await gitMetadataDirectories(repo);
 
 	const stateFile = await recoveryFile(repo);
 	await recoverCrashedRun(stateFile);
@@ -40,7 +41,12 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 			writableDir: mount,
 			executionDir: mount,
 			gitExcludes: ["._*"],
-			wrap: (command) => ["/usr/bin/sandbox-exec", "-p", sandboxProfile(repo, tempDir, mount, stateFile), ...command],
+			wrap: (command) => [
+				"/usr/bin/sandbox-exec",
+				"-p",
+				sandboxProfile(repo, tempDir, mount, stateFile, gitMetadata),
+				...command,
+			],
 			changes: () => changesInDatabase(agentfs, database, base, mount),
 			close: async () => {
 				if (closed) return;
@@ -190,7 +196,13 @@ async function serveAndMount(
 }
 
 /** The program may write only to its private mount, excluding the real checkout and Git metadata. */
-function sandboxProfile(repo: string, tempDir: string, mount: string, stateFile: string): string {
+function sandboxProfile(
+	repo: string,
+	tempDir: string,
+	mount: string,
+	stateFile: string,
+	gitMetadata: string[],
+): string {
 	return [
 		"(version 1)",
 		"(allow default)",
@@ -199,7 +211,20 @@ function sandboxProfile(repo: string, tempDir: string, mount: string, stateFile:
 		`(deny file-write* (subpath ${JSON.stringify(tempDir)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(path.dirname(stateFile))}))`,
 		`(deny file-write* (subpath ${JSON.stringify(path.join(mount, ".git"))}))`,
+		...gitMetadata.map((directory) => `(deny file-write* (subpath ${JSON.stringify(directory)}))`),
 	].join("\n");
+}
+
+/** Resolve both per-worktree and common Git storage before entering the private checkout. */
+async function gitMetadataDirectories(repo: string): Promise<string[]> {
+	const [gitDirOutput, commonDirOutput] = await Promise.all([
+		$`git rev-parse --absolute-git-dir`.cwd(repo).text(),
+		$`git rev-parse --git-common-dir`.cwd(repo).text(),
+	]);
+	const directories = [gitDirOutput, commonDirOutput]
+		.map((output) => path.resolve(repo, output.trim()))
+		.map((directory) => fs.realpath(directory));
+	return [...new Set(await Promise.all(directories))];
 }
 
 /** Snapshot the AgentFS database while its server owns the live database lock. */
