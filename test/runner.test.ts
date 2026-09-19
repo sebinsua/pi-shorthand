@@ -10,6 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { runWithBun } from "../index.ts";
+import { openLinuxOverlay } from "../overlay-linux.ts";
 import type { RunOptions, RunResult } from "../runner.ts";
 
 setDefaultTimeout(30_000);
@@ -21,8 +22,13 @@ const hasOverlay =
 		: Boolean(Bun.which("bwrap"));
 
 const repos: string[] = [];
+const temporaryRoots: string[] = [];
 afterEach(async () => {
 	for (const repo of repos.splice(0)) await rm(path.dirname(repo), { recursive: true, force: true });
+	for (const root of temporaryRoots.splice(0)) {
+		await chmod(path.join(root, "work/work"), 0o700).catch(() => {});
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 /** A new git repository with these files committed. */
@@ -60,6 +66,25 @@ async function textIfFile(file: string): Promise<string | undefined> {
 	}
 }
 
+test.skipIf(process.platform !== "linux")(
+	"the Linux backend removes OverlayFS's mode-000 work directory as the invoking user",
+	async () => {
+		const repo = await makeRepo(FILES);
+		const tempRoot = await realpath(await mkdtemp(path.join(tmpdir(), "pi-shorthand-overlay-cleanup-")));
+		temporaryRoots.push(tempRoot);
+		const overlay = await openLinuxOverlay(repo, tempRoot);
+		const mounted = Bun.spawn(overlay.wrap(["true"], repo), { stdout: "pipe", stderr: "pipe" });
+		const stderr = await new Response(mounted.stderr).text();
+		expect(await mounted.exited, stderr).toBe(0);
+
+		const internalWork = path.join(tempRoot, "work/work");
+		expect((await lstat(internalWork)).mode & 0o777).toBe(0);
+		await overlay.close();
+
+		expect(await lstat(tempRoot).catch(() => null)).toBeNull();
+	},
+);
+
 function macRecoveryFile(repo: string): string {
 	const checkout = createHash("sha256").update(repo).digest("hex").slice(0, 16);
 	return path.join(homedir(), ".cache", "pi-shorthand", "macos-mounts", `${checkout}.json`);
@@ -89,6 +114,28 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		]);
 		expect(result.applied).toEqual(["src/a.ts", "src/b.ts", "src/new.ts"]);
 		expect(await gitStatus(repo)).toBe("M src/a.ts\n D src/b.ts\n?? src/new.ts");
+	});
+
+	test("a workspace cleanup failure preserves the applied result and reports a warning", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `await Bun.write("src/a.ts", "updated\\n");`, {
+			testWorkspaceCleanupFailure: true,
+		});
+
+		expect(result.applied).toEqual(["src/a.ts"]);
+		expect(result.cleanupWarnings).toContainEqual(expect.stringContaining("isolated workspace"));
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("updated\n");
+	});
+
+	test("a workspace cleanup failure does not replace the program failure", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `throw new Error("program failed");`, {
+			testWorkspaceCleanupFailure: true,
+		});
+
+		expect(result.exitCode).not.toBe(0);
+		expect(result.output).toContain("program failed");
+		expect(result.cleanupWarnings).toContainEqual(expect.stringContaining("isolated workspace"));
 	});
 
 	test("preserves a nested working directory inside the execution root", async () => {

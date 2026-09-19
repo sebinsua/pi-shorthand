@@ -49,7 +49,21 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 		gitExcludes: [],
 		wrap,
 		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(filesAtStart, repo, wrap))],
-		close: async () => {},
+		close: async () => {
+			// OverlayFS deliberately leaves its private work/work directory inaccessible. Node and Bun
+			// recurse into it before unlinking it, so restore owner access before removing the workspace.
+			const internalWork = path.join(work, "work");
+			try {
+				const stats = await fs.lstat(internalWork);
+				if (!stats.isDirectory() || stats.isSymbolicLink() || (process.getuid && stats.uid !== process.getuid())) {
+					throw new Error(`Unsafe OverlayFS work directory: ${internalWork}`);
+				}
+				await fs.chmod(internalWork, 0o700);
+			} catch (error) {
+				if (!isMissing(error)) throw error;
+			}
+			await fs.rm(tempDir, { recursive: true, force: true });
+		},
 	};
 }
 

@@ -37,6 +37,7 @@ export interface RunOptions {
 	testBeforeCommitDelayMs?: number;
 	testBeforeCommitMarker?: string;
 	testCleanupFailure?: boolean;
+	testWorkspaceCleanupFailure?: boolean;
 }
 
 export interface RunResult {
@@ -101,6 +102,9 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	const repo = await findRepository(cwd);
 	const releaseLock = await takeRepositoryLock(repo, abort);
 	let tempDir: string | undefined;
+	let result: RunResult | undefined;
+	let primaryError: unknown;
+	const runCleanupWarnings: string[] = [];
 
 	try {
 		tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
@@ -110,11 +114,21 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 		log("overlay opened");
 		let program: ProgramRun;
 		let changes: Change[];
+		let executionError: unknown;
 		try {
 			program = await runProgram({ ...options, cwd }, abort, overlay, repo, tempDir);
 			changes = await findChanges(overlay);
+		} catch (error) {
+			executionError = error;
+			throw error;
 		} finally {
-			await overlay.close();
+			try {
+				await closeOverlay(overlay, options.testWorkspaceCleanupFailure);
+			} catch (error) {
+				const warning = cleanupWarning("isolated workspace", error);
+				if (executionError) attachCleanupWarning(executionError, warning);
+				else runCleanupWarnings.push(warning);
+			}
 		}
 
 		const shown = (file: string) => path.relative(cwd, path.join(repo, file));
@@ -146,13 +160,13 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			conflicts,
 		});
 
-		return {
+		result = {
 			exitCode: program.exitCode,
 			timedOut: program.timedOut,
 			durationMs: Math.round(performance.now() - startedAt),
 			output: program.output,
-			warnings: [...lint(options.program), ...applicationWarnings],
-			cleanupWarnings: applicationWarnings,
+			warnings: [...lint(options.program), ...applicationWarnings, ...runCleanupWarnings],
+			cleanupWarnings: [...applicationWarnings, ...runCleanupWarnings],
 			changes: changes.map((change) => describe(shown(change.file), change)),
 			applied: applied.map((change) => shown(change.file)),
 			conflicts: conflicts.map(shown),
@@ -163,13 +177,48 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			timeoutMs: options.timeoutMs,
 			rollback: options.rollback,
 		};
+		return result;
+	} catch (error) {
+		primaryError = error;
+		for (const warning of runCleanupWarnings) attachCleanupWarning(error, warning);
+		throw error;
 	} finally {
+		const finalWarnings: string[] = [];
 		try {
 			if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
-		} finally {
+		} catch (error) {
+			finalWarnings.push(cleanupWarning("temporary workspace", error));
+		}
+		try {
 			await releaseLock();
+		} catch (error) {
+			finalWarnings.push(cleanupWarning("repository lock", error));
+		}
+		if (result) {
+			result.warnings.push(...finalWarnings);
+			result.cleanupWarnings.push(...finalWarnings);
+		} else if (primaryError) {
+			for (const warning of finalWarnings) attachCleanupWarning(primaryError, warning);
 		}
 	}
+}
+
+async function closeOverlay(overlay: Overlay, injectFailure = false) {
+	await overlay.close();
+	if (injectFailure) throw new Error("Injected isolated-workspace cleanup failure.");
+}
+
+function cleanupWarning(resource: string, error: unknown): string {
+	const detail = error instanceof Error ? error.message : String(error);
+	const warning = `The run reached its reported outcome, but cleanup of its ${resource} failed: ${detail}`;
+	log("cleanup warning", { warning });
+	return warning;
+}
+
+function attachCleanupWarning(error: unknown, warning: string) {
+	if (!(error instanceof Error)) return;
+	const annotated = error as Error & { cleanupWarnings?: string[] };
+	annotated.cleanupWarnings = [...(annotated.cleanupWarnings ?? []), warning];
 }
 
 /** Serializes shorthand baselines and commits for one repository, including across runner processes. */
