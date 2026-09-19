@@ -998,6 +998,39 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		},
 	);
 
+	test("removing an ignore rule applies newly visible files and tracked ignored files", async () => {
+		const repo = await makeRepo({ ".gitignore": "*.tmp\n" });
+		await Bun.write(path.join(repo, "tracked.tmp"), "before\n");
+		await $`git add -f tracked.tmp && git -c user.name=test -c user.email=test@test commit -qm tracked-ignored`.cwd(
+			repo,
+		);
+
+		const result = await run(
+			repo,
+			`await Bun.write(".gitignore", "");
+			await Bun.write("tracked.tmp", "after\\n");
+			await Bun.write("new.tmp", "new\\n");`,
+		);
+
+		expect(result.applied).toEqual([".gitignore", "new.tmp", "tracked.tmp"]);
+		expect(await Bun.file(path.join(repo, "new.tmp")).text()).toBe("new\n");
+		expect(await Bun.file(path.join(repo, "tracked.tmp")).text()).toBe("after\n");
+	});
+
+	test("adding an ignore rule omits a file created by the same transaction", async () => {
+		const repo = await makeRepo({ ".gitignore": "" });
+
+		const result = await run(
+			repo,
+			`await Bun.write(".gitignore", "new.txt\\n");
+			await Bun.write("new.txt", "ignored\\n");`,
+		);
+
+		expect(result.applied).toEqual([".gitignore"]);
+		expect(result.changes.map((change) => change.path)).toEqual([".gitignore"]);
+		expect(await Bun.file(path.join(repo, "new.txt")).exists()).toBe(false);
+	});
+
 	test("a run keeps reading its starting snapshot after an external edit", async () => {
 		const repo = await makeRepo(FILES);
 		const ready = path.join(path.dirname(repo), "program-started");

@@ -614,7 +614,7 @@ async function filesOpenForWriting(dir: string, forceFailure: boolean): Promise<
 async function findChanges(overlay: Overlay): Promise<Change[]> {
 	const candidates = (await overlay.changes()).filter(({ file }) => path.basename(file) !== PROGRAM_FILE);
 	const ignored = await gitIgnored(
-		overlay.originalDir,
+		overlay,
 		candidates.map(({ file }) => file),
 	);
 
@@ -631,11 +631,16 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 	return changes.toSorted((a, b) => a.file.localeCompare(b.file));
 }
 
-async function gitIgnored(dir: string, files: string[]): Promise<Set<string>> {
+/** Apply the final overlay's ignore policy; Git itself preserves every path already in the index. */
+async function gitIgnored(overlay: Overlay, files: string[]): Promise<Set<string>> {
 	if (files.length === 0) return new Set();
 	const input = new Response(`${files.join("\0")}\0`);
-	const output = await $`git check-ignore -z --stdin < ${input}`.cwd(dir).nothrow().quiet().text();
-	return new Set(output.split("\0").filter(Boolean));
+	const command = overlay.wrap(["git", "check-ignore", "-z", "--stdin"], overlay.executionDir);
+	const result = await $`${command} < ${input}`.cwd(overlay.executionDir).nothrow().quiet();
+	if (result.exitCode > 1) {
+		throw new Error(`Could not evaluate final ignore rules: ${result.stderr.toString().trim()}`);
+	}
+	return new Set(result.stdout.toString().split("\0").filter(Boolean));
 }
 
 interface PreparedChange {
