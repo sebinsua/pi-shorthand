@@ -11,7 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { copyStableTree } from "./overlay-linux.ts";
-import type { Overlay } from "./runner.ts";
+import type { FilesystemEntry, Overlay } from "./runner.ts";
 
 export async function openMacOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const agentfs = process.env.AGENTFS_BIN ?? Bun.which("agentfs");
@@ -208,17 +208,28 @@ async function changesInDatabase(agentfs: string, database: string, base: string
 	await cloneDatabase(path.dirname(database), "run.db", snapshotDir, "run.db");
 	const output = await $`${agentfs} diff ${path.join(snapshotDir, "run.db")}`.quiet().text();
 
-	const changes: { file: string; contents: Uint8Array | null }[] = [];
+	const changes: { file: string; entry: FilesystemEntry | null }[] = [];
 	for (const line of output.split("\n")) {
 		const match = line.match(/^([AMD]) (\S) \/(.+)$/);
 		if (!match || path.basename(match[3]).startsWith("._")) continue;
 		const [, change, type, file] = match;
 		if (file === ".git" || file.startsWith(".git/")) continue;
 
-		if (change !== "D" && type === "f") changes.push({ file, contents: await readFile(path.join(mount, file)) });
+		if (change !== "D" && (type === "f" || type === "l")) {
+			changes.push({ file, entry: await readEntry(path.join(mount, file)) });
+		}
+		if (change !== "D" && type === "d") {
+			const original = await fs.lstat(path.join(base, file)).catch(() => null);
+			if (original && !original.isDirectory()) {
+				throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
+			}
+		}
+		if (change !== "D" && !["f", "l", "d"].includes(type)) {
+			throw new Error(`Unsupported AgentFS entry type ${JSON.stringify(type)} at ${JSON.stringify(file)}.`);
+		}
 		if (change === "D") {
 			for (const deleted of await filesUnder(path.join(base, file))) {
-				changes.push({ file: path.join(file, deleted), contents: null });
+				changes.push({ file: path.join(file, deleted), entry: null });
 			}
 		}
 	}
@@ -227,8 +238,18 @@ async function changesInDatabase(agentfs: string, database: string, base: string
 
 async function filesUnder(original: string): Promise<string[]> {
 	const stats = await fs.lstat(original).catch(() => null);
-	if (!stats?.isDirectory()) return [""];
-	return fs.readdir(original, { recursive: true });
+	if (!stats) return [""];
+	if (stats.isFile() || stats.isSymbolicLink()) return [""];
+	if (!stats.isDirectory()) throw new Error(`Unsupported filesystem entry at ${JSON.stringify(original)}.`);
+	const files: string[] = [];
+	for (const entry of await fs.readdir(original, { recursive: true, withFileTypes: true })) {
+		if (entry.isFile() || entry.isSymbolicLink()) {
+			files.push(path.relative(original, path.join(entry.parentPath, entry.name)));
+		} else if (!entry.isDirectory()) {
+			throw new Error(`Unsupported filesystem entry at ${JSON.stringify(path.join(entry.parentPath, entry.name))}.`);
+		}
+	}
+	return files;
 }
 
 async function cloneDatabase(fromDir: string, fromName: string, toDir: string, toName: string) {
@@ -239,9 +260,11 @@ async function cloneDatabase(fromDir: string, fromName: string, toDir: string, t
 	}
 }
 
-async function readFile(file: string): Promise<Uint8Array | null> {
-	const stats = await fs.lstat(file).catch(() => null);
-	return stats?.isFile() ? Bun.file(file).bytes() : null;
+async function readEntry(file: string): Promise<FilesystemEntry> {
+	const stats = await fs.lstat(file);
+	if (stats.isFile()) return { type: "file", contents: await Bun.file(file).bytes(), mode: stats.mode & 0o7777 };
+	if (stats.isSymbolicLink()) return { type: "symlink", target: await fs.readlink(file) };
+	throw new Error(`Unsupported filesystem entry at ${JSON.stringify(file)}.`);
 }
 
 async function unmount(mount: string) {

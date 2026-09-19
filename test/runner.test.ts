@@ -96,6 +96,37 @@ const FILES = {
 	"src/b.ts": 'import { oldApi } from "./api";\nexport const b = oldApi(2);\n',
 };
 
+async function makeMetadataRepo(): Promise<string> {
+	const repo = await makeRepo({
+		"make-executable.sh": "#!/bin/sh\necho add\n",
+		"remove-executable.sh": "#!/bin/sh\necho remove\n",
+		"regular-to-link": "regular\n",
+		"target-a": "a\n",
+		"target-b": "b\n",
+	});
+	await chmod(path.join(repo, "make-executable.sh"), 0o644);
+	await chmod(path.join(repo, "remove-executable.sh"), 0o755);
+	await symlink("target-a", path.join(repo, "symlink-to-regular"));
+	await symlink("target-a", path.join(repo, "retarget-link"));
+	await symlink("target-a", path.join(repo, "delete-link"));
+	await $`git add -A && git -c user.name=test -c user.email=test@test commit -qm metadata`.cwd(repo);
+	return repo;
+}
+
+const METADATA_PROGRAM = `
+	const fs = await import("node:fs/promises");
+	await fs.chmod("make-executable.sh", 0o755);
+	await fs.chmod("remove-executable.sh", 0o644);
+	await fs.rm("regular-to-link");
+	await fs.symlink("target-b", "regular-to-link");
+	await fs.rm("symlink-to-regular");
+	await Bun.write("symlink-to-regular", "now regular\\n");
+	await fs.rm("retarget-link");
+	await fs.symlink("target-b", "retarget-link");
+	await fs.symlink("target-a", "added-link");
+	await fs.rm("delete-link");
+`;
+
 describe.skipIf(!hasOverlay)("runner", () => {
 	test("applies a successful program's changes and reports them", async () => {
 		const repo = await makeRepo(FILES);
@@ -136,6 +167,65 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(result.output).toContain("program failed");
 		expect(result.cleanupWarnings).toContainEqual(expect.stringContaining("isolated workspace"));
+	});
+
+	test("applies executable modes and every regular-file/symlink transition", async () => {
+		const repo = await makeMetadataRepo();
+		const result = await run(repo, METADATA_PROGRAM);
+
+		expect((await lstat(path.join(repo, "make-executable.sh"))).mode & 0o777).toBe(0o755);
+		expect((await lstat(path.join(repo, "remove-executable.sh"))).mode & 0o777).toBe(0o644);
+		expect(await readlink(path.join(repo, "regular-to-link"))).toBe("target-b");
+		expect((await lstat(path.join(repo, "symlink-to-regular"))).isFile()).toBe(true);
+		expect(await Bun.file(path.join(repo, "symlink-to-regular")).text()).toBe("now regular\n");
+		expect(await readlink(path.join(repo, "retarget-link"))).toBe("target-b");
+		expect(await readlink(path.join(repo, "added-link"))).toBe("target-a");
+		expect(await lstat(path.join(repo, "delete-link")).catch(() => null)).toBeNull();
+		expect(result.changes.find((change) => change.path === "make-executable.sh")).toMatchObject({
+			beforeType: "file",
+			afterType: "file",
+			beforeMode: 0o644,
+			afterMode: 0o755,
+		});
+		expect(result.changes.find((change) => change.path === "regular-to-link")).toMatchObject({
+			beforeType: "file",
+			afterType: "symlink",
+		});
+		expect(result.changes.find((change) => change.path === "symlink-to-regular")).toMatchObject({
+			beforeType: "symlink",
+			afterType: "file",
+		});
+		expect(result.changes.find((change) => change.path === "retarget-link")?.patch).toContain("target-b");
+	});
+
+	test("rolls back executable modes and file/symlink transitions after an application failure", async () => {
+		const repo = await makeMetadataRepo();
+		const runner = startRunner(repo, METADATA_PROGRAM, { testApplyFailureAfter: 7 });
+		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("Injected application failure after 7 change");
+		expect((await lstat(path.join(repo, "make-executable.sh"))).mode & 0o777).toBe(0o644);
+		expect((await lstat(path.join(repo, "remove-executable.sh"))).mode & 0o777).toBe(0o755);
+		expect((await lstat(path.join(repo, "regular-to-link"))).isFile()).toBe(true);
+		expect(await Bun.file(path.join(repo, "regular-to-link")).text()).toBe("regular\n");
+		expect(await readlink(path.join(repo, "symlink-to-regular"))).toBe("target-a");
+		expect(await readlink(path.join(repo, "retarget-link"))).toBe("target-a");
+		expect(await readlink(path.join(repo, "delete-link"))).toBe("target-a");
+		expect(await lstat(path.join(repo, "added-link")).catch(() => null)).toBeNull();
+	});
+
+	test("rejects an unsupported directory replacement explicitly", async () => {
+		const repo = await makeRepo({ victim: "keep\n" });
+		const runner = startRunner(
+			repo,
+			`const fs = await import("node:fs/promises"); await fs.rm("victim"); await fs.mkdir("victim");`,
+		);
+		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("Unsupported directory replacement");
+		expect(await Bun.file(path.join(repo, "victim")).text()).toBe("keep\n");
 	});
 
 	test("preserves a nested working directory inside the execution root", async () => {

@@ -14,7 +14,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, constants, mkdirSync } from "node:fs";
+import { appendFileSync, constants, mkdirSync, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -61,8 +61,16 @@ export interface RunResult {
 export interface FileChange {
 	path: string; // relative to the tool's working directory
 	kind: "added" | "modified" | "deleted";
+	beforeType?: FilesystemEntry["type"];
+	afterType?: FilesystemEntry["type"];
+	beforeMode?: number;
+	afterMode?: number;
 	patch: string;
 }
+
+export type FilesystemEntry =
+	| { type: "file"; contents: Uint8Array; mode: number }
+	| { type: "symlink"; target: string };
 
 /** A copy-on-write view of the repository. */
 export interface Overlay {
@@ -71,15 +79,15 @@ export interface Overlay {
 	executionDir: string; // repository root as seen by the program process
 	gitExcludes: string[]; // extra patterns git should ignore inside the overlay
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
-	changes(): Promise<{ file: string; contents: Uint8Array | null }[]>; // may include files only read
+	changes(): Promise<{ file: string; entry: FilesystemEntry | null }[]>; // may include files only read
 	close(): Promise<void>;
 }
 
 /** A changed file, relative to the repository root, with its new contents (null if deleted). */
 interface Change {
 	file: string;
-	before: Uint8Array | null;
-	after: Uint8Array | null;
+	before: FilesystemEntry | null;
+	after: FilesystemEntry | null;
 }
 
 const PROGRAM_FILE = ".pi-shorthand-program.ts";
@@ -295,43 +303,16 @@ async function conflictingFiles(repo: string, changes: Change[]): Promise<string
 	return conflicts;
 }
 
-/** Compares through a no-follow file descriptor and rechecks the path leading to it. */
+/** Compares the complete no-follow filesystem entry and rechecks the path leading to it. */
 async function destinationMatches(repo: string, change: Change): Promise<boolean> {
 	const target = path.join(repo, change.file);
 	if (!(await safeParentChain(repo, target))) return false;
-	if (!change.before) {
-		try {
-			await fs.lstat(target);
-			return false;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-			return safeParentChain(repo, target);
-		}
-	}
-
-	let handle: fs.FileHandle | undefined;
 	try {
-		handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-		const before = await handle.stat();
-		if (!before.isFile()) return false;
-		const contents = await handle.readFile();
-		const after = await handle.stat();
-		const unchangedWhileRead =
-			before.dev === after.dev &&
-			before.ino === after.ino &&
-			before.mode === after.mode &&
-			before.size === after.size &&
-			before.mtimeMs === after.mtimeMs &&
-			before.ctimeMs === after.ctimeMs;
-		if (!unchangedWhileRead || !Buffer.from(change.before).equals(contents)) return false;
-		if (!(await safeParentChain(repo, target))) return false;
-		const leaf = await fs.lstat(target);
-		return leaf.isFile() && leaf.dev === after.dev && leaf.ino === after.ino;
+		const current = await snapshotEntry(target);
+		return entriesEqual(current?.entry ?? null, change.before) && (await safeParentChain(repo, target));
 	} catch (error) {
-		if (["ENOENT", "ELOOP", "EISDIR", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+		if (error instanceof UnsupportedEntryError) return false;
 		throw error;
-	} finally {
-		await handle?.close().catch(() => {});
 	}
 }
 
@@ -601,12 +582,12 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 
 	const changes: Change[] = [];
 	const seen = new Set<string>(); // an overlay may report a file twice, e.g. a deleted directory and the files in it
-	for (const { file, contents: after } of candidates) {
+	for (const { file, entry: after } of candidates) {
 		if (ignored.has(file) || seen.has(file)) continue;
 		seen.add(file);
-		const before = await readFile(path.join(overlay.originalDir, file));
+		const before = (await snapshotEntry(path.join(overlay.originalDir, file)))?.entry ?? null;
 		if (!before && !after) continue;
-		if (before && after && Buffer.from(before).equals(after)) continue; // read, not changed
+		if (entriesEqual(before, after)) continue; // read or copy-up, not changed
 		changes.push({ file, before, after });
 	}
 	return changes.toSorted((a, b) => a.file.localeCompare(b.file));
@@ -656,14 +637,17 @@ async function applyChanges(
 
 			if (change.after) {
 				item.staged = path.join(path.dirname(target), `.pi-shorthand-${randomUUID()}.tmp`);
-				const handle = await fs.open(item.staged, "wx");
-				try {
-					await handle.writeFile(change.after);
-				} finally {
-					await handle.close();
+				if (change.after.type === "file") {
+					const handle = await fs.open(item.staged, "wx", change.after.mode);
+					try {
+						await handle.writeFile(change.after.contents);
+						await handle.chmod(change.after.mode);
+					} finally {
+						await handle.close();
+					}
+				} else {
+					await fs.symlink(change.after.target, item.staged);
 				}
-				const original = change.before ? await fs.lstat(target).catch(() => null) : null;
-				if (original) await fs.chmod(item.staged, original.mode);
 			}
 			if (change.before) {
 				item.backupDir = await fs.mkdtemp(path.join(path.dirname(target), ".pi-shorthand-backup-"));
@@ -826,15 +810,27 @@ async function cleanupWarnings(items: PreparedChange[], failCleanup = false): Pr
 
 /** A change as a git-style patch. */
 function describe(file: string, { before, after }: Change): FileChange {
-	const kind = !before ? "added" : !after ? "deleted" : "modified";
+	const kind: FileChange["kind"] = !before ? "added" : !after ? "deleted" : "modified";
 	const lines = [`diff --git a/${file} b/${file}`];
-	if (kind !== "modified") lines.push(`${kind === "added" ? "new" : "deleted"} file`);
+	if (kind === "added") lines.push(`new file mode ${gitMode(after!)}`);
+	if (kind === "deleted") lines.push(`deleted file mode ${gitMode(before!)}`);
+	if (before && after && gitMode(before) !== gitMode(after)) {
+		lines.push(`old mode ${gitMode(before)}`, `new mode ${gitMode(after)}`);
+	}
 
-	const oldBytes = before ?? new Uint8Array();
-	const newBytes = after ?? new Uint8Array();
+	const oldBytes = entryBytes(before);
+	const newBytes = entryBytes(after);
+	const described = {
+		path: file,
+		kind,
+		beforeType: before?.type,
+		afterType: after?.type,
+		beforeMode: before?.type === "file" ? before.mode : undefined,
+		afterMode: after?.type === "file" ? after.mode : undefined,
+	};
 	if (isBinary(oldBytes) || isBinary(newBytes)) {
 		lines.push("Binary file changed");
-		return { path: file, kind, patch: lines.join("\n") };
+		return { ...described, patch: lines.join("\n") };
 	}
 
 	lines.push(kind === "added" ? "--- /dev/null" : `--- a/${file}`);
@@ -844,7 +840,16 @@ function describe(file: string, { before, after }: Change): FileChange {
 	for (const hunk of structuredPatch(file, file, oldText, newText, "", "", { context: 3 }).hunks) {
 		lines.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`, ...hunk.lines);
 	}
-	return { path: file, kind, patch: lines.join("\n") };
+	return { ...described, patch: lines.join("\n") };
+}
+
+function gitMode(entry: FilesystemEntry): string {
+	return entry.type === "symlink" ? "120000" : (0o100000 | entry.mode).toString(8).padStart(6, "0");
+}
+
+function entryBytes(entry: FilesystemEntry | null): Uint8Array {
+	if (!entry) return new Uint8Array();
+	return entry.type === "file" ? entry.contents : new TextEncoder().encode(entry.target);
 }
 
 function isBinary(bytes: Uint8Array): boolean {
@@ -857,23 +862,69 @@ function ancestors(dir: string): string[] {
 	return parent === dir ? [dir] : [dir, ...ancestors(parent)];
 }
 
-/** A regular file's contents, or null if there's no regular file there. */
-async function readFile(file: string): Promise<Uint8Array | null> {
-	let stats;
+interface EntrySnapshot {
+	entry: FilesystemEntry;
+	identity: { dev: number; ino: number; mode: number };
+}
+
+class UnsupportedEntryError extends Error {}
+
+/** Reads one regular file or symlink without following it, rejecting unstable or unsupported entries. */
+async function snapshotEntry(file: string): Promise<EntrySnapshot | null> {
+	let initial;
 	try {
-		stats = await fs.lstat(file);
+		initial = await fs.lstat(file);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 		throw error;
 	}
-	if (!stats.isFile()) return null;
-	try {
-		return await Bun.file(file).bytes();
-	} catch (error) {
-		// A destination removed between lstat and read is still a conflict.
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-		throw error;
+	const identity = { dev: initial.dev, ino: initial.ino, mode: initial.mode };
+	if (initial.isSymbolicLink()) {
+		const target = await fs.readlink(file);
+		const final = await fs.lstat(file).catch(() => null);
+		if (!final || !sameIdentity(initial, final))
+			throw new Error(`Filesystem entry changed while reading ${JSON.stringify(file)}.`);
+		return { entry: { type: "symlink", target }, identity };
 	}
+	if (!initial.isFile()) throw new UnsupportedEntryError(`Unsupported filesystem entry at ${JSON.stringify(file)}.`);
+
+	let handle: fs.FileHandle | undefined;
+	try {
+		handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+		const before = await handle.stat();
+		if (!before.isFile() || !sameIdentity(initial, before)) {
+			throw new Error(`Filesystem entry changed while opening ${JSON.stringify(file)}.`);
+		}
+		const contents = await handle.readFile();
+		const after = await handle.stat();
+		if (!sameIdentity(before, after))
+			throw new Error(`Filesystem entry changed while reading ${JSON.stringify(file)}.`);
+		const leaf = await fs.lstat(file).catch(() => null);
+		if (!leaf || !sameIdentity(after, leaf))
+			throw new Error(`Filesystem entry changed while reading ${JSON.stringify(file)}.`);
+		return { entry: { type: "file", contents, mode: after.mode & 0o7777 }, identity };
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+function sameIdentity(a: Stats, b: Stats): boolean {
+	return (
+		a.dev === b.dev &&
+		a.ino === b.ino &&
+		a.mode === b.mode &&
+		a.size === b.size &&
+		a.mtimeMs === b.mtimeMs &&
+		a.ctimeMs === b.ctimeMs
+	);
+}
+
+function entriesEqual(a: FilesystemEntry | null, b: FilesystemEntry | null): boolean {
+	if (!a || !b) return a === b;
+	if (a.type !== b.type) return false;
+	if (a.type === "symlink" || b.type === "symlink")
+		return a.type === "symlink" && b.type === "symlink" && a.target === b.target;
+	return a.mode === b.mode && Buffer.from(a.contents).equals(b.contents);
 }
 
 if (import.meta.main) {

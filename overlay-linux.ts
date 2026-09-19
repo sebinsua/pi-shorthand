@@ -8,7 +8,7 @@ import { type BigIntStats, constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
-import type { Overlay } from "./runner.ts";
+import type { FilesystemEntry, Overlay } from "./runner.ts";
 
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const bwrap = Bun.which("bwrap");
@@ -48,7 +48,10 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 		executionDir: repo,
 		gitExcludes: [],
 		wrap,
-		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(filesAtStart, repo, wrap))],
+		changes: async () => [
+			...(await writtenEntries(upper, new Set(filesAtStart))),
+			...(await deletedFiles(filesAtStart, repo, wrap)),
+		],
 		close: async () => {
 			// OverlayFS deliberately leaves its private work/work directory inaccessible. Node and Bun
 			// recurse into it before unlinking it, so restore owner access before removing the workspace.
@@ -138,14 +141,32 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** Regular files in the upper directory, except git's own writes to .git (e.g. refreshing its index). */
-async function writtenFiles(upper: string) {
-	const written: { file: string; contents: Uint8Array | null }[] = [];
+/** Files and symlinks represented in the upper layer, except Git's own metadata writes. */
+async function writtenEntries(upper: string, filesAtStart: Set<string>) {
+	const written: { file: string; entry: FilesystemEntry }[] = [];
 	for (const entry of await fs.readdir(upper, { recursive: true, withFileTypes: true })) {
 		const fullPath = path.join(entry.parentPath, entry.name);
 		const file = path.relative(upper, fullPath);
-		if (!entry.isFile() || file.startsWith(".git/")) continue;
-		written.push({ file, contents: await Bun.file(fullPath).bytes() });
+		if (file === ".git" || file.startsWith(".git/")) continue;
+		if (entry.isDirectory()) {
+			if (filesAtStart.has(file)) throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
+			continue;
+		}
+		if (entry.isFile()) {
+			const stats = await fs.lstat(fullPath);
+			written.push({
+				file,
+				entry: { type: "file", contents: await Bun.file(fullPath).bytes(), mode: stats.mode & 0o7777 },
+			});
+			continue;
+		}
+		if (entry.isSymbolicLink()) {
+			written.push({ file, entry: { type: "symlink", target: await fs.readlink(fullPath) } });
+			continue;
+		}
+		const stats = await fs.lstat(fullPath);
+		if (stats.isCharacterDevice() && stats.rdev === 0) continue; // OverlayFS whiteout for a deletion.
+		throw new Error(`Unsupported filesystem entry at ${JSON.stringify(file)}.`);
 	}
 	return written;
 }
@@ -169,7 +190,7 @@ async function deletedFiles(filesAtStart: string[], repo: string, wrap: (command
 	return output
 		.split("\0")
 		.filter(Boolean)
-		.map((file) => ({ file, contents: null }));
+		.map((file) => ({ file, entry: null }));
 }
 
 async function gitVisibleFiles(repo: string): Promise<string[]> {

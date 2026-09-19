@@ -29,6 +29,8 @@ The program runs in an isolated copy of the working directory. Use relative path
 - grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
 - sg.find(pattern, files?) → {file, line, text, vars}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a file, directory, glob or a list of them (JS/TS).
 - sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (its captures are on it: m.X) and returns the new text, or null to leave it.
+- sg.one(pattern, files?) requires exactly one match. sg.file(path) selects a JS/TS file root (also works for new files).
+- sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. JS/TS statements/declarations only; containers are file roots or matched statement blocks. Rematch after editing a file. move's optional function transforms its text; insert(match.text, destination) copies.
 - sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
 - grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[], e.g. grit("\`a($x)\` => \`b($x)\`", "src")
 Bun's shell $ needs await: await $\`bun test src/foo.test.ts\`. You can also run the ast-grep, grit and git CLIs with it. For how to write these programs, see the shorthand skill.
@@ -204,7 +206,19 @@ function summaryLine(run: RunResult): string {
 function fileLine(change: FileChange): string {
 	const letter = { added: "A", modified: "M", deleted: "D" }[change.kind];
 	const { additions, deletions } = countLines(change.patch);
-	return `  ${letter} ${change.path} +${additions} −${deletions}`;
+	let metadata = "";
+	if (change.beforeType && change.afterType && change.beforeType !== change.afterType) {
+		metadata = ` (${change.beforeType} → ${change.afterType})`;
+	} else if (change.afterType === "symlink" && change.beforeType !== "symlink") {
+		metadata = " (symlink)";
+	} else if (
+		change.beforeMode !== undefined &&
+		change.afterMode !== undefined &&
+		change.beforeMode !== change.afterMode
+	) {
+		metadata = ` (${change.beforeMode.toString(8)} → ${change.afterMode.toString(8)})`;
+	}
+	return `  ${letter} ${change.path}${metadata} +${additions} −${deletions}`;
 }
 
 function textForModel(run: RunResult, toolCallId: string): string {

@@ -143,7 +143,19 @@ function fileList(changes: FileChange[], theme: Theme): string[] {
 /** e.g. "src/a.ts +3 −1", or "src/new.ts (new) +12 −0" */
 function fileLine(change: FileChange, theme: Theme): string {
 	const kind = change.kind === "modified" ? "" : theme.fg("muted", change.kind === "added" ? " (new)" : " (deleted)");
-	return `${theme.fg("accent", change.path)}${kind} ${stats([change], theme)}`;
+	const metadata = metadataSummary(change);
+	return `${theme.fg("accent", change.path)}${kind}${metadata ? theme.fg("muted", ` (${metadata})`) : ""} ${stats([change], theme)}`;
+}
+
+function metadataSummary(change: FileChange): string {
+	if (change.beforeType && change.afterType && change.beforeType !== change.afterType) {
+		return `${change.beforeType} → ${change.afterType}`;
+	}
+	if (change.afterType === "symlink" && change.beforeType !== "symlink") return "symlink";
+	if (change.beforeMode !== undefined && change.afterMode !== undefined && change.beforeMode !== change.afterMode) {
+		return `${change.beforeMode.toString(8)} → ${change.afterMode.toString(8)}`;
+	}
+	return "";
 }
 
 /** "+6 −2", in the diff colours. */

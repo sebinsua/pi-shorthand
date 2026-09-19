@@ -48,6 +48,21 @@ describe("the verdict", () => {
 		expect(show(run)[0]).toBe("✓ Applied 2 files · +2 −2 · 0.6s");
 	});
 
+	test("file lines show mode and type transitions", () => {
+		const executable = {
+			...change("script"),
+			beforeType: "file" as const,
+			afterType: "file" as const,
+			beforeMode: 0o644,
+			afterMode: 0o755,
+		};
+		const symlink = { ...change("link"), beforeType: "file" as const, afterType: "symlink" as const };
+		const lines = show(result({ changes: [executable, symlink], applied: ["script", "link"] }));
+
+		expect(lines).toContain("script (644 → 755) +1 −1");
+		expect(lines).toContain("link (file → symlink) +1 −1");
+	});
+
 	test("no changes", () => {
 		expect(show(result({}))[0]).toBe("✓ No changes · 0.6s");
 	});
