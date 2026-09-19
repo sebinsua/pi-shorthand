@@ -43,7 +43,7 @@ export default function (pi: ExtensionAPI) {
 	// rather than throwing, since a thrown error loses them.)
 	pi.on("tool_result", async (event) => {
 		const run = event.details as RunResult | undefined;
-		if (event.toolName === "code" && run && run.exitCode !== 0) return { isError: true };
+		if (event.toolName === "code" && run && (run.exitCode !== 0 || run.conflicts.length > 0)) return { isError: true };
 	});
 
 	pi.registerTool({
@@ -179,6 +179,7 @@ function latestStep(runId: string): string | undefined {
 function summaryLine(run: RunResult): string {
 	const parts = [];
 	parts.push(run.timedOut ? "timed out" : `exit ${run.exitCode}`);
+	if (run.conflicts.length > 0) parts.push("conflict");
 	parts.push(`${run.durationMs} ms`);
 
 	if (run.changes.length === 0) {
@@ -194,7 +195,7 @@ function summaryLine(run: RunResult): string {
 		else if (run.applied.length === 0) parts.push("NOT applied");
 		else parts.push(`${run.applied.length} of ${run.changes.length} applied`);
 	}
-	return `${run.exitCode === 0 ? "✓" : "✕"} ${parts.join(" · ")}`;
+	return `${run.exitCode === 0 && run.conflicts.length === 0 ? "✓" : "✕"} ${parts.join(" · ")}`;
 }
 
 /** e.g. "  M src/a.ts +3 −1" */
@@ -210,6 +211,7 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	if (run.applied.length === 0 && run.changes.length > 0) {
 		lines.push("The real workspace is unchanged. Below is the candidate diff.");
 	}
+	if (run.conflicts.length > 0) lines.push(`Changed while the program ran: ${run.conflicts.join(", ")}`);
 	for (const change of run.changes) lines.push(fileLine(change));
 	for (const warning of run.warnings) lines.push(`warning: ${warning}`);
 	if (run.rolledBack.length > 0) {
@@ -225,7 +227,7 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	const diff = diffForModel(run, toolCallId);
 
 	// On failure the error goes last, where it's easiest to find; on success, the diff does.
-	if (run.exitCode === 0) lines.push(...output, ...diff);
+	if (run.exitCode === 0 && run.conflicts.length === 0) lines.push(...output, ...diff);
 	else lines.push(...diff, ...output);
 	return lines.join("\n");
 }

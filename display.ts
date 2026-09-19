@@ -43,6 +43,7 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 	const error = run.exitCode !== 0 && !run.timedOut ? errorMessage(run.output) : undefined;
 	if (error) lines.push(indent(theme.fg("error", error)));
 	if (error && run.errorLine) lines.push(indent(theme.fg("muted", shorten(run.errorLine, 88))));
+	for (const file of run.conflicts) lines.push(indent(theme.fg("error", `changed while running: ${file}`)));
 	// A command still running is what it was stuck on; otherwise the last step it logged is a clue.
 	for (const command of run.stillRunning) lines.push(indent(theme.fg("warning", `stuck on $ ${command}`)));
 	if (run.timedOut && run.stillRunning.length === 0 && run.lastStep) {
@@ -69,6 +70,15 @@ function verdict(run: RunResult, applied: FileChange[], theme: Theme): string {
 	const failure = run.timedOut ? `Timed out after ${run.timeoutMs / 1000}s` : "Failed";
 	const exit = run.timedOut ? "" : muted(` · exit ${run.exitCode}`);
 
+	if (run.conflicts.length > 0) {
+		const program = run.timedOut
+			? ` · timed out after ${run.timeoutMs / 1000}s`
+			: run.exitCode
+				? ` · exit ${run.exitCode}`
+				: "";
+		const application = applied.length === 0 ? "nothing applied" : `${fileCount(applied)} applied`;
+		return theme.fg("error", `✕ Conflict · ${application}${program}`) + took;
+	}
 	if (run.exitCode === 0 && run.changes.length === 0) return theme.fg("success", "✓ No changes") + took;
 	if (run.exitCode === 0) {
 		return theme.fg("success", `✓ Applied ${fileCount(applied)}`) + ` · ${stats(applied, theme)}` + took;

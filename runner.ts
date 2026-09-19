@@ -13,8 +13,8 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, constants, mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -40,6 +40,7 @@ export interface RunResult {
 	warnings: string[]; // likely mistakes spotted in the program before it ran
 	changes: FileChange[]; // everything the program changed
 	applied: string[]; // the changed files that were applied
+	conflicts: string[]; // destinations changed after the run's baseline was captured
 	rolledBack: string[]; // rollback "file": changed files left half-written, so not applied
 	stillRunning: string[]; // on timeout: commands the program was still running, e.g. "find / -name x (for 58s)"
 	lastStep?: string; // on timeout: the last step the program logged, e.g. "$ find / -name x" or "grep (18 ms)"
@@ -89,9 +90,11 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	const startedAt = performance.now();
 	const cwd = await fs.realpath(options.cwd);
 	const repo = await findRepository(cwd);
-	const tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
+	const releaseLock = await takeRepositoryLock(repo, abort);
+	let tempDir: string | undefined;
 
 	try {
+		tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
 		log("started", { repo, cwd, timeoutMs: options.timeoutMs, rollback: options.rollback });
 		const open = process.platform === "darwin" ? openMacOverlay : openLinuxOverlay;
 		const overlay = await open(repo, tempDir);
@@ -105,11 +108,17 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			await overlay.close();
 		}
 
-		const { applied, rolledBack } = whatToApply(changes, program, options.rollback, abort.aborted);
-		await applyChanges(repo, applied);
-		log("finished", { changed: changes.map((change) => change.file), applied: applied.map((change) => change.file) });
-
 		const shown = (file: string) => path.relative(cwd, path.join(repo, file));
+		const { applied: requested, rolledBack } = whatToApply(changes, program, options.rollback, abort.aborted);
+		let conflicts = await conflictingFiles(repo, requested);
+		let applied: Change[] = [];
+		if (conflicts.length === 0) ({ applied, conflicts } = await applyChanges(repo, requested));
+		log("finished", {
+			changed: changes.map((change) => change.file),
+			applied: applied.map((change) => change.file),
+			conflicts,
+		});
+
 		return {
 			exitCode: program.exitCode,
 			timedOut: program.timedOut,
@@ -118,6 +127,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			warnings: lint(options.program),
 			changes: changes.map((change) => describe(shown(change.file), change)),
 			applied: applied.map((change) => shown(change.file)),
+			conflicts: conflicts.map(shown),
 			rolledBack: rolledBack.map((change) => shown(change.file)),
 			stillRunning: program.stillRunning,
 			lastStep: program.timedOut ? await lastLoggedStep() : undefined,
@@ -126,8 +136,139 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			rollback: options.rollback,
 		};
 	} finally {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		try {
+			if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+		} finally {
+			await releaseLock();
+		}
 	}
+}
+
+/** Serializes shorthand baselines and commits for one repository, including across runner processes. */
+async function takeRepositoryLock(repo: string, abort: AbortSignal): Promise<() => Promise<void>> {
+	const lock = await repositoryLockPath(repo);
+	const ownerFile = path.join(lock, "owner.json");
+	for (let attempt = 0; attempt < 3000; attempt++) {
+		abort.throwIfAborted();
+		try {
+			await fs.mkdir(lock);
+			try {
+				await fs.writeFile(ownerFile, JSON.stringify({ pid: process.pid }));
+			} catch (error) {
+				await fs.rmdir(lock).catch(() => {});
+				throw error;
+			}
+			return async () => {
+				await fs.rm(ownerFile, { force: true });
+				await fs.rmdir(lock);
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		const owner = await Bun.file(ownerFile)
+			.json()
+			.catch(() => null);
+		if (typeof owner?.pid === "number" && !processAlive(owner.pid)) {
+			await fs.rm(ownerFile, { force: true });
+			await fs.rmdir(lock).catch(() => {});
+			continue;
+		}
+		if (!owner && (await olderThan(lock, 1000))) {
+			await fs.rmdir(lock).catch(() => {});
+			continue;
+		}
+		await Bun.sleep(20);
+	}
+	throw new Error("Another shorthand run on this repository did not finish within a minute.");
+}
+
+/** A per-checkout lock in stable user-writable storage (the macOS overlay moves the checkout). */
+async function repositoryLockPath(repo: string): Promise<string> {
+	const lockRoot = path.join(homedir(), ".cache", "pi-shorthand", "locks");
+	await fs.mkdir(lockRoot, { recursive: true, mode: 0o700 });
+	const stats = await fs.lstat(lockRoot);
+	if (!stats.isDirectory() || stats.isSymbolicLink() || (process.getuid && stats.uid !== process.getuid())) {
+		throw new Error(`Unsafe shorthand lock directory: ${lockRoot}`);
+	}
+	if ((stats.mode & 0o077) !== 0) await fs.chmod(lockRoot, 0o700);
+	const checkout = createHash("sha256").update(repo).digest("hex").slice(0, 16);
+	return path.join(lockRoot, checkout);
+}
+
+async function olderThan(file: string, milliseconds: number): Promise<boolean> {
+	const stats = await fs.stat(file).catch(() => null);
+	return Boolean(stats && Date.now() - stats.mtimeMs > milliseconds);
+}
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** Changed destinations make the whole host-side application fail before its first write. */
+async function conflictingFiles(repo: string, changes: Change[]): Promise<string[]> {
+	const conflicts = [];
+	for (const change of changes) {
+		if (!(await destinationMatches(repo, change))) conflicts.push(change.file);
+	}
+	return conflicts;
+}
+
+/** Compares through a no-follow file descriptor and rechecks the path leading to it. */
+async function destinationMatches(repo: string, change: Change): Promise<boolean> {
+	const target = path.join(repo, change.file);
+	if (!(await safeParentChain(repo, target))) return false;
+	if (!change.before) {
+		try {
+			await fs.lstat(target);
+			return false;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			return safeParentChain(repo, target);
+		}
+	}
+
+	let handle: fs.FileHandle | undefined;
+	try {
+		handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+		const before = await handle.stat();
+		if (!before.isFile()) return false;
+		const contents = await handle.readFile();
+		const after = await handle.stat();
+		const unchangedWhileRead =
+			before.dev === after.dev &&
+			before.ino === after.ino &&
+			before.mode === after.mode &&
+			before.size === after.size &&
+			before.mtimeMs === after.mtimeMs &&
+			before.ctimeMs === after.ctimeMs;
+		if (!unchangedWhileRead || !Buffer.from(change.before).equals(contents)) return false;
+		if (!(await safeParentChain(repo, target))) return false;
+		const leaf = await fs.lstat(target);
+		return leaf.isFile() && leaf.dev === after.dev && leaf.ino === after.ino;
+	} catch (error) {
+		if (["ENOENT", "ELOOP", "EISDIR", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+		throw error;
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+/** Every existing ancestor must remain a real directory inside the checkout, never a symlink. */
+async function safeParentChain(repo: string, target: string): Promise<boolean> {
+	const relative = path.relative(repo, target);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
+	let parent = path.dirname(target);
+	while (parent !== repo) {
+		const stats = await fs.lstat(parent).catch(() => null);
+		if (!stats?.isDirectory() || stats.isSymbolicLink()) return false;
+		parent = path.dirname(parent);
+	}
+	return true;
 }
 
 /** Nothing if aborted. Everything if the program succeeded. If it failed, nothing, unless rollback is "file". */
@@ -186,6 +327,7 @@ async function runProgram(
 	repo: string,
 	tempDir: string,
 ): Promise<ProgramRun> {
+	abort.throwIfAborted();
 	// The program file goes into the working directory, so its relative imports resolve as usual.
 	const programPath = path.join(options.cwd, PROGRAM_FILE);
 	const programFile = path.join(overlay.writableDir, path.relative(repo, programPath));
@@ -208,6 +350,7 @@ async function runProgram(
 	});
 	const killAll = () => killGroup(child);
 	abort.addEventListener("abort", killAll);
+	if (abort.aborted) killAll();
 
 	const { exitCode, timedOut, openForWriting, stillRunning } = await waitWithTimeout(child, options.timeoutMs, repo);
 	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning });
@@ -382,11 +525,18 @@ async function gitIgnored(dir: string, files: string[]): Promise<Set<string>> {
 	return new Set(output.split("\0").filter(Boolean));
 }
 
-async function applyChanges(repo: string, changes: Change[]) {
-	for (const { file, after } of changes) {
+async function applyChanges(repo: string, changes: Change[]): Promise<{ applied: Change[]; conflicts: string[] }> {
+	const applied: Change[] = [];
+	for (let index = 0; index < changes.length; index++) {
+		const change = changes[index];
+		const { file, before, after } = change;
 		const target = path.join(repo, file);
 		if (!after) {
+			if (!(await destinationMatches(repo, change))) {
+				return { applied, conflicts: await conflictingFiles(repo, changes.slice(index)) };
+			}
 			await fs.rm(target, { force: true });
+			applied.push(change);
 			continue;
 		}
 		// Write next to the target, then rename, so each file is replaced atomically. Create the
@@ -396,15 +546,23 @@ async function applyChanges(repo: string, changes: Change[]) {
 		try {
 			await handle.writeFile(after);
 			await handle.close();
-			const original = await fs.stat(target).catch(() => null);
+			const original = before ? await fs.lstat(target).catch(() => null) : null;
 			if (original) await fs.chmod(temp, original.mode);
+			// This is deliberately adjacent to rename. Non-cooperating writers can still race the
+			// kernel operation, but this bounds that unavoidable portable-filesystem window per path.
+			if (!(await destinationMatches(repo, change))) {
+				await fs.rm(temp, { force: true });
+				return { applied, conflicts: await conflictingFiles(repo, changes.slice(index)) };
+			}
 			await fs.rename(temp, target);
+			applied.push(change);
 		} catch (error) {
 			await handle.close().catch(() => {});
 			await fs.rm(temp, { force: true }).catch(() => {});
 			throw error;
 		}
 	}
+	return { applied, conflicts: [] };
 }
 
 /** A change as a git-style patch. */
@@ -442,8 +600,21 @@ function ancestors(dir: string): string[] {
 
 /** A regular file's contents, or null if there's no regular file there. */
 async function readFile(file: string): Promise<Uint8Array | null> {
-	const stats = await fs.lstat(file).catch(() => null);
-	return stats?.isFile() ? Bun.file(file).bytes() : null;
+	let stats;
+	try {
+		stats = await fs.lstat(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+	if (!stats.isFile()) return null;
+	try {
+		return await Bun.file(file).bytes();
+	} catch (error) {
+		// A destination removed between lstat and read is still a conflict.
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
 }
 
 if (import.meta.main) {

@@ -4,7 +4,7 @@
  */
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdir, mkdtemp, readlink, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readlink, realpath, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
@@ -255,6 +255,69 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		},
 	);
 
+	test.skipIf(process.platform !== "linux")(
+		"an external edit to a destination prevents every change from applying",
+		async () => {
+			const repo = await makeRepo(FILES);
+			const ready = path.join(path.dirname(repo), "conflict-program-started");
+			const edited = path.join(path.dirname(repo), "conflict-edit-finished");
+			const runner = startRunner(
+				repo,
+				`await Bun.write(${JSON.stringify(ready)}, "ready");
+			while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
+			await Bun.write("src/a.ts", "program edit\\n");
+			await Bun.write("src/generated.ts", "should not apply\\n");`,
+			);
+			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+			expect(await Bun.file(ready).exists()).toBe(true);
+			await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
+			await Bun.write(edited, "edited");
+
+			const [stdout, stderr] = await Promise.all([
+				new Response(runner.stdout).text(),
+				new Response(runner.stderr).text(),
+			]);
+			expect(await runner.exited, stderr).toBe(0);
+			const result: RunResult = JSON.parse(stdout);
+
+			expect(result.conflicts).toEqual(["src/a.ts"]);
+			expect(result.applied).toEqual([]);
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
+			expect(await Bun.file(path.join(repo, "src/generated.ts")).exists()).toBe(false);
+		},
+	);
+
+	test.skipIf(process.platform !== "linux")("a parent replaced by a symlink cannot redirect application", async () => {
+		const repo = await makeRepo(FILES);
+		const ready = path.join(path.dirname(repo), "parent-program-started");
+		const edited = path.join(path.dirname(repo), "parent-edit-finished");
+		const outside = path.join(path.dirname(repo), "outside");
+		await mkdir(outside);
+		await Bun.write(path.join(outside, "a.ts"), "outside\n");
+		const runner = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(ready)}, "ready");
+			while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
+			await Bun.write("src/a.ts", "program edit\\n");`,
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(ready).exists()).toBe(true);
+		await rename(path.join(repo, "src"), path.join(repo, "src-original"));
+		await symlink(outside, path.join(repo, "src"));
+		await Bun.write(edited, "edited");
+
+		const [stdout, stderr] = await Promise.all([
+			new Response(runner.stdout).text(),
+			new Response(runner.stderr).text(),
+		]);
+		expect(await runner.exited, stderr).toBe(0);
+		const result: RunResult = JSON.parse(stdout);
+
+		expect(result.conflicts).toEqual(["src/a.ts"]);
+		expect(result.applied).toEqual([]);
+		expect(await Bun.file(path.join(outside, "a.ts")).text()).toBe("outside\n");
+	});
+
 	test("two runs on the same repository both apply", async () => {
 		const repo = await makeRepo(FILES);
 		const [first, second] = await Promise.all([
@@ -265,6 +328,65 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(first.applied).toEqual(["src/one.ts"]);
 		expect(second.applied).toEqual(["src/two.ts"]);
 		expect(await gitStatus(repo)).toBe("?? src/one.ts\n?? src/two.ts");
+	});
+
+	test("two runs changing the same file execute against successive baselines", async () => {
+		const repo = await makeRepo(FILES);
+		const firstReady = path.join(path.dirname(repo), "first-run-ready");
+		const releaseFirst = path.join(path.dirname(repo), "release-first-run");
+		const secondReady = path.join(path.dirname(repo), "second-run-ready");
+		const first = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(firstReady)}, "ready");
+			while (!(await Bun.file(${JSON.stringify(releaseFirst)}).exists())) await Bun.sleep(10);
+			await Bun.write("src/a.ts", "first\\n");`,
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(firstReady).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(firstReady).exists()).toBe(true);
+
+		const second = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(secondReady)}, "ready");
+			const prior = await Bun.file("src/a.ts").text();
+			await Bun.write("src/a.ts", prior + "second\\n");`,
+		);
+		await Bun.sleep(100);
+		expect(await Bun.file(secondReady).exists()).toBe(false);
+		await Bun.write(releaseFirst, "release");
+
+		const [firstOut, secondOut] = await Promise.all([
+			new Response(first.stdout).text(),
+			new Response(second.stdout).text(),
+		]);
+		expect(await first.exited).toBe(0);
+		expect(await second.exited).toBe(0);
+		expect((JSON.parse(firstOut) as RunResult).conflicts).toEqual([]);
+		expect((JSON.parse(secondOut) as RunResult).conflicts).toEqual([]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("first\nsecond\n");
+	});
+
+	test("a run cancelled while waiting for the lock never starts", async () => {
+		const repo = await makeRepo(FILES);
+		const firstReady = path.join(path.dirname(repo), "lock-holder-ready");
+		const releaseFirst = path.join(path.dirname(repo), "release-lock-holder");
+		const secondStarted = path.join(path.dirname(repo), "cancelled-run-started");
+		const first = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(firstReady)}, "ready");
+			while (!(await Bun.file(${JSON.stringify(releaseFirst)}).exists())) await Bun.sleep(10);`,
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(firstReady).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(firstReady).exists()).toBe(true);
+
+		const second = startRunner(repo, `await Bun.write(${JSON.stringify(secondStarted)}, "started");`);
+		await Bun.sleep(100);
+		second.kill("SIGTERM");
+		expect(await second.exited).not.toBe(0);
+		expect(await Bun.file(secondStarted).exists()).toBe(false);
+
+		await Bun.write(releaseFirst, "release");
+		expect(await first.exited).toBe(0);
+		expect(await Bun.file(secondStarted).exists()).toBe(false);
 	});
 
 	test.skipIf(process.platform !== "darwin")("repairs a run that crashed part-way", async () => {

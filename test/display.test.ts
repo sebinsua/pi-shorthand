@@ -30,6 +30,7 @@ const result = (overrides: Partial<RunResult>): RunResult => ({
 	warnings: [],
 	changes: [],
 	applied: [],
+	conflicts: [],
 	rolledBack: [],
 	stillRunning: [],
 	timeoutMs: 2000,
@@ -68,6 +69,23 @@ describe("the verdict", () => {
 		const lines = show(run);
 		expect(lines[0]).toBe("⚠ Timed out after 1s · kept 1 file, rolled back 1 · +1 −1 · 0.6s");
 		expect(lines[1]).toBe("  rolled back b.ts: half-written when the program was killed");
+	});
+
+	test("a conflict says nothing was applied and names the changed destination", () => {
+		const run = result({ changes: [change("a.ts")], conflicts: ["a.ts"] });
+		expect(show(run).slice(0, 2)).toEqual(["✕ Conflict · nothing applied · 0.6s", "  changed while running: a.ts"]);
+	});
+
+	test("a conflict preserves a failure or timeout from the program", () => {
+		expect(show(result({ exitCode: 2, conflicts: ["a.ts"] }))[0]).toBe("✕ Conflict · nothing applied · exit 2 · 0.6s");
+		expect(show(result({ exitCode: null, timedOut: true, timeoutMs: 1000, conflicts: ["a.ts"] }))[0]).toBe(
+			"✕ Conflict · nothing applied · timed out after 1s · 0.6s",
+		);
+	});
+
+	test("a late conflict reports files already applied", () => {
+		const run = result({ changes: [change("a.ts"), change("b.ts")], applied: ["a.ts"], conflicts: ["b.ts"] });
+		expect(show(run)[0]).toBe("✕ Conflict · 1 file applied · 0.6s");
 	});
 
 	test("the call line names a non-default rollback mode and the timeout", () => {
