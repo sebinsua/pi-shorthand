@@ -2,7 +2,8 @@
 
 ## The environment
 
-TypeScript, run by Bun in the repository's working directory, at its usual path. Top-level `await`
+TypeScript, run by Bun in an isolated copy of the repository's working directory. Use relative paths
+for repository files; on macOS the real checkout's absolute path is intentionally inaccessible. Top-level `await`
 works. `glob`, `grep`, `sg` and `grit` are globals and synchronous (no `await`); Bun's `$` is async.
 
 ## Files

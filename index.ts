@@ -24,7 +24,7 @@ const DESCRIPTION = `Make a repository change with one TypeScript program, run b
 
 Use it when a change takes several deterministic steps (reads, searches, multi-file edits, structural rewrites, checks) and you already know what to do with each intermediate result. If seeing an intermediate result could change your plan, look first with a normal tool call.
 
-The program runs in the working directory, and sees the repository at its usual path. Top-level await works, and so do ordinary Bun and Node APIs. These globals are synchronous, and see the files git sees (not node_modules or ignored files):
+The program runs in an isolated copy of the working directory. Use relative paths for repository files; on macOS the real checkout's absolute path is intentionally inaccessible. Top-level await works, and so do ordinary Bun and Node APIs. These globals are synchronous, and see the files git sees (not node_modules or ignored files):
 - glob(pattern, dir?) → string[]
 - grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
 - sg.find(pattern, files?) → {file, line, text, vars}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a file, directory, glob or a list of them (JS/TS).

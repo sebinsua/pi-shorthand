@@ -46,9 +46,9 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 ## Good to know
 
 - Only files git tracks, or would track, are applied.
-- On macOS your repo is briefly swapped for the overlay while a program runs (about 150 ms), so your
-  editor may notice. On Linux each run snapshots the checkout first; reflinks make that cheap where
-  supported, while other filesystems copy its contents and use corresponding temporary space.
+- Each run snapshots the checkout first; reflinks make that cheap where supported, while other
+  filesystems copy its contents and use corresponding temporary space. On macOS the program runs at
+  a private AgentFS mount, so use paths relative to its working directory for repository files.
 - Runs against the same checkout are serialized. If another process edits a destination while a run
   is in progress, shorthand checks it again immediately before replacing it and reports a conflict.
   A non-cooperating writer can still race the final filesystem rename or removal itself.

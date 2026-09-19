@@ -1,163 +1,223 @@
 /**
- * macOS has no mount namespaces, so for the length of a run:
- * 1. the repository is renamed to <repo>.pi-base, and an empty directory takes its place;
- * 2. .git and large ignored directories (node_modules, …) are moved to <repo>.pi-shared and
- *    symlinked back, so reading them bypasses the overlay (AgentFS copies every file it opens);
- * 3. AgentFS serves an overlay of the base over NFS, mounted at the repository's path;
- * 4. the program runs under sandbox-exec, which stops it writing to the base or to .git.
- * close() puts everything back. <repo>.pi-shared doubles as a lock: another run on the same repository
- * waits for this one, and if a run crashed part-way, the next one puts everything back first.
+ * macOS has no mount namespaces, so AgentFS is mounted at a private temporary path rather than at
+ * the public checkout. The program runs inside that mount while editors and other host processes
+ * continue to see the real repository. A stable copy is the lower tree, so neither side can change
+ * what the other reads during execution; runner.ts detects destination edits before publishing.
  */
 
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
+import { copyStableTree } from "./overlay-linux.ts";
 import type { Overlay } from "./runner.ts";
-
-interface Dirs {
-	repo: string;
-	base: string; // the real files, while the overlay is mounted
-	shared: string; // .git and large ignored directories, while the overlay is mounted
-}
 
 export async function openMacOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const agentfs = process.env.AGENTFS_BIN ?? Bun.which("agentfs");
 	if (!agentfs) throw new Error("The code tool needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
 
-	const dirs = { repo, base: `${repo}.pi-base`, shared: `${repo}.pi-shared` };
-	await takeLock(dirs);
+	const stateFile = await recoveryFile(repo);
+	await recoverCrashedRun(stateFile);
+	const base = path.join(tempDir, "base");
+	const mountContainer = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-workspace-"));
+	const mount = path.join(mountContainer, "repo");
+	await fs.mkdir(mount);
+	const state: RecoveryState = { runnerPid: process.pid, tempDir, mountContainer, mount };
+	await writeRecoveryState(stateFile, state);
+
 	try {
-		const shared = await moveAside(dirs);
-		const database = await createDatabase(agentfs, dirs.base, tempDir);
-		await serveAndMount(agentfs, database, dirs);
+		await copyStableTree(repo, base);
+		const database = await createDatabase(agentfs, base, tempDir);
+		const server = await serveAndMount(agentfs, database, mount, async (serverPid) => {
+			state.serverPid = serverPid;
+			await writeRecoveryState(stateFile, state);
+		});
+		let closed = false;
 
 		return {
-			originalDir: dirs.base,
-			writableDir: repo,
-			// The shared entries are symlinks now, which patterns like "node_modules/" don't match.
-			// ._* are the AppleDouble files macOS writes on NFS, where it can't store extended attributes.
-			gitExcludes: ["._*", ...shared.map((entry) => `/${entry}`)],
-			wrap: (command) => ["/usr/bin/sandbox-exec", "-p", sandboxProfile(dirs), ...command],
-			changes: () => changesInDatabase(agentfs, database, dirs),
-			close: () => restore(dirs),
+			originalDir: base,
+			writableDir: mount,
+			executionDir: mount,
+			gitExcludes: ["._*"],
+			wrap: (command) => ["/usr/bin/sandbox-exec", "-p", sandboxProfile(repo, tempDir, mount, stateFile), ...command],
+			changes: () => changesInDatabase(agentfs, database, base, mount),
+			close: async () => {
+				if (closed) return;
+				closed = true;
+				let unmountError: unknown;
+				try {
+					await unmount(mount);
+				} catch (error) {
+					unmountError = error;
+				} finally {
+					server.kill();
+					await server.exited;
+				}
+				if (unmountError) throw unmountError;
+				await fs.rm(mountContainer, { recursive: true, force: true });
+				await fs.rm(stateFile, { force: true });
+			},
 		};
 	} catch (error) {
-		await restore(dirs);
+		await cleanupRecoveredRun(state, stateFile).catch(() => {});
 		throw error;
 	}
 }
 
-/**
- * Creating a directory is atomic, so whoever creates <repo>.pi-shared owns the repository until
- * restore() removes it. Waits while another run is alive; repairs a run that crashed.
- */
-async function takeLock(dirs: Dirs) {
-	for (let attempt = 0; attempt < 3000; attempt++) {
+interface RecoveryState {
+	runnerPid: number;
+	tempDir: string;
+	mountContainer: string;
+	mount: string;
+	serverPid?: number;
+}
+
+async function recoveryFile(repo: string): Promise<string> {
+	const directory = path.join(homedir(), ".cache", "pi-shorthand", "macos-mounts");
+	await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+	const stats = await fs.lstat(directory);
+	if (!stats.isDirectory() || stats.isSymbolicLink() || (process.getuid && stats.uid !== process.getuid())) {
+		throw new Error(`Unsafe shorthand recovery directory: ${directory}`);
+	}
+	if ((stats.mode & 0o077) !== 0) await fs.chmod(directory, 0o700);
+	const checkout = createHash("sha256").update(repo).digest("hex").slice(0, 16);
+	return path.join(directory, `${checkout}.json`);
+}
+
+async function recoverCrashedRun(stateFile: string) {
+	const state = (await Bun.file(stateFile)
+		.json()
+		.catch(() => null)) as RecoveryState | null;
+	if (!state) return;
+	await validateRecoveryState(state);
+	if (isAlive(state.runnerPid)) throw new Error("Another shorthand macOS workspace is still active.");
+	await cleanupRecoveredRun(state, stateFile);
+}
+
+async function cleanupRecoveredRun(state: RecoveryState, stateFile: string) {
+	await validateRecoveryState(state);
+	const serverIsOurs = await isExpectedServer(state);
+	await $`umount -f ${state.mount}`.nothrow().quiet();
+	if (state.serverPid && serverIsOurs) {
 		try {
-			await fs.mkdir(dirs.shared);
-			await writeState(dirs, { runnerPid: process.pid, shared: [] });
-			return;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			process.kill(state.serverPid, "SIGKILL");
+		} catch {
+			// already stopped
 		}
-		const state = await readState(dirs).catch(() => null);
-		const crashed = state ? !isAlive(state.runnerPid) : await olderThan(dirs.shared, 1000);
-		if (crashed) await restore(dirs);
-		else await Bun.sleep(20);
 	}
-	throw new Error("Another code run on this repository didn't finish within a minute.");
+	await fs.rm(state.mountContainer, { recursive: true, force: true });
+	await fs.rm(state.tempDir, { recursive: true, force: true });
+	await fs.rm(stateFile, { force: true });
 }
 
-/** Steps 1 and 2. Records what it did in <repo>.pi-shared/state.json, so restore() can undo it. */
-async function moveAside(dirs: Dirs): Promise<string[]> {
-	const shared = await listSharedEntries(dirs.repo);
-	await writeState(dirs, { ...(await readState(dirs)), shared });
-
-	await fs.rename(dirs.repo, dirs.base);
-	await fs.mkdir(dirs.repo);
-	for (const entry of shared) {
-		await fs.mkdir(path.dirname(path.join(dirs.shared, entry)), { recursive: true });
-		await fs.rename(path.join(dirs.base, entry), path.join(dirs.shared, entry));
-		await fs.symlink(path.join(dirs.shared, entry), path.join(dirs.base, entry));
-	}
-	return shared;
+async function validateRecoveryState(state: RecoveryState) {
+	const temporaryRoot = await fs.realpath(tmpdir());
+	const isOwnedTemporary = (candidate: unknown, prefix: string) => {
+		if (typeof candidate !== "string" || path.resolve(candidate) !== candidate) return false;
+		return path.dirname(candidate) === temporaryRoot && path.basename(candidate).startsWith(prefix);
+	};
+	const valid =
+		Number.isSafeInteger(state.runnerPid) &&
+		state.runnerPid > 0 &&
+		(state.serverPid === undefined || (Number.isSafeInteger(state.serverPid) && state.serverPid > 0)) &&
+		isOwnedTemporary(state.tempDir, "pi-shorthand-") &&
+		isOwnedTemporary(state.mountContainer, "pi-shorthand-workspace-") &&
+		state.mount === path.join(state.mountContainer, "repo");
+	if (!valid) throw new Error("Refusing to clean an invalid shorthand macOS recovery record.");
 }
 
-/** .git, plus ignored directories (the top-most ones) that don't contain tracked files. */
-async function listSharedEntries(repo: string): Promise<string[]> {
-	const [ignoredOutput, trackedOutput] = await Promise.all([
-		$`git ls-files -z --others --ignored --exclude-standard --directory`.cwd(repo).text(),
-		$`git ls-files -z`.cwd(repo).text(),
-	]);
-	const ignoredDirs = ignoredOutput.split("\0").filter((entry) => entry.endsWith("/"));
-	const tracked = trackedOutput.split("\0");
-
-	const shared = [".git"];
-	for (const dir of ignoredDirs.map((entry) => entry.slice(0, -1)).toSorted()) {
-		const insideShared = shared.some((entry) => dir.startsWith(`${entry}/`));
-		const containsTracked = tracked.some((file) => file.startsWith(`${dir}/`));
-		if (!insideShared && !containsTracked) shared.push(dir);
+/** A stale PID is signalled only if it is still our AgentFS process for this exact database. */
+async function isExpectedServer(state: RecoveryState): Promise<boolean> {
+	if (!state.serverPid) return false;
+	const output = (await $`ps -ww -o uid=,command= -p ${state.serverPid}`.nothrow().quiet().text()).trim();
+	if (!output) return false;
+	const match = output.match(/^(\d+)\s+(.+)$/s);
+	const database = path.join(state.tempDir, ".agentfs", "run.db");
+	if (!match || Number(match[1]) !== process.getuid?.() || !match[2].includes(database)) {
+		throw new Error("Refusing to signal a process that is not the recorded shorthand AgentFS server.");
 	}
-	return shared;
+	return true;
 }
 
-/**
- * An empty overlay database. `agentfs init` takes ~150 ms, so it runs once per repository to make
- * a template, and each run gets an instant copy-on-write clone of that.
- */
+async function writeRecoveryState(file: string, state: RecoveryState) {
+	const temporary = `${file}.${randomUUID()}.tmp`;
+	try {
+		await fs.writeFile(temporary, JSON.stringify(state), { flag: "wx", mode: 0o600 });
+		await fs.rename(temporary, file);
+	} catch (error) {
+		await fs.rm(temporary, { force: true }).catch(() => {});
+		throw error;
+	}
+}
+
+function isAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function createDatabase(agentfs: string, base: string, tempDir: string): Promise<string> {
-	const templateDir = path.join(homedir(), ".cache", "pi-shorthand", Bun.hash(base).toString(16));
-	const templateFiles = path.join(templateDir, ".agentfs"); // where `agentfs init` puts them
-	if (!(await Bun.file(path.join(templateFiles, "template.db")).exists())) {
-		await fs.mkdir(templateDir, { recursive: true });
-		await $`${agentfs} init template --base ${base}`.cwd(templateDir).quiet();
-	}
-
-	await cloneDatabase(templateFiles, "template.db", tempDir, "run.db");
-	return path.join(tempDir, "run.db");
+	await $`${agentfs} init run --base ${base}`.cwd(tempDir).quiet();
+	return path.join(tempDir, ".agentfs", "run.db");
 }
 
-/** Step 3. */
-async function serveAndMount(agentfs: string, database: string, dirs: Dirs) {
+async function serveAndMount(
+	agentfs: string,
+	database: string,
+	mount: string,
+	onSpawn: (pid: number) => Promise<void>,
+) {
 	const port = freePort();
-	const server = Bun.spawn([agentfs, "nfs", database, "--port", String(port)], { stdout: "ignore", stderr: "ignore" });
-	await writeState(dirs, { ...(await readState(dirs)), serverPid: server.pid });
-	await waitForPort(port);
-
-	const options = `locallocks,vers=3,tcp,port=${port},mountport=${port},soft,timeo=100,retrans=5`;
-	await $`/sbin/mount_nfs -o ${options} 127.0.0.1:/ ${dirs.repo}`.quiet();
+	const server = Bun.spawn([agentfs, "nfs", database, "--port", String(port)], {
+		stdout: "ignore",
+		stderr: "ignore",
+	});
+	try {
+		await onSpawn(server.pid);
+		await waitForPort(port);
+		const options = `locallocks,vers=3,tcp,port=${port},mountport=${port},soft,timeo=100,retrans=5`;
+		await $`/sbin/mount_nfs -o ${options} 127.0.0.1:/ ${mount}`.quiet();
+		return server;
+	} catch (error) {
+		server.kill();
+		await server.exited;
+		throw error;
+	}
 }
 
-/** Step 4: allow everything except writing to the original files or to .git. */
-function sandboxProfile(dirs: Dirs): string {
+/** The program may write only to its private mount, excluding the real checkout and Git metadata. */
+function sandboxProfile(repo: string, tempDir: string, mount: string, stateFile: string): string {
 	return [
 		"(version 1)",
 		"(allow default)",
-		`(deny file-write* (subpath ${JSON.stringify(dirs.base)}))`,
-		`(deny file-write* (subpath ${JSON.stringify(path.join(dirs.shared, ".git"))}))`,
+		`(deny file-read* (subpath ${JSON.stringify(repo)}))`,
+		`(deny file-write* (subpath ${JSON.stringify(repo)}))`,
+		`(deny file-write* (subpath ${JSON.stringify(tempDir)}))`,
+		`(deny file-write* (subpath ${JSON.stringify(path.dirname(stateFile))}))`,
+		`(deny file-write* (subpath ${JSON.stringify(path.join(mount, ".git"))}))`,
 	].join("\n");
 }
 
-/**
- * `agentfs diff` lists what's in the overlay (including files that were only read). The server
- * keeps the database locked, so this diffs a copy-on-write snapshot of it.
- */
-async function changesInDatabase(agentfs: string, database: string, dirs: Dirs) {
-	const snapshotDir = path.join(path.dirname(database), "snapshot");
+/** Snapshot the AgentFS database while its server owns the live database lock. */
+async function changesInDatabase(agentfs: string, database: string, base: string, mount: string) {
+	const snapshotDir = path.join(path.dirname(path.dirname(database)), "database-snapshot");
 	await cloneDatabase(path.dirname(database), "run.db", snapshotDir, "run.db");
 	const output = await $`${agentfs} diff ${path.join(snapshotDir, "run.db")}`.quiet().text();
 
 	const changes: { file: string; contents: Uint8Array | null }[] = [];
 	for (const line of output.split("\n")) {
-		// e.g. "M f /src/a.ts", "A f /src/new.ts", "D ? /src/old.ts"
 		const match = line.match(/^([AMD]) (\S) \/(.+)$/);
-		if (!match || path.basename(match[3]).startsWith("._")) continue; // AppleDouble files
+		if (!match || path.basename(match[3]).startsWith("._")) continue;
 		const [, change, type, file] = match;
+		if (file === ".git" || file.startsWith(".git/")) continue;
 
-		if (change !== "D" && type === "f") changes.push({ file, contents: await readFile(path.join(dirs.repo, file)) });
+		if (change !== "D" && type === "f") changes.push({ file, contents: await readFile(path.join(mount, file)) });
 		if (change === "D") {
-			for (const deleted of await filesUnder(path.join(dirs.base, file))) {
+			for (const deleted of await filesUnder(path.join(base, file))) {
 				changes.push({ file: path.join(file, deleted), contents: null });
 			}
 		}
@@ -165,59 +225,12 @@ async function changesInDatabase(agentfs: string, database: string, dirs: Dirs) 
 	return changes;
 }
 
-/** The files under a path relative to it: [""] for a file, everything inside for a directory. */
 async function filesUnder(original: string): Promise<string[]> {
 	const stats = await fs.lstat(original).catch(() => null);
 	if (!stats?.isDirectory()) return [""];
 	return fs.readdir(original, { recursive: true });
 }
 
-/** Unmounts, stops the server, renames everything back and releases the lock. */
-async function restore(dirs: Dirs) {
-	if (!(await exists(dirs.shared))) return;
-	const state = await readState(dirs).catch((): State => ({ runnerPid: 0, shared: [] }));
-
-	await $`umount -f ${dirs.repo}`.nothrow().quiet(); // -f: a leftover subprocess may still have files open
-	if (state.serverPid) {
-		try {
-			process.kill(state.serverPid);
-		} catch {
-			// already stopped
-		}
-	}
-
-	if (await exists(dirs.base)) {
-		for (const entry of state.shared) {
-			if (!(await exists(path.join(dirs.shared, entry)))) continue;
-			await fs.rm(path.join(dirs.base, entry), { force: true }); // the symlink
-			await fs.rename(path.join(dirs.shared, entry), path.join(dirs.base, entry));
-		}
-		await fs.rmdir(dirs.repo).catch(() => {}); // the empty mountpoint
-		await fs.rename(dirs.base, dirs.repo);
-	}
-
-	// Never delete <repo>.pi-shared recursively: during a run it holds the real node_modules and .git.
-	await fs.rm(path.join(dirs.shared, "state.json"), { force: true });
-	await removeEmptyDirectories(dirs.shared);
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────────
-
-interface State {
-	runnerPid: number;
-	shared: string[];
-	serverPid?: number;
-}
-
-function readState(dirs: Dirs): Promise<State> {
-	return Bun.file(path.join(dirs.shared, "state.json")).json();
-}
-
-async function writeState(dirs: Dirs, state: State) {
-	await Bun.write(path.join(dirs.shared, "state.json"), JSON.stringify(state));
-}
-
-/** Copy-on-write clones a database with its -wal/-shm files, renaming it. */
 async function cloneDatabase(fromDir: string, fromName: string, toDir: string, toName: string) {
 	await fs.mkdir(toDir, { recursive: true });
 	for (const file of await fs.readdir(fromDir)) {
@@ -226,35 +239,15 @@ async function cloneDatabase(fromDir: string, fromName: string, toDir: string, t
 	}
 }
 
-async function removeEmptyDirectories(dir: string) {
-	for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-		if (entry.isDirectory()) await removeEmptyDirectories(path.join(dir, entry.name));
-	}
-	await fs.rmdir(dir); // fails, leaving everything, if it isn't empty
-}
-
-/** A regular file's contents, or null if there's no regular file there. */
 async function readFile(file: string): Promise<Uint8Array | null> {
 	const stats = await fs.lstat(file).catch(() => null);
 	return stats?.isFile() ? Bun.file(file).bytes() : null;
 }
 
-function isAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0); // signal 0 only checks the process exists
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function olderThan(file: string, ms: number): Promise<boolean> {
-	const stats = await fs.stat(file).catch(() => null);
-	return !stats || Date.now() - stats.mtimeMs > ms;
-}
-
-async function exists(file: string): Promise<boolean> {
-	return (await fs.lstat(file).catch(() => null)) !== null;
+async function unmount(mount: string) {
+	const result = await $`umount -f ${mount}`.nothrow().quiet();
+	if (result.exitCode !== 0)
+		throw new Error(`Could not unmount the shorthand workspace: ${result.stderr.toString().trim()}`);
 }
 
 function freePort(): number {
@@ -270,7 +263,7 @@ async function waitForPort(port: number) {
 			socket.end();
 			return;
 		} catch {
-			await Bun.sleep(2); // not listening yet
+			await Bun.sleep(2);
 		}
 	}
 	throw new Error("AgentFS's NFS server didn't start.");

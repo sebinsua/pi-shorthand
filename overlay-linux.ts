@@ -45,6 +45,7 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	return {
 		originalDir: lower,
 		writableDir: upper,
+		executionDir: repo,
 		gitExcludes: [],
 		wrap,
 		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(filesAtStart, repo, wrap))],
@@ -53,7 +54,7 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 }
 
 /** Copies a coherent tree, retrying if anything in the source changes during the copy. */
-async function copyStableTree(source: string, destination: string) {
+export async function copyStableTree(source: string, destination: string) {
 	for (let attempt = 0; attempt < 3; attempt++) {
 		let before: string;
 		try {

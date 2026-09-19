@@ -1,5 +1,5 @@
 /**
- * Runs a Bun program against a git repository at its real path. The program's writes go to a
+ * Runs a Bun program against an isolated view of a git repository. The program's writes go to a
  * copy-on-write overlay; afterwards they're diffed, then applied to the repository or discarded.
  *
  * Usage: echo '<RunOptions as JSON>' | bun runner.ts   → prints a RunResult as JSON
@@ -55,10 +55,11 @@ export interface FileChange {
 	patch: string;
 }
 
-/** A copy-on-write view of the repository at its real path. */
+/** A copy-on-write view of the repository. */
 export interface Overlay {
 	originalDir: string; // where the original files are while the overlay is open
 	writableDir: string; // writing a file here puts it into the overlay
+	executionDir: string; // repository root as seen by the program process
 	gitExcludes: string[]; // extra patterns git should ignore inside the overlay
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
 	changes(): Promise<{ file: string; contents: Uint8Array | null }[]>; // may include files only read
@@ -331,6 +332,9 @@ async function runProgram(
 	// The program file goes into the working directory, so its relative imports resolve as usual.
 	const programPath = path.join(options.cwd, PROGRAM_FILE);
 	const programFile = path.join(overlay.writableDir, path.relative(repo, programPath));
+	const executionCwd = path.join(overlay.executionDir, path.relative(repo, options.cwd));
+	const executionProgramPath = path.join(executionCwd, PROGRAM_FILE);
+	const executionPrelude = executionPath(PRELUDE, repo, overlay);
 	await Bun.write(programFile, options.program);
 
 	const excludesFile = path.join(tempDir, "exclude");
@@ -340,19 +344,26 @@ async function runProgram(
 	// detached: the program gets its own process group, so killing the group kills anything it started too.
 	const outputFile = path.join(tempDir, "output");
 	const output = await fs.open(outputFile, "w");
-	const [command, ...args] = overlay.wrap([process.execPath, "--preload", PRELUDE, programPath], options.cwd);
+	const [command, ...args] = overlay.wrap(
+		[process.execPath, "--preload", executionPrelude, executionProgramPath],
+		executionCwd,
+	);
 	log("program started", { output: outputFile, timeoutMs: options.timeoutMs });
 	const child = spawn(command, args, {
-		cwd: options.cwd,
+		cwd: executionCwd,
 		detached: true,
 		stdio: ["ignore", output.fd, output.fd],
-		env: { ...process.env, ...programEnvironment(excludesFile) },
+		env: { ...process.env, ...programEnvironment(excludesFile, repo, overlay) },
 	});
 	const killAll = () => killGroup(child);
 	abort.addEventListener("abort", killAll);
 	if (abort.aborted) killAll();
 
-	const { exitCode, timedOut, openForWriting, stillRunning } = await waitWithTimeout(child, options.timeoutMs, repo);
+	const { exitCode, timedOut, openForWriting, stillRunning } = await waitWithTimeout(
+		child,
+		options.timeoutMs,
+		overlay.executionDir,
+	);
 	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning });
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
@@ -364,7 +375,7 @@ async function runProgram(
 	if (text.length > MAX_OUTPUT_CHARS) {
 		text = `[${text.length - MAX_OUTPUT_CHARS} earlier characters dropped]\n${text.slice(-MAX_OUTPUT_CHARS)}`;
 	}
-	text = text.replaceAll(programPath, "program.ts").replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
+	text = text.replaceAll(executionProgramPath, "program.ts").replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
 
 	return { exitCode, timedOut, output: text, openForWriting, stillRunning };
 }
@@ -456,21 +467,28 @@ function killGroup(child: ChildProcess) {
  * Adds our git excludes on top of any GIT_CONFIG_* the user already set. core.excludesFile
  * replaces the user's global excludes file, so globalGitExcludes() copies that file's patterns in.
  */
-function programEnvironment(excludesFile: string) {
+function programEnvironment(excludesFile: string, repo: string, overlay: Overlay) {
 	const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+	const nodeModules = NODE_MODULES.map((directory) => executionPath(directory, repo, overlay));
 	return {
-		PATH: [...NODE_MODULES.map((dir) => path.join(dir, ".bin")), process.env.PATH].join(path.delimiter),
+		PATH: [...nodeModules.map((dir) => path.join(dir, ".bin")), process.env.PATH].join(path.delimiter),
 		NO_COLOR: "1",
 		// So programs can import the extension's own packages, e.g. "@ast-grep/napi". A repository's own
 		// node_modules still wins: NODE_PATH is only a fallback.
-		NODE_PATH: [...NODE_MODULES, process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
+		NODE_PATH: [...nodeModules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
 		PI_SHORTHAND_LOG: LOG_FILE, // the prelude logs each command and helper call here
 		PI_SHORTHAND_RUN: RUN_ID,
-		GIT_OPTIONAL_LOCKS: "0", // on macOS .git is the real one: don't let `git status` write to it
+		GIT_OPTIONAL_LOCKS: "0", // read-only git commands should not dirty copied or mounted metadata
 		GIT_CONFIG_COUNT: String(count + 1),
 		[`GIT_CONFIG_KEY_${count}`]: "core.excludesFile",
 		[`GIT_CONFIG_VALUE_${count}`]: excludesFile,
 	};
+}
+
+/** Maps extension files into the isolated execution copy when the tool is editing its own checkout. */
+function executionPath(file: string, repo: string, overlay: Overlay): string {
+	const relative = path.relative(repo, file);
+	return relative.startsWith("..") || path.isAbsolute(relative) ? file : path.join(overlay.executionDir, relative);
 }
 
 /** The patterns in the user's global git excludes file, if they have one. */

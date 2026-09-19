@@ -4,8 +4,9 @@
  */
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readlink, realpath, rename, rm, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { RunOptions, RunResult } from "../runner.ts";
@@ -49,6 +50,11 @@ async function gitStatus(repo: string): Promise<string> {
 	return (await $`git status --short`.cwd(repo).text()).trim();
 }
 
+function macRecoveryFile(repo: string): string {
+	const checkout = createHash("sha256").update(repo).digest("hex").slice(0, 16);
+	return path.join(homedir(), ".cache", "pi-shorthand", "macos-mounts", `${checkout}.json`);
+}
+
 const FILES = {
 	"src/api.ts": "export function oldApi(a: number) {\n\treturn a;\n}\n",
 	"src/a.ts": 'import { oldApi } from "./api";\nexport const a = oldApi(1);\n',
@@ -73,6 +79,98 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		]);
 		expect(result.applied).toEqual(["src/a.ts", "src/b.ts", "src/new.ts"]);
 		expect(await gitStatus(repo)).toBe("M src/a.ts\n D src/b.ts\n?? src/new.ts");
+	});
+
+	test("preserves a nested working directory inside the execution root", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `await Bun.write("a.ts", "nested cwd\\n");`, {
+			cwd: path.join(repo, "src"),
+		});
+
+		expect(result.applied).toEqual(["a.ts"]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("nested cwd\n");
+	});
+
+	test.skipIf(process.platform !== "darwin")(
+		"the macOS program cannot access the live checkout or runner state",
+		async () => {
+			const repo = await makeRepo(FILES);
+			const liveFile = path.join(repo, "src/a.ts");
+			const result = await run(
+				repo,
+				`let liveReadBlocked = false;
+			try { await Bun.file(${JSON.stringify(liveFile)}).text(); } catch { liveReadBlocked = true; }
+			if (!liveReadBlocked) throw new Error("live checkout was readable");
+			const configIndex = Number(process.env.GIT_CONFIG_COUNT) - 1;
+			const internal = require("node:path").dirname(process.env[\`GIT_CONFIG_VALUE_\${configIndex}\`]!);
+			let internalWriteBlocked = false;
+			try { await Bun.write(require("node:path").join(internal, "output"), "tampered"); } catch { internalWriteBlocked = true; }
+			if (!internalWriteBlocked) throw new Error("runner state was writable");
+			const recovery = require("node:path").join(require("node:os").homedir(), ".cache/pi-shorthand/macos-mounts/tampered");
+			let recoveryWriteBlocked = false;
+			try { await Bun.write(recovery, "tampered"); } catch { recoveryWriteBlocked = true; }
+			if (!recoveryWriteBlocked) throw new Error("recovery state was writable");
+			console.log(await Bun.file("src/a.ts").text());`,
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain(FILES["src/a.ts"]);
+			expect(await Bun.file(liveFile).text()).toBe(FILES["src/a.ts"]);
+		},
+	);
+
+	test.skipIf(process.platform !== "darwin")("macOS recovery rejects paths outside owned temporary roots", async () => {
+		const repo = await makeRepo(FILES);
+		const stateFile = macRecoveryFile(repo);
+		const victim = path.join(path.dirname(repo), "recovery-victim");
+		await mkdir(path.dirname(stateFile), { recursive: true });
+		await Bun.write(victim, "keep me\n");
+		await Bun.write(
+			stateFile,
+			JSON.stringify({ runnerPid: 999_999_999, tempDir: victim, mountContainer: victim, mount: victim }),
+		);
+
+		try {
+			const runner = startRunner(repo, "");
+			expect(await runner.exited).not.toBe(0);
+			expect(await Bun.file(victim).text()).toBe("keep me\n");
+		} finally {
+			await rm(stateFile, { force: true });
+		}
+	});
+
+	test.skipIf(process.platform !== "darwin")("macOS recovery does not signal a reused unrelated PID", async () => {
+		const repo = await makeRepo(FILES);
+		const stateFile = macRecoveryFile(repo);
+		const temporaryRoot = await realpath(tmpdir());
+		const staleTemp = await mkdtemp(path.join(temporaryRoot, "pi-shorthand-stale-"));
+		const staleMountContainer = await mkdtemp(path.join(temporaryRoot, "pi-shorthand-workspace-stale-"));
+		const staleMount = path.join(staleMountContainer, "repo");
+		await mkdir(staleMount);
+		const unrelated = Bun.spawn(["sleep", "30"]);
+		await mkdir(path.dirname(stateFile), { recursive: true });
+		await Bun.write(
+			stateFile,
+			JSON.stringify({
+				runnerPid: 999_999_999,
+				serverPid: unrelated.pid,
+				tempDir: staleTemp,
+				mountContainer: staleMountContainer,
+				mount: staleMount,
+			}),
+		);
+
+		try {
+			const runner = startRunner(repo, "");
+			expect(await runner.exited).not.toBe(0);
+			expect(unrelated.killed).toBe(false);
+		} finally {
+			unrelated.kill();
+			await unrelated.exited;
+			await rm(stateFile, { force: true });
+			await rm(staleTemp, { recursive: true, force: true });
+			await rm(staleMountContainer, { recursive: true, force: true });
+		}
 	});
 
 	test("applies nothing when the program fails, and reports the error", async () => {
@@ -224,70 +322,137 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		},
 	);
 
-	test.skipIf(process.platform !== "linux")(
-		"a run keeps reading its starting snapshot after an external edit",
-		async () => {
-			const repo = await makeRepo(FILES);
-			const ready = path.join(path.dirname(repo), "program-started");
-			const edited = path.join(path.dirname(repo), "external-edit-finished");
-			const runner = startRunner(
-				repo,
-				`await Bun.write(${JSON.stringify(ready)}, "ready");
+	test("a run keeps reading its starting snapshot after an external edit", async () => {
+		const repo = await makeRepo(FILES);
+		const ready = path.join(path.dirname(repo), "program-started");
+		const edited = path.join(path.dirname(repo), "external-edit-finished");
+		const runner = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(ready)}, "ready");
 			while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
 			const original = await Bun.file("src/a.ts").text();
 			await Bun.write("src/generated.ts", original);`,
-			);
-			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
-			expect(await Bun.file(ready).exists()).toBe(true);
-			await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
-			await Bun.write(edited, "edited");
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(ready).exists()).toBe(true);
+		await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
+		await Bun.write(edited, "edited");
 
-			const [stdout, stderr] = await Promise.all([
-				new Response(runner.stdout).text(),
-				new Response(runner.stderr).text(),
-			]);
-			expect(await runner.exited, stderr).toBe(0);
-			const result: RunResult = JSON.parse(stdout);
+		const [stdout, stderr] = await Promise.all([
+			new Response(runner.stdout).text(),
+			new Response(runner.stderr).text(),
+		]);
+		expect(await runner.exited, stderr).toBe(0);
+		const result: RunResult = JSON.parse(stdout);
 
-			expect(result.applied).toEqual(["src/generated.ts"]);
-			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
-			expect(await Bun.file(path.join(repo, "src/generated.ts")).text()).toBe(FILES["src/a.ts"]);
-		},
-	);
+		expect(result.applied).toEqual(["src/generated.ts"]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
+		expect(await Bun.file(path.join(repo, "src/generated.ts")).text()).toBe(FILES["src/a.ts"]);
+	});
 
-	test.skipIf(process.platform !== "linux")(
-		"an external edit to a destination prevents every change from applying",
-		async () => {
-			const repo = await makeRepo(FILES);
-			const ready = path.join(path.dirname(repo), "conflict-program-started");
-			const edited = path.join(path.dirname(repo), "conflict-edit-finished");
-			const runner = startRunner(
-				repo,
-				`await Bun.write(${JSON.stringify(ready)}, "ready");
+	test("an external edit to a destination prevents every change from applying", async () => {
+		const repo = await makeRepo(FILES);
+		const ready = path.join(path.dirname(repo), "conflict-program-started");
+		const edited = path.join(path.dirname(repo), "conflict-edit-finished");
+		const runner = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(ready)}, "ready");
 			while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
 			await Bun.write("src/a.ts", "program edit\\n");
 			await Bun.write("src/generated.ts", "should not apply\\n");`,
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(ready).exists()).toBe(true);
+		await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
+		await Bun.write(edited, "edited");
+
+		const [stdout, stderr] = await Promise.all([
+			new Response(runner.stdout).text(),
+			new Response(runner.stderr).text(),
+		]);
+		expect(await runner.exited, stderr).toBe(0);
+		const result: RunResult = JSON.parse(stdout);
+
+		expect(result.conflicts).toEqual(["src/a.ts"]);
+		expect(result.applied).toEqual([]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
+		expect(await Bun.file(path.join(repo, "src/generated.ts")).exists()).toBe(false);
+	});
+
+	test("an external edit to another file survives while the candidate applies", async () => {
+		const repo = await makeRepo(FILES);
+		const ready = path.join(path.dirname(repo), "different-file-program-started");
+		const edited = path.join(path.dirname(repo), "different-file-edit-finished");
+		const runner = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(ready)}, "ready");
+			while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
+			await Bun.write("src/a.ts", "program edit\\n");`,
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(ready).exists()).toBe(true);
+		await Bun.write(path.join(repo, "src/b.ts"), "external edit\n");
+		await Bun.write(edited, "edited");
+
+		const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
+		expect(await runner.exited).toBe(0);
+		expect(result.conflicts).toEqual([]);
+		expect(result.applied).toEqual(["src/a.ts"]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("program edit\n");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("external edit\n");
+	});
+
+	test("external edits survive a failing run on the same or another file", async () => {
+		for (const externalFile of ["src/a.ts", "src/b.ts"]) {
+			const repo = await makeRepo(FILES);
+			const suffix = path.basename(externalFile);
+			const ready = path.join(path.dirname(repo), `failed-program-started-${suffix}`);
+			const edited = path.join(path.dirname(repo), `failed-edit-finished-${suffix}`);
+			const runner = startRunner(
+				repo,
+				`await Bun.write(${JSON.stringify(ready)}, "ready");
+				while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
+				await Bun.write("src/a.ts", "program edit\\n");
+				throw new Error("fail after writing");`,
 			);
 			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 			expect(await Bun.file(ready).exists()).toBe(true);
-			await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
+			await Bun.write(path.join(repo, externalFile), `external ${suffix}\n`);
 			await Bun.write(edited, "edited");
 
-			const [stdout, stderr] = await Promise.all([
-				new Response(runner.stdout).text(),
-				new Response(runner.stderr).text(),
-			]);
-			expect(await runner.exited, stderr).toBe(0);
-			const result: RunResult = JSON.parse(stdout);
-
-			expect(result.conflicts).toEqual(["src/a.ts"]);
+			const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
+			expect(await runner.exited).toBe(0);
+			expect(result.exitCode).toBe(1);
 			expect(result.applied).toEqual([]);
-			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
-			expect(await Bun.file(path.join(repo, "src/generated.ts")).exists()).toBe(false);
-		},
-	);
+			expect(await Bun.file(path.join(repo, externalFile)).text()).toBe(`external ${suffix}\n`);
+		}
+	});
 
-	test.skipIf(process.platform !== "linux")("a parent replaced by a symlink cannot redirect application", async () => {
+	test("external edits survive a cancelled run on the same or another file", async () => {
+		for (const externalFile of ["src/a.ts", "src/b.ts"]) {
+			const repo = await makeRepo(FILES);
+			const suffix = path.basename(externalFile);
+			const ready = path.join(path.dirname(repo), `cancelled-program-started-${suffix}`);
+			const runner = startRunner(
+				repo,
+				`await Bun.write(${JSON.stringify(ready)}, "ready");
+				await Bun.write("src/a.ts", "program edit\\n");
+				await Bun.sleep(30_000);`,
+				{ timeoutMs: 60_000 },
+			);
+			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+			expect(await Bun.file(ready).exists()).toBe(true);
+			await Bun.write(path.join(repo, externalFile), `external ${suffix}\n`);
+			runner.kill("SIGTERM");
+
+			const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
+			expect(await runner.exited).toBe(0);
+			expect(result.applied).toEqual([]);
+			expect(await Bun.file(path.join(repo, externalFile)).text()).toBe(`external ${suffix}\n`);
+		}
+	});
+
+	test("a parent replaced by a symlink cannot redirect application", async () => {
 		const repo = await makeRepo(FILES);
 		const ready = path.join(path.dirname(repo), "parent-program-started");
 		const edited = path.join(path.dirname(repo), "parent-edit-finished");
@@ -389,20 +554,27 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(await Bun.file(secondStarted).exists()).toBe(false);
 	});
 
-	test.skipIf(process.platform !== "darwin")("repairs a run that crashed part-way", async () => {
+	test.skipIf(process.platform !== "darwin")("a crashed isolated run leaves the checkout usable", async () => {
 		const repo = await makeRepo(FILES);
-		const runner = startRunner(repo, `await Bun.write("src/a.ts", "half way");\nawait Bun.sleep(30_000);`, {
-			timeoutMs: 60_000,
-		});
-		await Bun.sleep(1500);
+		const cwdFile = path.join(path.dirname(repo), "isolated-cwd");
+		const runner = startRunner(
+			repo,
+			`await Bun.write(${JSON.stringify(cwdFile)}, process.cwd());\nawait Bun.write("src/a.ts", "half way");\nawait Bun.sleep(30_000);`,
+			{
+				timeoutMs: 60_000,
+			},
+		);
+		for (let attempt = 0; attempt < 100 && !(await Bun.file(cwdFile).exists()); attempt++) await Bun.sleep(20);
+		expect(await Bun.file(cwdFile).exists()).toBe(true);
+		const isolatedCwd = await Bun.file(cwdFile).text();
 		runner.kill("SIGKILL");
 		await runner.exited;
-		expect(await Bun.file(`${repo}.pi-shared/state.json`).exists()).toBe(true);
+		expect(await gitStatus(repo)).toBe("");
 
 		const result = await run(repo, "");
 		expect(result.exitCode).toBe(0);
-		expect(await Bun.file(`${repo}.pi-shared/state.json`).exists()).toBe(false);
 		expect(await gitStatus(repo)).toBe("");
+		expect(await Bun.file(isolatedCwd).exists()).toBe(false);
 	});
 
 	test("reports the program line an error came from, even a long one", async () => {
