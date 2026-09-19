@@ -68,6 +68,9 @@ await Bun.write(file, root.commitEdits(edits));
 ## Other languages
 
 `sg.find` and `sg.rewrite` handle JS, TS, TSX, HTML and CSS. For anything else, use the CLI:
+File, directory and glob inputs may be relative or absolute; results are always repository-relative.
+All input forms use Git's tracked and non-ignored file set, so explicitly naming an ignored file does
+not include it.
 
 ```ts
 const matches = await $`ast-grep run -p 'print($A)' -l python --json=compact src`.json();

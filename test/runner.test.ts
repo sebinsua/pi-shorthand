@@ -1415,11 +1415,41 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(JSON.parse(result.output)).toEqual([["src/a.ts"], ["src/a.ts"]]);
 	});
 
+	test("glob and sg normalize scopes and exclude explicitly named ignored files", async () => {
+		const repo = await makeRepo({
+			".gitignore": "src/ignored.ts\n",
+			"src/a.ts": "oldApi(1);\n",
+			"src/a.html": "<p>hello</p>\n",
+			"src/ignored.ts": "oldApi(2);\n",
+		});
+		const result = await run(
+			repo,
+			`const absolute = process.cwd() + "/src";
+			console.log(JSON.stringify([
+				glob("*.ts", "./src"),
+				glob("*.ts", absolute),
+				sg.find("<p>$A</p>", "./src").map((match) => match.file),
+				sg.find("<p>$A</p>", absolute).map((match) => match.file),
+				sg.find("oldApi($A)", "src/a.ts").map((match) => match.file),
+				sg.find("oldApi($A)", "src/ignored.ts").length,
+			]));`,
+		);
+
+		expect(JSON.parse(result.output.trim().split("\n").at(-1)!)).toEqual([
+			["src/a.ts"],
+			["src/a.ts"],
+			["src/a.html"],
+			["src/a.html"],
+			["src/a.ts"],
+			0,
+		]);
+	});
+
 	test("sg warns when the files it's given contain no JS/TS files", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, `sg.find("oldApi($A)", ["docs"]);`);
 
-		expect(result.output).toContain('warning: sg.find found no JS/TS files in ["docs"]');
+		expect(result.output).toContain('warning: sg.find found no supported files in ["docs"]');
 	});
 
 	test("sg.rewrite warns when it matches nothing", async () => {

@@ -14,6 +14,7 @@
  */
 
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
@@ -54,11 +55,7 @@ const $ = new Proxy(bunShell, {
  */
 function glob(pattern: string, where: string | { cwd?: string } = "."): string[] {
 	const dir = typeof where === "string" ? where : (where.cwd ?? ".");
-	const output = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", dir]);
-	const matcher = new Glob(dir === "." ? pattern : `${dir.replace(/\/$/, "")}/${pattern}`);
-	// git still lists a tracked file the program has deleted, so check it's there.
-	const files = [...new Set(output.split("\0"))].filter((file) => file && matcher.match(file) && existsSync(file));
-	return files.toSorted();
+	return selectFiles(resolve(dir, pattern));
 }
 
 /**
@@ -96,6 +93,36 @@ function git(args: string[], allowedExitCodes: number[] = []): string {
 	return result.stdout.toString();
 }
 
+const repositoryRoot = git(["rev-parse", "--show-toplevel"]).trim();
+
+/** Normalize an invocation path or glob to the path form emitted by `git ls-files --full-name`. */
+function gitPath(input: string): string {
+	const normalized = relative(repositoryRoot, resolve(input)).replaceAll("\\", "/");
+	if (normalized === "") return ".";
+	if (normalized === ".." || normalized.startsWith("../") || isAbsolute(normalized)) {
+		throw new Error(`path is outside the repository: ${JSON.stringify(input)}`);
+	}
+	return normalized;
+}
+
+/** Existing tracked or non-ignored untracked files, always named relative to the repository root. */
+function gitFiles(pathspec = "."): string[] {
+	const output = git(["ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard", "--", pathspec]);
+	// Git still lists a tracked file the program has deleted, so check the final filesystem too.
+	return [...new Set(output.split("\0"))]
+		.filter((file) => file && existsSync(resolve(repositoryRoot, file)))
+		.toSorted();
+}
+
+/** Select a Git-visible file, directory, or glob and return repository-relative paths. */
+function selectFiles(input: string): string[] {
+	const normalized = gitPath(input);
+	const stats = statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false });
+	if (stats?.isFile() || stats?.isDirectory()) return gitFiles(normalized);
+	const matcher = new Glob(normalized);
+	return gitFiles().filter((file) => matcher.match(file));
+}
+
 // ── ast-grep ──────────────────────────────────────────────────────────────────────
 // Patterns use ast-grep syntax: $X matches one node, $$$X matches zero or more.
 
@@ -125,18 +152,13 @@ type SgMatch = {
 } & Record<string, unknown>;
 
 /**
- * The JS/TS files to search. `files` is a file, a directory (the JS/TS files in it), a glob, or a list
+ * The supported syntax files to search. `files` is a Git-visible file, directory, glob, or a list
  * of any of those. Warns if there are none, since that's almost always a mistake.
  */
 function sourceFiles(helper: string, files: string | string[]): string[] {
-	const found = [files].flat().flatMap((entry) => {
-		const stats = statSync(entry, { throwIfNoEntry: false });
-		if (stats?.isFile()) return [entry];
-		if (stats?.isDirectory()) return glob("**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}", entry);
-		return glob(entry);
-	});
+	const found = [...new Set([files].flat().flatMap(selectFiles))];
 	const parseable = found.filter((file) => LANGUAGES[file.split(".").pop()!]);
-	if (parseable.length === 0) console.error(`warning: ${helper} found no JS/TS files in ${JSON.stringify(files)}`);
+	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${JSON.stringify(files)}`);
 	return parseable;
 }
 
