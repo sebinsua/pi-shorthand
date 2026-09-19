@@ -12,6 +12,7 @@ import type { Overlay } from "./runner.ts";
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const bwrap = Bun.which("bwrap");
 	if (!bwrap) throw new Error("The code tool needs bubblewrap (0.9 or later) on Linux.");
+	const filesAtStart = await gitVisibleFiles(repo);
 
 	const upper = path.join(tempDir, "upper");
 	const work = path.join(tempDir, "work");
@@ -41,7 +42,7 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 		writableDir: upper,
 		gitExcludes: [],
 		wrap,
-		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(repo, wrap))],
+		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(filesAtStart, repo, wrap))],
 		close: async () => {},
 	};
 }
@@ -59,22 +60,28 @@ async function writtenFiles(upper: string) {
 }
 
 /**
- * Files git saw before that are gone in the overlay, found by asking git inside it. (overlayfs's own
- * records aren't enough: deleting a directory leaves one "whiteout" for all of it, and recreating a
- * directory hides everything that was in it.)
+ * Files git saw before that are gone from the final overlay. Check the directory entries themselves:
+ * staging a file or changing an ignore rule changes Git's classification without deleting the file.
+ * Overlayfs's own records aren't enough either: deleting a directory leaves one whiteout for all of
+ * it, and recreating a directory hides everything that was in it.
  */
-async function deletedFiles(repo: string, wrap: (command: string[], cwd: string) => string[]) {
-	const untracked = ["git", "ls-files", "-z", "--others", "--exclude-standard"];
-	const inOverlay = (command: string[]) =>
-		$`${wrap(command, repo)}`.env({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).text();
-
-	const before = $`${untracked}`.cwd(repo).text(); // outside the overlay, so it can run alongside
+async function deletedFiles(filesAtStart: string[], repo: string, wrap: (command: string[], cwd: string) => string[]) {
+	if (filesAtStart.length === 0) return [];
+	const script =
+		'import { lstatSync } from "node:fs";' +
+		'for (const file of (await Bun.stdin.text()).split("\\0")) {' +
+		"if (file && !lstatSync(file, { throwIfNoEntry: false })) process.stdout.write(`${file}\\0`);" +
+		"}";
+	const input = new Response(`${filesAtStart.join("\0")}\0`);
 	// Inside the overlay, one mount at a time: overlayfs won't let two mounts share a work directory.
-	const trackedGone = await inOverlay(["git", "ls-files", "-z", "--deleted"]);
-	const untrackedAfter = await inOverlay(untracked);
-	const untrackedBefore = await before;
+	const output = await $`${wrap([process.execPath, "-e", script], repo)} < ${input}`.text();
+	return output
+		.split("\0")
+		.filter(Boolean)
+		.map((file) => ({ file, contents: null }));
+}
 
-	const stillThere = new Set(untrackedAfter.split("\0"));
-	const deleted = [...trackedGone.split("\0"), ...untrackedBefore.split("\0").filter((file) => !stillThere.has(file))];
-	return deleted.filter(Boolean).map((file) => ({ file, contents: null }));
+async function gitVisibleFiles(repo: string): Promise<string[]> {
+	const output = await $`git ls-files -z --cached --others --exclude-standard`.cwd(repo).text();
+	return output.split("\0").filter(Boolean);
 }

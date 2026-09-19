@@ -182,6 +182,48 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(await readlink(collision)).toBe("../victim");
 	});
 
+	test.skipIf(process.platform !== "linux")("staging an untouched untracked file does not delete it", async () => {
+		const repo = await makeRepo(FILES);
+		const untracked = path.join(repo, "notes.txt");
+		await Bun.write(untracked, "keep me\n");
+
+		const result = await run(repo, "await $`git add notes.txt`;");
+
+		expect(result.changes).toEqual([]);
+		expect(result.applied).toEqual([]);
+		expect(await Bun.file(untracked).text()).toBe("keep me\n");
+	});
+
+	test.skipIf(process.platform !== "linux")(
+		"newly ignoring an untouched untracked file does not delete it",
+		async () => {
+			const repo = await makeRepo({ ...FILES, ".gitignore": "" });
+			const untracked = path.join(repo, "notes.tmp");
+			await Bun.write(untracked, "keep me\n");
+
+			const result = await run(repo, `await Bun.write(".gitignore", "*.tmp\\n");`);
+
+			expect(result.applied).toEqual([".gitignore"]);
+			expect(result.changes.map((change) => change.path)).toEqual([".gitignore"]);
+			expect(await Bun.file(untracked).text()).toBe("keep me\n");
+		},
+	);
+
+	test.skipIf(process.platform !== "linux")(
+		"deleting an untracked file with a newline in its name still applies",
+		async () => {
+			const repo = await makeRepo(FILES);
+			const file = "odd\nname.txt";
+			await Bun.write(path.join(repo, file), "delete me\n");
+
+			const result = await run(repo, `await Bun.file(${JSON.stringify(file)}).delete();`);
+
+			expect(result.changes.map((change) => `${change.kind} ${change.path}`)).toEqual([`deleted ${file}`]);
+			expect(result.applied).toEqual([file]);
+			expect(await Bun.file(path.join(repo, file)).exists()).toBe(false);
+		},
+	);
+
 	test("two runs on the same repository both apply", async () => {
 		const repo = await makeRepo(FILES);
 		const [first, second] = await Promise.all([
