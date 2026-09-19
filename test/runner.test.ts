@@ -5,10 +5,11 @@
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readlink, realpath, rename, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readlink, realpath, rename, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
+import { runWithBun } from "../index.ts";
 import type { RunOptions, RunResult } from "../runner.ts";
 
 setDefaultTimeout(30_000);
@@ -48,6 +49,15 @@ async function run(repo: string, program: string, options: Partial<RunOptions> =
 
 async function gitStatus(repo: string): Promise<string> {
 	return (await $`git status --short`.cwd(repo).text()).trim();
+}
+
+async function textIfFile(file: string): Promise<string | undefined> {
+	try {
+		return await Bun.file(file).text();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
 }
 
 function macRecoveryFile(repo: string): string {
@@ -253,6 +263,280 @@ describe.skipIf(!hasOverlay)("runner", () => {
 
 		expect(result.applied).toEqual(["src/lib/x.ts", "src/lib/y.ts"]);
 		expect(await gitStatus(repo)).toBe("D src/lib/x.ts\n D src/lib/y.ts");
+	});
+
+	test("an application failure restores every earlier filesystem operation", async () => {
+		const repo = await makeRepo(FILES);
+		await chmod(path.join(repo, "src/a.ts"), 0o751);
+		await symlink("a.ts", path.join(repo, "src/link.ts"));
+		await $`git add -A && git -c user.name=test -c user.email=test@test commit -qm metadata`.cwd(repo);
+
+		const runner = startRunner(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");
+			await Bun.file("src/b.ts").delete();
+			await Bun.write("src/new.ts", "new\\n");`,
+			{ testApplyFailureAfter: 3 },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(runner.stdout).text(),
+			new Response(runner.stderr).text(),
+			runner.exited,
+		]);
+
+		expect(exitCode, stdout).not.toBe(0);
+		expect(stderr).toContain("Injected application failure after 3 change");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		expect((await lstat(path.join(repo, "src/a.ts"))).mode & 0o777).toBe(0o751);
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(FILES["src/b.ts"]);
+		expect(await Bun.file(path.join(repo, "src/new.ts")).exists()).toBe(false);
+		expect(await readlink(path.join(repo, "src/link.ts"))).toBe("a.ts");
+		expect(await gitStatus(repo)).toBe("");
+	});
+
+	test("a failure between backup and install restores the original", async () => {
+		const repo = await makeRepo(FILES);
+		const runner = startRunner(repo, `await Bun.write("src/a.ts", "program a\\n");`, {
+			testApplyFailureAfterBackup: 1,
+		});
+		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("Injected application failure after backing up change 1");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		expect(await gitStatus(repo)).toBe("");
+	});
+
+	test("backup cleanup failure reports applied changes with a warning", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(repo, `await Bun.write("src/a.ts", "program a\\n");`, {
+			testCleanupFailure: true,
+		});
+
+		expect(result.applied).toEqual(["src/a.ts"]);
+		expect(result.warnings).toContainEqual(expect.stringContaining("backup cleanup failed"));
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("program a\n");
+		for await (const backup of new Bun.Glob(".pi-shorthand-backup-*").scan({ cwd: path.join(repo, "src") })) {
+			await rm(path.join(repo, "src", backup), { recursive: true, force: true });
+		}
+	});
+
+	test("cancellation before the first commit operation applies nothing", async () => {
+		const repo = await makeRepo(FILES);
+		const preparedMarker = path.join(path.dirname(repo), "apply-prepared");
+		const runner = startRunner(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");
+			await Bun.write("src/b.ts", "program b\\n");`,
+			{ testBeforeCommitDelayMs: 500, testBeforeCommitMarker: preparedMarker },
+		);
+		for (let attempt = 0; attempt < 200 && !(await Bun.file(preparedMarker).exists()); attempt++) await Bun.sleep(10);
+		expect(await Bun.file(preparedMarker).exists()).toBe(true);
+		runner.kill("SIGTERM");
+		const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
+
+		expect(await runner.exited).toBe(0);
+		expect(result.applied).toEqual([]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(FILES["src/b.ts"]);
+	});
+
+	test("pre-commit cancellation reports retained cleanup artifacts", async () => {
+		const repo = await makeRepo(FILES);
+		const preparedMarker = path.join(path.dirname(repo), "apply-prepared-with-cleanup-warning");
+		const abort = new AbortController();
+		const resultPromise = runWithBun(
+			{
+				runId: "test",
+				cwd: repo,
+				program: `await Bun.write("src/a.ts", "program a\\n");`,
+				timeoutMs: 5000,
+				rollback: "all",
+				testBeforeCommitDelayMs: 500,
+				testBeforeCommitMarker: preparedMarker,
+				testCleanupFailure: true,
+			},
+			abort.signal,
+		);
+		for (let attempt = 0; attempt < 200 && !(await Bun.file(preparedMarker).exists()); attempt++) await Bun.sleep(10);
+		expect(await Bun.file(preparedMarker).exists()).toBe(true);
+		abort.abort();
+		const result = await resultPromise;
+
+		expect(result.applied).toEqual([]);
+		expect(result.cleanupWarnings).toContainEqual(expect.stringContaining("backup cleanup failed"));
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		for (const entry of await readdir(path.join(repo, "src"))) {
+			if (entry.startsWith(".pi-shorthand-backup-")) {
+				await rm(path.join(repo, "src", entry), { recursive: true, force: true });
+			}
+		}
+	});
+
+	test("cancellation waits for a commit that has already started", async () => {
+		const repo = await makeRepo(FILES);
+		const abort = new AbortController();
+		const resultPromise = runWithBun(
+			{
+				runId: "test",
+				cwd: repo,
+				program: `await Bun.write("src/a.ts", "program a\\n");
+			await Bun.write("src/b.ts", "program b\\n");`,
+				timeoutMs: 5000,
+				rollback: "all",
+				testApplyDelayMs: 500,
+			},
+			abort.signal,
+		);
+		for (
+			let attempt = 0;
+			attempt < 200 && (await textIfFile(path.join(repo, "src/a.ts"))) !== "program a\n";
+			attempt++
+		) {
+			await Bun.sleep(10);
+		}
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("program a\n");
+		abort.abort();
+		const result = await resultPromise;
+
+		expect(result.applied).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("program a\n");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("program b\n");
+	});
+
+	test("a late conflict rolls back files already committed", async () => {
+		const repo = await makeRepo(FILES);
+		const runner = startRunner(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");
+			await Bun.write("src/b.ts", "program b\\n");`,
+			{ testApplyDelayMs: 500 },
+		);
+		for (
+			let attempt = 0;
+			attempt < 200 && (await textIfFile(path.join(repo, "src/a.ts"))) !== "program a\n";
+			attempt++
+		) {
+			await Bun.sleep(10);
+		}
+		await Bun.write(path.join(repo, "src/b.ts"), "external b\n");
+		const result: RunResult = JSON.parse(await new Response(runner.stdout).text());
+
+		expect(await runner.exited).toBe(0);
+		expect(result.conflicts).toEqual(["src/b.ts"]);
+		expect(result.applied).toEqual([]);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("external b\n");
+	});
+
+	test("rollback continues restoring safe files after one destination changed", async () => {
+		const repo = await makeRepo(FILES);
+		const runner = startRunner(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");
+			await Bun.write("src/api.ts", "program api\\n");
+			await Bun.write("src/b.ts", "program b\\n");`,
+			{ testApplyDelayMs: 500, testApplyDelayAfter: 2 },
+		);
+		for (
+			let attempt = 0;
+			attempt < 200 && (await textIfFile(path.join(repo, "src/api.ts"))) !== "program api\n";
+			attempt++
+		) {
+			await Bun.sleep(10);
+		}
+		await Bun.write(path.join(repo, "src/api.ts"), "external api\n");
+		await Bun.write(path.join(repo, "src/b.ts"), "external b\n");
+		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("Rollback did not complete");
+		expect(stderr).toContain("src/api.ts");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		expect(await Bun.file(path.join(repo, "src/api.ts")).text()).toBe("external api\n");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("external b\n");
+		for await (const backup of new Bun.Glob(".pi-shorthand-backup-*").scan({ cwd: path.join(repo, "src") })) {
+			await rm(path.join(repo, "src", backup), { recursive: true, force: true });
+		}
+	});
+
+	test("cancellation preserves a concrete incomplete-rollback failure", async () => {
+		const repo = await makeRepo(FILES);
+		const abort = new AbortController();
+		const outcomePromise = runWithBun(
+			{
+				runId: "test",
+				cwd: repo,
+				program: `await Bun.write("src/a.ts", "program a\\n");
+			await Bun.write("src/api.ts", "program api\\n");
+			await Bun.write("src/b.ts", "program b\\n");`,
+				timeoutMs: 5000,
+				rollback: "all",
+				testApplyDelayMs: 500,
+				testApplyDelayAfter: 2,
+			},
+			abort.signal,
+		).then(
+			(result) => result,
+			(error: Error) => error,
+		);
+		for (
+			let attempt = 0;
+			attempt < 200 && (await textIfFile(path.join(repo, "src/api.ts"))) !== "program api\n";
+			attempt++
+		) {
+			await Bun.sleep(10);
+		}
+		await Bun.write(path.join(repo, "src/api.ts"), "external api\n");
+		await Bun.write(path.join(repo, "src/b.ts"), "external b\n");
+		abort.abort();
+		const outcome = await outcomePromise;
+
+		expect(outcome).toBeInstanceOf(Error);
+		expect((outcome as Error).message).toContain("Rollback did not complete");
+		expect((outcome as Error).message).toContain("src/api.ts");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+		expect(await Bun.file(path.join(repo, "src/api.ts")).text()).toBe("external api\n");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("external b\n");
+		for (const entry of await readdir(path.join(repo, "src"))) {
+			if (entry.startsWith(".pi-shorthand-backup-")) {
+				await rm(path.join(repo, "src", entry), { recursive: true, force: true });
+			}
+		}
+	});
+
+	test("rollback retains an installed file when its backup disappeared", async () => {
+		const repo = await makeRepo(FILES);
+		const runner = startRunner(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");
+			await Bun.write("src/b.ts", "program b\\n");`,
+			{ testApplyDelayMs: 500 },
+		);
+		for (
+			let attempt = 0;
+			attempt < 200 && (await textIfFile(path.join(repo, "src/a.ts"))) !== "program a\n";
+			attempt++
+		) {
+			await Bun.sleep(10);
+		}
+		const backupDirs = (await readdir(path.join(repo, "src"))).filter((entry) =>
+			entry.startsWith(".pi-shorthand-backup-"),
+		);
+		let populatedBackup: string | undefined;
+		for (const entry of backupDirs) {
+			if (await Bun.file(path.join(repo, "src", entry, "original")).exists()) populatedBackup = entry;
+		}
+		expect(populatedBackup).toBeDefined();
+		await rm(path.join(repo, "src", populatedBackup!, "original"), { force: true });
+		await Bun.write(path.join(repo, "src/b.ts"), "external b\n");
+		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("its backup changed");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("program a\n");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("external b\n");
+		for (const entry of backupDirs) await rm(path.join(repo, "src", entry), { recursive: true, force: true });
 	});
 
 	test("does not clobber a file at the old predictable commit temporary path", async () => {

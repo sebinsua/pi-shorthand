@@ -28,6 +28,7 @@ const result = (overrides: Partial<RunResult>): RunResult => ({
 	durationMs: 600,
 	output: "",
 	warnings: [],
+	cleanupWarnings: [],
 	changes: [],
 	applied: [],
 	conflicts: [],

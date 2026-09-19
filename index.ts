@@ -118,7 +118,7 @@ export default function (pi: ExtensionAPI) {
  * to stop (it then puts the repository back and applies nothing). It has its own process group,
  * which is killed afterwards so no subprocess the program started is left behind.
  */
-function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<RunResult> {
+export function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) return reject(new Error("Aborted"));
 		const runner = spawn("bun", [path.join(import.meta.dirname, "runner.ts")], { detached: true });
@@ -139,9 +139,11 @@ function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<RunResul
 			} catch {
 				// nothing left
 			}
-			if (signal?.aborted) reject(new Error("Aborted"));
-			else if (code === 0) resolve(JSON.parse(stdout));
-			else reject(new Error(stderr.trim() || `runner exited with ${code}`));
+			if (code === 0) {
+				const result: RunResult = JSON.parse(stdout);
+				if (!signal?.aborted || result.applied.length > 0 || result.cleanupWarnings.length > 0) resolve(result);
+				else reject(new Error("Aborted"));
+			} else reject(new Error(stderr.trim() || (signal?.aborted ? "Aborted" : `runner exited with ${code}`)));
 		});
 
 		runner.stdin.end(JSON.stringify(options));

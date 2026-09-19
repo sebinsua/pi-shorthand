@@ -30,6 +30,13 @@ export interface RunOptions {
 	program: string;
 	timeoutMs: number;
 	rollback: "all" | "file";
+	testApplyFailureAfter?: number;
+	testApplyDelayMs?: number;
+	testApplyDelayAfter?: number;
+	testApplyFailureAfterBackup?: number;
+	testBeforeCommitDelayMs?: number;
+	testBeforeCommitMarker?: string;
+	testCleanupFailure?: boolean;
 }
 
 export interface RunResult {
@@ -38,6 +45,7 @@ export interface RunResult {
 	durationMs: number;
 	output: string; // stdout and stderr
 	warnings: string[]; // likely mistakes spotted in the program before it ran
+	cleanupWarnings: string[]; // application/cleanup completed with a non-fatal infrastructure warning
 	changes: FileChange[]; // everything the program changed
 	applied: string[]; // the changed files that were applied
 	conflicts: string[]; // destinations changed after the run's baseline was captured
@@ -113,7 +121,25 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 		const { applied: requested, rolledBack } = whatToApply(changes, program, options.rollback, abort.aborted);
 		let conflicts = await conflictingFiles(repo, requested);
 		let applied: Change[] = [];
-		if (conflicts.length === 0) ({ applied, conflicts } = await applyChanges(repo, requested));
+		let applicationWarnings: string[] = [];
+		if (conflicts.length === 0) {
+			({
+				applied,
+				conflicts,
+				warnings: applicationWarnings,
+			} = await applyChanges(
+				repo,
+				requested,
+				abort,
+				options.testApplyFailureAfter,
+				options.testApplyDelayMs,
+				options.testApplyDelayAfter,
+				options.testApplyFailureAfterBackup,
+				options.testBeforeCommitDelayMs,
+				options.testCleanupFailure,
+				options.testBeforeCommitMarker,
+			));
+		}
 		log("finished", {
 			changed: changes.map((change) => change.file),
 			applied: applied.map((change) => change.file),
@@ -125,7 +151,8 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			timedOut: program.timedOut,
 			durationMs: Math.round(performance.now() - startedAt),
 			output: program.output,
-			warnings: lint(options.program),
+			warnings: [...lint(options.program), ...applicationWarnings],
+			cleanupWarnings: applicationWarnings,
 			changes: changes.map((change) => describe(shown(change.file), change)),
 			applied: applied.map((change) => shown(change.file)),
 			conflicts: conflicts.map(shown),
@@ -543,44 +570,209 @@ async function gitIgnored(dir: string, files: string[]): Promise<Set<string>> {
 	return new Set(output.split("\0").filter(Boolean));
 }
 
-async function applyChanges(repo: string, changes: Change[]): Promise<{ applied: Change[]; conflicts: string[] }> {
-	const applied: Change[] = [];
-	for (let index = 0; index < changes.length; index++) {
-		const change = changes[index];
-		const { file, before, after } = change;
-		const target = path.join(repo, file);
-		if (!after) {
-			if (!(await destinationMatches(repo, change))) {
-				return { applied, conflicts: await conflictingFiles(repo, changes.slice(index)) };
+interface PreparedChange {
+	change: Change;
+	target: string;
+	staged?: string;
+	backupDir?: string;
+	backup?: string;
+	backedUp: boolean;
+	backupIdentity?: { dev: number; ino: number; mode: number };
+	installed?: { dev: number; ino: number; mode: number };
+}
+
+/** Prepares every resource first, then rolls the complete commit back on any failure or conflict. */
+async function applyChanges(
+	repo: string,
+	changes: Change[],
+	abort: AbortSignal,
+	failAfter?: number,
+	delayAfterMs?: number,
+	delayAfter = 1,
+	failAfterBackup?: number,
+	beforeCommitDelayMs?: number,
+	failCleanup?: boolean,
+	beforeCommitMarker?: string,
+): Promise<{ applied: Change[]; conflicts: string[]; warnings: string[] }> {
+	const prepared: PreparedChange[] = [];
+	try {
+		for (const change of changes) {
+			const target = path.join(repo, change.file);
+			if (!(await safeParentChain(repo, target))) {
+				await cleanupPrepared(prepared);
+				return { applied: [], conflicts: await conflictingFiles(repo, changes), warnings: [] };
 			}
-			await fs.rm(target, { force: true });
-			applied.push(change);
-			continue;
+			const item: PreparedChange = { change, target, backedUp: false };
+			prepared.push(item);
+
+			if (change.after) {
+				item.staged = path.join(path.dirname(target), `.pi-shorthand-${randomUUID()}.tmp`);
+				const handle = await fs.open(item.staged, "wx");
+				try {
+					await handle.writeFile(change.after);
+				} finally {
+					await handle.close();
+				}
+				const original = change.before ? await fs.lstat(target).catch(() => null) : null;
+				if (original) await fs.chmod(item.staged, original.mode);
+			}
+			if (change.before) {
+				item.backupDir = await fs.mkdtemp(path.join(path.dirname(target), ".pi-shorthand-backup-"));
+				item.backup = path.join(item.backupDir, "original");
+			}
 		}
-		// Write next to the target, then rename, so each file is replaced atomically. Create the
-		// temporary file exclusively: a repository entry must never be overwritten or followed.
-		const temp = path.join(path.dirname(target), `.pi-shorthand-${randomUUID()}.tmp`);
-		const handle = await fs.open(temp, "wx");
-		try {
-			await handle.writeFile(after);
-			await handle.close();
-			const original = before ? await fs.lstat(target).catch(() => null) : null;
-			if (original) await fs.chmod(temp, original.mode);
-			// This is deliberately adjacent to rename. Non-cooperating writers can still race the
-			// kernel operation, but this bounds that unavoidable portable-filesystem window per path.
-			if (!(await destinationMatches(repo, change))) {
-				await fs.rm(temp, { force: true });
-				return { applied, conflicts: await conflictingFiles(repo, changes.slice(index)) };
+	} catch (error) {
+		await cleanupPrepared(prepared).catch(() => {});
+		throw error;
+	}
+	if (beforeCommitMarker) await Bun.write(beforeCommitMarker, "ready");
+	if (beforeCommitDelayMs) await Bun.sleep(beforeCommitDelayMs);
+
+	const committed: PreparedChange[] = [];
+	try {
+		for (let index = 0; index < prepared.length; index++) {
+			const item = prepared[index];
+			if (!(await destinationMatches(repo, item.change))) {
+				await rollbackApplied(repo, committed);
+				const conflicts = await conflictingFiles(repo, changes);
+				const warnings = await cleanupWarnings(prepared, failCleanup);
+				return { applied: [], conflicts, warnings };
 			}
-			await fs.rename(temp, target);
-			applied.push(change);
+			if (index === 0 && abort.aborted) {
+				const warnings = await cleanupWarnings(prepared, failCleanup);
+				return { applied: [], conflicts: [], warnings };
+			}
+
+			committed.push(item);
+			if (item.backup) {
+				const original = await fs.lstat(item.target);
+				item.backupIdentity = { dev: original.dev, ino: original.ino, mode: original.mode };
+				await fs.rename(item.target, item.backup);
+				item.backedUp = true;
+			}
+			if (failAfterBackup === index + 1) {
+				throw new Error(`Injected application failure after backing up change ${index + 1}.`);
+			}
+			if (item.staged) {
+				const installed = await fs.lstat(item.staged);
+				await fs.rename(item.staged, item.target);
+				item.staged = undefined;
+				item.installed = { dev: installed.dev, ino: installed.ino, mode: installed.mode };
+			}
+
+			if (failAfter === index + 1) throw new Error(`Injected application failure after ${index + 1} change(s).`);
+			if (delayAfterMs && index + 1 === delayAfter) await Bun.sleep(delayAfterMs);
+		}
+	} catch (error) {
+		try {
+			await rollbackApplied(repo, committed);
+		} catch (rollbackError) {
+			await cleanupStaged(prepared).catch(() => {});
+			const detail = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+			const combined = new Error(`Applying changes failed and ${detail}`, { cause: error });
+			Object.assign(combined, { rollbackCause: rollbackError });
+			throw combined;
+		}
+		await cleanupPrepared(prepared).catch(() => {});
+		throw error;
+	}
+
+	const warnings = await cleanupWarnings(prepared, failCleanup);
+	return { applied: changes, conflicts: [], warnings };
+}
+
+async function rollbackApplied(repo: string, items: PreparedChange[]) {
+	const errors: Error[] = [];
+	for (const item of items.toReversed()) {
+		try {
+			if (item.backedUp && item.backup) {
+				const backup = await fs.lstat(item.backup).catch(() => null);
+				const backupContentsStillOriginal =
+					item.change.before &&
+					(await destinationMatches(repo, {
+						file: path.relative(repo, item.backup),
+						before: item.change.before,
+						after: null,
+					}));
+				if (
+					!backup ||
+					!item.backupIdentity ||
+					backup.dev !== item.backupIdentity.dev ||
+					backup.ino !== item.backupIdentity.ino ||
+					backup.mode !== item.backupIdentity.mode ||
+					!backupContentsStillOriginal
+				) {
+					throw new Error(
+						`Could not safely roll back ${JSON.stringify(item.change.file)}: its backup changed ` +
+							`(present=${Boolean(backup)}, identity=${Boolean(item.backupIdentity)}, ` +
+							`device=${backup?.dev === item.backupIdentity?.dev}, inode=${backup?.ino === item.backupIdentity?.ino}, ` +
+							`mode=${backup?.mode === item.backupIdentity?.mode}, contents=${Boolean(backupContentsStillOriginal)}).`,
+					);
+				}
+			}
+			if (item.installed) {
+				const current = await fs.lstat(item.target).catch(() => null);
+				const contentsStillOurs =
+					item.change.after &&
+					(await destinationMatches(repo, {
+						...item.change,
+						before: item.change.after,
+					}));
+				if (
+					!current ||
+					current.dev !== item.installed.dev ||
+					current.ino !== item.installed.ino ||
+					current.mode !== item.installed.mode ||
+					!contentsStillOurs
+				) {
+					throw new Error(`Could not safely roll back ${JSON.stringify(item.change.file)}: its destination changed.`);
+				}
+				await fs.rm(item.target, { force: true });
+				item.installed = undefined;
+			}
+			if (item.backedUp && item.backup) {
+				if (await fs.lstat(item.target).catch(() => null)) {
+					throw new Error(`Could not safely restore ${JSON.stringify(item.change.file)}: its destination reappeared.`);
+				}
+				await fs.rename(item.backup, item.target);
+				item.backedUp = false;
+			}
 		} catch (error) {
-			await handle.close().catch(() => {});
-			await fs.rm(temp, { force: true }).catch(() => {});
-			throw error;
+			errors.push(error instanceof Error ? error : new Error(String(error)));
 		}
 	}
-	return { applied, conflicts: [] };
+	if (errors.length > 0) {
+		const details = errors.map((error) => error.message).join("; ");
+		const failure = new Error(`Rollback did not complete: ${details}`, { cause: errors[0] });
+		Object.assign(failure, { rollbackErrors: errors });
+		throw failure;
+	}
+}
+
+async function cleanupPrepared(items: PreparedChange[]) {
+	await cleanupStaged(items);
+	for (const item of items) {
+		if (item.backupDir) await fs.rm(item.backupDir, { recursive: true, force: true });
+	}
+}
+
+async function cleanupStaged(items: PreparedChange[]) {
+	for (const item of items) {
+		if (item.staged) await fs.rm(item.staged, { force: true });
+	}
+}
+
+async function cleanupWarnings(items: PreparedChange[], failCleanup = false): Promise<string[]> {
+	try {
+		if (failCleanup) throw new Error("Injected transaction backup cleanup failure.");
+		await cleanupPrepared(items);
+		return [];
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		const warning = `Changes reached their reported state, but transaction backup cleanup failed: ${detail}`;
+		log("cleanup warning", { warning });
+		return [warning];
+	}
 }
 
 /** A change as a git-style patch. */
