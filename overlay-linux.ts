@@ -6,6 +6,7 @@
 
 import { type BigIntStats, constants } from "node:fs";
 import * as fs from "node:fs/promises";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
@@ -19,23 +20,49 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	const lower = path.join(tempDir, "lower");
 	const upper = path.join(tempDir, "upper");
 	const work = path.join(tempDir, "work");
+	const cacheDir = path.join(homedir(), ".cache", "pi-shorthand");
+	const internalDir = path.join(cacheDir, "sandbox");
+	const sandboxExcludesFile = path.join(internalDir, `${path.basename(tempDir)}.exclude`);
+	const logFile = path.join(cacheDir, "runs.jsonl");
 	await copyStableTree(repo, lower);
 	const filesAtStart = await gitVisibleFiles(lower);
 	await fs.mkdir(upper);
 	await fs.mkdir(work);
+	await fs.mkdir(internalDir, { recursive: true, mode: 0o700 });
+	const internalStats = await fs.lstat(internalDir);
+	if (
+		!internalStats.isDirectory() ||
+		internalStats.isSymbolicLink() ||
+		(process.getuid && internalStats.uid !== process.getuid())
+	) {
+		throw new Error(`Unsafe shorthand sandbox directory: ${internalDir}`);
+	}
+	if ((internalStats.mode & 0o077) !== 0) await fs.chmod(internalDir, 0o700);
+	await fs.writeFile(sandboxExcludesFile, "", { flag: "wx", mode: 0o600 });
+	await fs.appendFile(logFile, "");
 
 	const wrap = (command: string[], cwd: string) => [
 		bwrap,
 		"--die-with-parent", // so killing bwrap also kills the program
-		"--dev-bind",
+		"--ro-bind",
 		"/",
 		"/",
+		"--dev",
+		"/dev",
+		"--unshare-pid",
+		"--proc",
+		"/proc",
 		"--overlay-src",
 		lower,
 		"--overlay",
 		upper,
 		work,
 		repo,
+		"--bind",
+		logFile,
+		logFile,
+		"--tmpfs",
+		"/dev/shm",
 		"--chdir",
 		cwd, // resolve the working directory again, inside the overlay
 		"--",
@@ -47,6 +74,8 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 		writableDir: upper,
 		executionDir: repo,
 		gitExcludes: [],
+		executionExcludesFile: sandboxExcludesFile,
+		environment: { TMPDIR: "/dev/shm", TMP: "/dev/shm", TEMP: "/dev/shm" },
 		wrap,
 		changes: async () => [
 			...(await writtenEntries(upper, new Set(filesAtStart))),
@@ -65,7 +94,11 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 			} catch (error) {
 				if (!isMissing(error)) throw error;
 			}
-			await fs.rm(tempDir, { recursive: true, force: true });
+			try {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			} finally {
+				await fs.rm(sandboxExcludesFile, { force: true });
+			}
 		},
 	};
 }

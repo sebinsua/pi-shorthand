@@ -36,6 +36,7 @@ export interface RunOptions {
 	testApplyFailureAfterBackup?: number;
 	testBeforeCommitDelayMs?: number;
 	testBeforeCommitMarker?: string;
+	testProgramStartMarker?: string;
 	testCleanupFailure?: boolean;
 	testWorkspaceCleanupFailure?: boolean;
 }
@@ -78,6 +79,8 @@ export interface Overlay {
 	writableDir: string; // writing a file here puts it into the overlay
 	executionDir: string; // repository root as seen by the program process
 	gitExcludes: string[]; // extra patterns git should ignore inside the overlay
+	executionExcludesFile?: string; // sandbox-visible path when the host temporary path is hidden
+	environment?: Record<string, string>; // backend-specific environment inside the sandbox
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
 	changes(): Promise<{ file: string; entry: FilesystemEntry | null }[]>; // may include files only read
 	close(): Promise<void>;
@@ -394,7 +397,7 @@ async function runProgram(
 	const executionPrelude = executionPath(PRELUDE, repo, overlay);
 	await Bun.write(programFile, options.program);
 
-	const excludesFile = path.join(tempDir, "exclude");
+	const excludesFile = overlay.executionExcludesFile ?? path.join(tempDir, "exclude");
 	await Bun.write(excludesFile, [PROGRAM_FILE, ...overlay.gitExcludes, await globalGitExcludes()].join("\n"));
 
 	// Output goes to a file rather than a pipe, so a process the program leaves running can't hold it open.
@@ -406,11 +409,16 @@ async function runProgram(
 		executionCwd,
 	);
 	log("program started", { output: outputFile, timeoutMs: options.timeoutMs });
+	if (options.testProgramStartMarker) await Bun.write(options.testProgramStartMarker, "started");
 	const child = spawn(command, args, {
 		cwd: executionCwd,
 		detached: true,
 		stdio: ["ignore", output.fd, output.fd],
-		env: { ...process.env, ...programEnvironment(excludesFile, repo, overlay) },
+		env: {
+			...process.env,
+			...overlay.environment,
+			...programEnvironment(excludesFile, repo, overlay),
+		},
 	});
 	const killAll = () => killGroup(child);
 	abort.addEventListener("abort", killAll);

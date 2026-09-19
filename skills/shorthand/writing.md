@@ -5,6 +5,8 @@
 TypeScript, run by Bun in an isolated copy of the repository's working directory. Use relative paths
 for repository files; on macOS the real checkout's absolute path is intentionally inaccessible. Top-level `await`
 works. `glob`, `grep`, `sg` and `grit` are globals and synchronous (no `await`); Bun's `$` is async.
+On Linux, host paths outside the repository are read-only. `$TMPDIR` is a private writable filesystem
+discarded with the run; the only host-writable exception is shorthand's own run log.
 
 ## Files
 
