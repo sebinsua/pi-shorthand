@@ -4,7 +4,7 @@
  */
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readlink, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
@@ -155,6 +155,31 @@ describe.skipIf(!hasOverlay)("runner", () => {
 
 		expect(result.applied).toEqual(["src/lib/x.ts", "src/lib/y.ts"]);
 		expect(await gitStatus(repo)).toBe("D src/lib/x.ts\n D src/lib/y.ts");
+	});
+
+	test("does not clobber a file at the old predictable commit temporary path", async () => {
+		const repo = await makeRepo(FILES);
+		const collision = path.join(repo, "src/a.ts.pi-shorthand.tmp");
+		await Bun.write(collision, "unrelated\n");
+
+		await run(repo, `await Bun.write("src/a.ts", "updated\\n");`);
+
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("updated\n");
+		expect(await Bun.file(collision).text()).toBe("unrelated\n");
+	});
+
+	test("does not follow a symlink at the old predictable commit temporary path", async () => {
+		const repo = await makeRepo(FILES);
+		const victim = path.join(repo, "victim");
+		const collision = path.join(repo, "src/a.ts.pi-shorthand.tmp");
+		await Bun.write(victim, "untouched\n");
+		await symlink("../victim", collision);
+
+		await run(repo, `await Bun.write("src/a.ts", "updated\\n");`);
+
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("updated\n");
+		expect(await Bun.file(victim).text()).toBe("untouched\n");
+		expect(await readlink(collision)).toBe("../victim");
 	});
 
 	test("two runs on the same repository both apply", async () => {

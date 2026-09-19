@@ -13,6 +13,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -388,12 +389,21 @@ async function applyChanges(repo: string, changes: Change[]) {
 			await fs.rm(target, { force: true });
 			continue;
 		}
-		// Write next to the target, then rename, so each file is replaced atomically.
-		const temp = `${target}.pi-shorthand.tmp`;
-		await Bun.write(temp, after);
-		const original = await fs.stat(target).catch(() => null);
-		if (original) await fs.chmod(temp, original.mode);
-		await fs.rename(temp, target);
+		// Write next to the target, then rename, so each file is replaced atomically. Create the
+		// temporary file exclusively: a repository entry must never be overwritten or followed.
+		const temp = path.join(path.dirname(target), `.pi-shorthand-${randomUUID()}.tmp`);
+		const handle = await fs.open(temp, "wx");
+		try {
+			await handle.writeFile(after);
+			await handle.close();
+			const original = await fs.stat(target).catch(() => null);
+			if (original) await fs.chmod(temp, original.mode);
+			await fs.rename(temp, target);
+		} catch (error) {
+			await handle.close().catch(() => {});
+			await fs.rm(temp, { force: true }).catch(() => {});
+			throw error;
+		}
 	}
 }
 
