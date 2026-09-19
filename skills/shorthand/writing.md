@@ -64,5 +64,6 @@ console.log(`updated ${files.length} files`);
 ## Options
 
 - `timeout`: 2 seconds unless you pass more. Pass more when the program runs `tsc` or tests.
-- `rollback: "file"`: keep the files the program finished writing, even if it then fails. Useful when
-  each file's change stands on its own; otherwise keep the default, which applies nothing on failure.
+- `rollback: "file"`: after a timeout, keep changed files that were no longer open for writing when
+  the program was killed, if writer inspection succeeds. An inspection failure, exception or crash
+  applies nothing. Use this only when each retained file stands on its own.

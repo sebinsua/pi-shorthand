@@ -33,6 +33,7 @@ const result = (overrides: Partial<RunResult>): RunResult => ({
 	applied: [],
 	conflicts: [],
 	rolledBack: [],
+	writerInspectionFailed: false,
 	stillRunning: [],
 	timeoutMs: 2000,
 	rollback: "all",
@@ -85,6 +86,31 @@ describe("the verdict", () => {
 		const lines = show(run);
 		expect(lines[0]).toBe("⚠ Timed out after 1s · kept 1 file, rolled back 1 · +1 −1 · 0.6s");
 		expect(lines[1]).toBe("  rolled back b.ts: half-written when the program was killed");
+	});
+
+	test('a failure with rollback "file" explains why every changed file was rolled back', () => {
+		const run = result({
+			exitCode: 1,
+			rollback: "file",
+			changes: [change("a.ts")],
+			rolledBack: ["a.ts"],
+		});
+		const lines = show(run);
+		expect(lines[0]).toBe("✕ Failed · nothing to keep · exit 1 · 0.6s");
+		expect(lines[1]).toBe("  rolled back a.ts: finished writes unknown after the program exited");
+	});
+
+	test("a timeout explains when writer inspection failed closed", () => {
+		const run = result({
+			exitCode: null,
+			timedOut: true,
+			rollback: "file",
+			changes: [change("a.ts")],
+			rolledBack: ["a.ts"],
+			writerInspectionFailed: true,
+		});
+		const lines = show(run);
+		expect(lines[1]).toBe("  rolled back a.ts: open writers could not be inspected at the timeout");
 	});
 
 	test("a conflict says nothing was applied and names the changed destination", () => {

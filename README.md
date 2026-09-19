@@ -39,8 +39,9 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 
 ## Options
 
-- `rollback`: `"all"` (default) applies nothing if the program fails. `"file"` keeps the files it
-  finished writing.
+- `rollback`: `"all"` (default) applies nothing if the program fails. After a timeout, `"file"`
+  keeps changed files that were no longer open for writing if writer inspection succeeds. Other
+  failures apply nothing because open writers cannot be identified after the process exits.
 - `timeout`: seconds before the program is killed. Default 2.
 
 ## Good to know

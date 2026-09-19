@@ -50,7 +50,12 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 		lines.push(indent(theme.fg("warning", `last step: ${run.lastStep}`)));
 	}
 	for (const file of run.rolledBack) {
-		lines.push(indent(theme.fg("warning", `rolled back ${file}: half-written when the program was killed`)));
+		const reason = run.writerInspectionFailed
+			? "open writers could not be inspected at the timeout"
+			: run.timedOut
+				? "half-written when the program was killed"
+				: "finished writes unknown after the program exited";
+		lines.push(indent(theme.fg("warning", `rolled back ${file}: ${reason}`)));
 	}
 	for (const warning of [...run.warnings, ...printedWarnings]) lines.push(indent(theme.fg("warning", `⚠ ${warning}`)));
 

@@ -37,7 +37,7 @@ Bun's shell $ needs await: await $\`bun test src/foo.test.ts\`. You can also run
 
 Throw or exit non-zero to fail. rollback decides what a failure undoes:
 - "all" (default): nothing is applied; you get the error and the candidate diff.
-- "file": every file the program finished writing is applied; files left half-written (e.g. by a timeout) are rolled back and listed.
+- "file": on timeout, files not open for writing are applied if writer inspection succeeds. If inspection fails, or on another failure, nothing is applied.
 The default timeout is 2 seconds; pass a longer timeout when the program runs tests or builds. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Print what you need to know (counts, assertions), not whole files.`;
 
 export default function (pi: ExtensionAPI) {
@@ -64,7 +64,7 @@ export default function (pi: ExtensionAPI) {
 			rollback: Type.Optional(
 				StringEnum(["all", "file"] as const, {
 					description:
-						'On failure: "all" (default) applies nothing; "file" applies finished files and rolls back half-written ones',
+						'On failure: "all" (default) applies nothing; "file" retains files closed before a timeout when writer inspection succeeds',
 				}),
 			),
 			timeout: Type.Optional(Type.Number({ description: "Seconds before the program is killed (default 2)" })),
@@ -231,7 +231,12 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	for (const change of run.changes) lines.push(fileLine(change));
 	for (const warning of run.warnings) lines.push(`warning: ${warning}`);
 	if (run.rolledBack.length > 0) {
-		lines.push(`Rolled back, because they were half-written when the program was killed: ${run.rolledBack.join(", ")}`);
+		const reason = run.writerInspectionFailed
+			? "open writers could not be inspected at the timeout"
+			: run.timedOut
+				? "they were half-written when the program was killed"
+				: "finished writes could not be identified after the program exited";
+		lines.push(`Rolled back, because ${reason}: ${run.rolledBack.join(", ")}`);
 	}
 	if (run.stillRunning.length > 0) {
 		lines.push("Still running when it was killed:", ...run.stillRunning.map((command) => `  ${command}`));

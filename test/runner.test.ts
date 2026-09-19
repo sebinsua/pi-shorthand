@@ -391,7 +391,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(await gitStatus(repo)).toBe("");
 	});
 
-	test('rollback "file" keeps finished files and rolls back one left half-written', async () => {
+	test('rollback "file" keeps closed files on timeout and rolls back one still open', async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(
 			repo,
@@ -405,6 +405,68 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect(result.applied).toEqual(["src/a.ts"]);
 		expect(result.rolledBack).toEqual(["src/b.ts"]);
 		expect(await gitStatus(repo)).toBe("M src/a.ts");
+	});
+
+	test('rollback "file" finds a timed-out detached child writer', async () => {
+		const repo = await makeRepo(FILES);
+		const childProgram = `
+			const writer = Bun.file("src/b.ts").writer();
+			for (let i = 0; ; i++) {
+				writer.write(\`partial \${i}\\n\`);
+				writer.flush();
+				await Bun.sleep(5);
+			}`;
+		const result = await run(
+			repo,
+			`await Bun.write("src/a.ts", "// closed\\n");
+			Bun.spawn([process.execPath, "-e", ${JSON.stringify(childProgram)}], {
+				cwd: process.cwd(), detached: true, env: {}, stdin: "ignore", stdout: "ignore", stderr: "ignore"
+			}).unref();
+			await Bun.sleep(30_000);`,
+			{ rollback: "file", timeoutMs: 1000 },
+		);
+
+		expect(result.timedOut).toBe(true);
+		expect(result.applied).toEqual(["src/a.ts"]);
+		expect(result.rolledBack).toEqual(["src/b.ts"]);
+		expect(await gitStatus(repo)).toBe("M src/a.ts");
+	});
+
+	test('rollback "file" retains nothing when open-writer inspection fails', async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`await Bun.write("src/a.ts", "// closed\\n");
+			const writer = Bun.file("src/b.ts").writer();
+			writer.write("// open\\n");
+			writer.flush();
+			await Bun.sleep(30_000);`,
+			{ rollback: "file", timeoutMs: 300, testWriterInspectionFailure: true },
+		);
+
+		expect(result.timedOut).toBe(true);
+		expect(result.writerInspectionFailed).toBe(true);
+		expect(result.applied).toEqual([]);
+		expect(result.rolledBack).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(await gitStatus(repo)).toBe("");
+	});
+
+	test('rollback "file" applies nothing after an exception with an unclosed writer', async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`await Bun.write("src/a.ts", "// finished\\n");
+			const writer = Bun.file("src/b.ts").writer();
+			writer.write("// partial\\n");
+			writer.flush();
+			throw new Error("failed with writer open");`,
+			{ rollback: "file" },
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.applied).toEqual([]);
+		expect(result.rolledBack).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(await gitStatus(repo)).toBe("");
 	});
 
 	test("reports the commands still running when it times out, and kills them", async () => {

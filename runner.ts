@@ -8,8 +8,8 @@
  *
  * If the program fails:
  * - rollback "all": nothing is applied;
- * - rollback "file": every file it finished writing is applied. Files it (or a subprocess) still
- *   had open for writing when it was killed may be half-written, so they're rolled back.
+ * - rollback "file": on timeout, files that weren't open for writing are applied. On any other
+ *   failure, nothing is applied because the process has exited and its open files can't be inspected.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -37,6 +37,7 @@ export interface RunOptions {
 	testBeforeCommitDelayMs?: number;
 	testBeforeCommitMarker?: string;
 	testProgramStartMarker?: string;
+	testWriterInspectionFailure?: boolean;
 	testCleanupFailure?: boolean;
 	testWorkspaceCleanupFailure?: boolean;
 }
@@ -51,7 +52,8 @@ export interface RunResult {
 	changes: FileChange[]; // everything the program changed
 	applied: string[]; // the changed files that were applied
 	conflicts: string[]; // destinations changed after the run's baseline was captured
-	rolledBack: string[]; // rollback "file": changed files left half-written, so not applied
+	rolledBack: string[]; // rollback "file": changed files not retained because completion was not established
+	writerInspectionFailed: boolean; // timeout: inspection failed, so no changed file was retained
 	stillRunning: string[]; // on timeout: commands the program was still running, e.g. "find / -name x (for 58s)"
 	lastStep?: string; // on timeout: the last step the program logged, e.g. "$ find / -name x" or "grep (18 ms)"
 	errorLine?: string; // on failure: the program's line the error came from, e.g. "line 3: throw new Error(…)"
@@ -183,6 +185,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			applied: applied.map((change) => shown(change.file)),
 			conflicts: conflicts.map(shown),
 			rolledBack: rolledBack.map((change) => shown(change.file)),
+			writerInspectionFailed: program.openForWriting === null,
 			stillRunning: program.stillRunning,
 			lastStep: program.timedOut ? await lastLoggedStep() : undefined,
 			errorLine: program.exitCode !== 0 ? failingLine(options.program, program.output) : undefined,
@@ -333,13 +336,16 @@ async function safeParentChain(repo: string, target: string): Promise<boolean> {
 	return true;
 }
 
-/** Nothing if aborted. Everything if the program succeeded. If it failed, nothing, unless rollback is "file". */
+/** Preserve provably closed files only when a timeout lets us inspect the still-running process. */
 function whatToApply(changes: Change[], program: ProgramRun, rollback: RunOptions["rollback"], aborted: boolean) {
 	if (aborted) return { applied: [], rolledBack: [] };
 	if (program.exitCode === 0) return { applied: changes, rolledBack: [] };
 	if (rollback === "all") return { applied: [], rolledBack: [] };
+	if (!program.timedOut) return { applied: [], rolledBack: changes };
+	if (program.openForWriting === null) return { applied: [], rolledBack: changes };
 
-	const halfWritten = (change: Change) => program.openForWriting.includes(change.file);
+	const openForWriting = program.openForWriting;
+	const halfWritten = (change: Change) => openForWriting.includes(change.file);
 	return { applied: changes.filter((change) => !halfWritten(change)), rolledBack: changes.filter(halfWritten) };
 }
 
@@ -378,7 +384,7 @@ interface ProgramRun {
 	exitCode: number | null;
 	timedOut: boolean;
 	output: string;
-	openForWriting: string[]; // on timeout: files it still had open for writing
+	openForWriting: string[] | null; // on timeout: open writers, or null when inspection failed
 	stillRunning: string[]; // on timeout: the commands it was still running
 }
 
@@ -429,6 +435,7 @@ async function runProgram(
 		child,
 		options.timeoutMs,
 		overlay.executionDir,
+		options.testWriterInspectionFailure,
 	);
 	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning });
 	killAll(); // anything it left running
@@ -455,7 +462,7 @@ async function runProgram(
  * it (or anything it started) still has open for writing, since they may be half-written, and which
  * commands it was still running, since one of them is probably why it timed out.
  */
-async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: string) {
+async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: string, forceInspectionFailure = false) {
 	const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
 	let timer: Timer | undefined;
 	const timeout = new Promise<"timeout">((resolve) => {
@@ -466,7 +473,7 @@ async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: str
 	if (winner !== "timeout") return { exitCode: winner, timedOut: false, openForWriting: [], stillRunning: [] };
 
 	const [openForWriting, stillRunning] = await Promise.all([
-		filesOpenForWriting(repo, child.pid!),
+		filesOpenForWriting(repo, forceInspectionFailure),
 		commandsRunning(child.pid!),
 	]);
 	killGroup(child);
@@ -569,18 +576,26 @@ async function globalGitExcludes(): Promise<string> {
 	return (await file.exists()) ? file.text() : "";
 }
 
-/** Files under dir that any process in a process group has open for writing, relative to dir. */
-async function filesOpenForWriting(dir: string, processGroup: number): Promise<string[]> {
+/** Files under this transaction's private overlay that any process has open for writing. */
+async function filesOpenForWriting(dir: string, forceFailure: boolean): Promise<string[] | null> {
+	if (forceFailure) return null;
 	// -F an: one field per line. "a" is the access mode (r, w, or u for read/write), "n" the file name.
-	const output = await $`lsof -n -P -F an -g ${processGroup}`.nothrow().quiet().text();
+	// Filter lsof's output by the unique overlay path ourselves. Unlike -g, this includes writers that
+	// detached or were reparented; unlike lsof +D, it doesn't walk every file in a large repository.
+	const result = await $`lsof -n -P -F an`.nothrow().quiet();
+	if (result.exitCode !== 0 || result.stderr.length > 0) return null;
+	const output = result.stdout.toString();
 
-	const files: string[] = [];
+	const files = new Set<string>();
 	let access = "";
 	for (const line of output.split("\n")) {
+		if (line.startsWith("f")) access = "";
 		if (line.startsWith("a")) access = line.slice(1);
-		if (line.startsWith(`n${dir}/`) && access !== "r") files.push(path.relative(dir, line.slice(1)));
+		if (line.startsWith(`n${dir}/`) && (access === "w" || access === "u")) {
+			files.add(path.relative(dir, line.slice(1)));
+		}
 	}
-	return files;
+	return [...files];
 }
 
 // ── Finding, describing and applying changes ──────────────────────────────────────
