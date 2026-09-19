@@ -21,6 +21,7 @@
 		"url": "git+https://github.com/sebinsua/pi-shorthand.git"
 	},
 	"files": [
+		"*.c",
 		"*.ts",
 		"skills",
 		"README.md"

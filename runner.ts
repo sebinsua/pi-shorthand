@@ -82,6 +82,7 @@ export interface Overlay {
 	executionExcludesFile?: string; // sandbox-visible path when the host temporary path is hidden
 	environment?: Record<string, string>; // backend-specific environment inside the sandbox
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
+	terminateProcesses?(): Promise<void>; // backend lifecycle boundary for descendants outside our process group
 	changes(): Promise<{ file: string; entry: FilesystemEntry | null }[]>; // may include files only read
 	close(): Promise<void>;
 }
@@ -432,8 +433,12 @@ async function runProgram(
 	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning });
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
-	await output.close();
-	await fs.rm(programFile, { force: true });
+	try {
+		await overlay.terminateProcesses?.();
+	} finally {
+		await output.close();
+		await fs.rm(programFile, { force: true });
+	}
 
 	// Keep the tail, where errors are. Show stack traces as "program.ts:3:11", and drop Bun's version footer.
 	let text = await Bun.file(outputFile).text();

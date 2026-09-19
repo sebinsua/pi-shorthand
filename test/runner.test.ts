@@ -409,6 +409,96 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		expect((await $`pgrep -f "sleep 32.5"`.nothrow().text()).trim()).toBe("");
 	});
 
+	test("a detached session cannot outlive completion, timeout, or cancellation", async () => {
+		for (const outcome of ["completion", "timeout", "cancellation"] as const) {
+			const repo = await makeRepo(FILES);
+			const token = `pi-shorthand-detached-${randomUUID()}`;
+			const program = `Bun.spawn([process.execPath, "-e", "await Bun.sleep(30_000)", ${JSON.stringify(token)}], {
+				detached: true, env: {}, stdin: "ignore", stdout: "ignore", stderr: "ignore"
+			}).unref();
+			${outcome === "completion" ? "" : "await Bun.sleep(30_000);"}`;
+			try {
+				if (outcome === "cancellation") {
+					const started = path.join(path.dirname(repo), "detached-program-started");
+					const runner = startRunner(repo, program, { timeoutMs: 60_000, testProgramStartMarker: started });
+					for (let attempt = 0; attempt < 100 && !(await Bun.file(started).exists()); attempt++) await Bun.sleep(20);
+					expect(await Bun.file(started).exists()).toBe(true);
+					await Bun.sleep(100);
+					runner.kill("SIGTERM");
+					await new Response(runner.stdout).text();
+					await runner.exited;
+				} else {
+					const result = await run(repo, program, { timeoutMs: outcome === "timeout" ? 300 : 5000 });
+					expect(result.timedOut).toBe(outcome === "timeout");
+				}
+				await Bun.sleep(100);
+				expect((await $`pgrep -f ${token}`.nothrow().text()).trim()).toBe("");
+			} finally {
+				await $`pkill -9 -f ${token}`.nothrow().quiet();
+			}
+		}
+	});
+
+	test.skipIf(process.platform !== "darwin")(
+		"macOS process cleanup does not terminate another active transaction",
+		async () => {
+			const firstRepo = await makeRepo(FILES);
+			const secondRepo = await makeRepo(FILES);
+			const firstToken = `pi-shorthand-isolated-first-${randomUUID()}`;
+			const secondToken = `pi-shorthand-isolated-second-${randomUUID()}`;
+			const firstProgram = `
+				Bun.spawn([process.execPath, "-e", "await Bun.sleep(30_000)", ${JSON.stringify(firstToken)}], {
+					detached: true, env: {}, stdin: "ignore", stdout: "ignore", stderr: "ignore"
+				}).unref();
+				await Bun.sleep(30_000);`;
+			const secondProgram = firstProgram.replaceAll(firstToken, secondToken);
+			const firstStarted = path.join(path.dirname(firstRepo), "first-isolated-run-started");
+			const secondStarted = path.join(path.dirname(secondRepo), "second-isolated-run-started");
+			const first = startRunner(firstRepo, firstProgram, {
+				timeoutMs: 60_000,
+				testProgramStartMarker: firstStarted,
+			});
+			const second = startRunner(secondRepo, secondProgram, {
+				timeoutMs: 60_000,
+				testProgramStartMarker: secondStarted,
+			});
+			try {
+				for (let attempt = 0; attempt < 200; attempt++) {
+					if ((await Bun.file(firstStarted).exists()) && (await Bun.file(secondStarted).exists())) break;
+					await Bun.sleep(20);
+				}
+				expect(await Bun.file(firstStarted).exists()).toBe(true);
+				expect(await Bun.file(secondStarted).exists()).toBe(true);
+				for (let attempt = 0; attempt < 100; attempt++) {
+					const [firstPids, secondPids] = await Promise.all([
+						$`pgrep -f ${firstToken}`.nothrow().text(),
+						$`pgrep -f ${secondToken}`.nothrow().text(),
+					]);
+					if (firstPids.trim() && secondPids.trim()) break;
+					await Bun.sleep(20);
+				}
+				expect((await $`pgrep -f ${firstToken}`.nothrow().text()).trim()).not.toBe("");
+				expect((await $`pgrep -f ${secondToken}`.nothrow().text()).trim()).not.toBe("");
+
+				first.kill("SIGTERM");
+				await new Response(first.stdout).text();
+				await first.exited;
+				expect((await $`pgrep -f ${firstToken}`.nothrow().text()).trim()).toBe("");
+				expect((await $`pgrep -f ${secondToken}`.nothrow().text()).trim()).not.toBe("");
+
+				second.kill("SIGTERM");
+				await new Response(second.stdout).text();
+				await second.exited;
+				expect((await $`pgrep -f ${secondToken}`.nothrow().text()).trim()).toBe("");
+			} finally {
+				first.kill("SIGKILL");
+				second.kill("SIGKILL");
+				await $`pkill -9 -f ${firstToken}`.nothrow().quiet();
+				await $`pkill -9 -f ${secondToken}`.nothrow().quiet();
+			}
+		},
+	);
+
 	test("an abort applies nothing and puts the repository back", async () => {
 		const repo = await makeRepo(FILES);
 		const runner = startRunner(repo, `await Bun.write("src/a.ts", "half way");\nawait Bun.sleep(30_000);`, {

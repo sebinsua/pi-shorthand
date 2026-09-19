@@ -17,6 +17,13 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 	const agentfs = process.env.AGENTFS_BIN ?? Bun.which("agentfs");
 	if (!agentfs) throw new Error("The code tool needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
 	const gitMetadata = await gitMetadataDirectories(repo);
+	const cleanupHelper = await macProcessCleanupHelper();
+	const processDeniedCanary = path.join(tempDir, `process-denied-${randomUUID()}`);
+	const processAllowedCanary = path.join(tempDir, `process-allowed-${randomUUID()}`);
+	await Promise.all([
+		fs.writeFile(processDeniedCanary, "", { flag: "wx", mode: 0o600 }),
+		fs.writeFile(processAllowedCanary, "", { flag: "wx", mode: 0o600 }),
+	]);
 
 	const stateFile = await recoveryFile(repo);
 	await recoverCrashedRun(stateFile);
@@ -44,9 +51,15 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 			wrap: (command) => [
 				"/usr/bin/sandbox-exec",
 				"-p",
-				sandboxProfile(repo, tempDir, mount, stateFile, gitMetadata),
+				sandboxProfile(repo, tempDir, mount, stateFile, gitMetadata, processDeniedCanary, cleanupHelper),
 				...command,
 			],
+			terminateProcesses: async () => {
+				const result = await $`${cleanupHelper} ${processDeniedCanary} ${processAllowedCanary}`.nothrow().quiet();
+				if (result.exitCode !== 0) {
+					throw new Error(`Could not terminate every sandbox subprocess (cleanup exit ${result.exitCode}).`);
+				}
+			},
 			changes: () => changesInDatabase(agentfs, database, base, mount),
 			close: async () => {
 				if (closed) return;
@@ -202,6 +215,8 @@ function sandboxProfile(
 	mount: string,
 	stateFile: string,
 	gitMetadata: string[],
+	processDeniedCanary: string,
+	cleanupHelper: string,
 ): string {
 	return [
 		"(version 1)",
@@ -210,9 +225,58 @@ function sandboxProfile(
 		`(deny file-write* (subpath ${JSON.stringify(repo)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(tempDir)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(path.dirname(stateFile))}))`,
+		`(deny file-write* (subpath ${JSON.stringify(path.dirname(cleanupHelper))}))`,
 		`(deny file-write* (subpath ${JSON.stringify(path.join(mount, ".git"))}))`,
+		`(deny file-read-data (literal ${JSON.stringify(processDeniedCanary)}))`,
 		...gitMetadata.map((directory) => `(deny file-write* (subpath ${JSON.stringify(directory)}))`),
 	].join("\n");
+}
+
+/** Build a local helper whose kernel sandbox queries identify reparented descendants exactly. */
+async function macProcessCleanupHelper(): Promise<string> {
+	const source = path.join(import.meta.dir, "macos-process-cleanup.c");
+	const sourceBytes = await Bun.file(source).bytes();
+	const digest = createHash("sha256").update(sourceBytes).digest("hex").slice(0, 16);
+	const directory = path.join(homedir(), ".cache", "pi-shorthand", "native");
+	const helper = path.join(directory, `macos-process-cleanup-${digest}`);
+	await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+	const directoryStats = await fs.lstat(directory);
+	if (
+		!directoryStats.isDirectory() ||
+		directoryStats.isSymbolicLink() ||
+		(process.getuid && directoryStats.uid !== process.getuid())
+	) {
+		throw new Error(`Unsafe shorthand native helper directory: ${directory}`);
+	}
+	if ((directoryStats.mode & 0o077) !== 0) await fs.chmod(directory, 0o700);
+
+	const existing = await fs.lstat(helper).catch(() => null);
+	if (existing) {
+		if (
+			!existing.isFile() ||
+			existing.isSymbolicLink() ||
+			(existing.mode & 0o111) === 0 ||
+			(process.getuid && existing.uid !== process.getuid())
+		) {
+			throw new Error(`Unsafe shorthand native helper: ${helper}`);
+		}
+		return helper;
+	}
+
+	const compiler = Bun.which("clang") ?? Bun.which("cc");
+	if (!compiler) throw new Error("The macOS code tool needs clang to build its process-lifecycle helper.");
+	const temporary = `${helper}.${randomUUID()}.tmp`;
+	try {
+		const compilation = await $`${compiler} -O2 ${source} -o ${temporary}`.nothrow().quiet();
+		if (compilation.exitCode !== 0) {
+			throw new Error(`Could not build the macOS process-lifecycle helper:\n${compilation.stderr}`);
+		}
+		await fs.chmod(temporary, 0o700);
+		await fs.rename(temporary, helper);
+	} finally {
+		await fs.rm(temporary, { force: true }).catch(() => {});
+	}
+	return helper;
 }
 
 /** Resolve both per-worktree and common Git storage before entering the private checkout. */
