@@ -1308,6 +1308,66 @@ describe.skipIf(!hasOverlay)("runner", () => {
 });
 
 describe.skipIf(!hasOverlay)("prelude", () => {
+	test("glob and grep throw with Git diagnostics while grep no-match remains empty", async () => {
+		const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
+		const result = await run(
+			repo,
+			`const fs = await import("node:fs/promises");
+			await fs.mkdir("fake");
+			await Bun.write("fake/git", "#!/bin/sh\\necho git exploded >&2\\nexit 2\\n");
+			await fs.chmod("fake/git", 0o755);
+			process.env.PATH = process.cwd() + "/fake:" + process.env.PATH;
+			for (const [name, call] of [["glob", () => glob("**/*")], ["grep", () => grep("oldApi")]]) {
+				try { call(); } catch (error) { console.log(name + ": " + error.message); }
+			}`,
+		);
+
+		expect(result.output).toContain("glob: git ls-files failed (exit 2): git exploded");
+		expect(result.output).toContain("grep: git grep failed (exit 2): git exploded");
+
+		const noMatch = await run(repo, `console.log(JSON.stringify(grep("definitely absent")));`);
+		expect(noMatch.output.trim()).toBe("[]");
+	});
+
+	test("grep rejects malformed Git output", async () => {
+		const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
+		const result = await run(
+			repo,
+			`const fs = await import("node:fs/promises");
+			await fs.mkdir("fake");
+			await Bun.write("fake/git", "#!/bin/sh\\nprintf 'broken\\n'\\n");
+			await fs.chmod("fake/git", 0o755);
+			process.env.PATH = process.cwd() + "/fake:" + process.env.PATH;
+			grep("anything");`,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain('git grep returned malformed output: "broken"');
+	});
+
+	test("grit rejects partial output on failure and malformed successful JSONL", async () => {
+		for (const malformed of [false, true]) {
+			const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
+			const body = malformed
+				? "printf 'not-json\\n'"
+				: 'printf \'%s\\n\' \'{"original":{"sourceFile":"src/a.ts","ranges":[{}]}}\'; echo grit exploded >&2; exit 2';
+			const result = await run(
+				repo,
+				`const fs = await import("node:fs/promises");
+				await fs.mkdir("fake");
+				await Bun.write("fake/grit", ${JSON.stringify("#!/bin/sh\n")} + ${JSON.stringify(body)} + "\\n");
+				await fs.chmod("fake/grit", 0o755);
+				process.env.PATH = process.cwd() + "/fake:" + process.env.PATH;
+				grit("pattern", "src");`,
+			);
+
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(
+				malformed ? "grit returned malformed JSONL" : "grit failed (exit 2): grit exploded",
+			);
+		}
+	});
+
 	test("sg.rewrite fills an empty $$$ with nothing, not the literal text", async () => {
 		const repo = await makeRepo({ "src/x.ts": "foo();\nfoo(1, 2);\n" });
 		await run(repo, `sg.rewrite("foo($$$ARGS)", "bar($$$ARGS)", "src");`);

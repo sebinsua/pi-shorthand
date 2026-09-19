@@ -73,19 +73,27 @@ function grep(pattern: string | RegExp, paths: string | string[] = ".") {
 		flags = ["-P", "-e", pattern.source];
 		if (pattern.flags.includes("i")) flags.push("-i");
 	}
-	const output = git(["grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...[paths].flat()]);
+	const output = git(["grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...[paths].flat()], [1]);
 
 	const matches = [];
 	for (const line of output.split("\n")) {
 		if (line === "") continue;
 		const [file, lineNumber, text] = line.split("\0");
+		if (!file || !/^\d+$/.test(lineNumber ?? "") || text === undefined) {
+			throw new Error(`git grep returned malformed output: ${JSON.stringify(line.slice(0, 200))}`);
+		}
 		matches.push({ file, line: Number(lineNumber), text });
 	}
 	return matches;
 }
 
-function git(args: string[]): string {
-	return Bun.spawnSync(["git", ...args], { stderr: "ignore" }).stdout.toString();
+function git(args: string[], allowedExitCodes: number[] = []): string {
+	const result = Bun.spawnSync(["git", ...args], { env: process.env });
+	if (result.exitCode !== 0 && !allowedExitCodes.includes(result.exitCode)) {
+		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
+		throw new Error(`git ${args[0]} failed (exit ${result.exitCode}): ${diagnostic || "no diagnostics"}`);
+	}
+	return result.stdout.toString();
 }
 
 // ── ast-grep ──────────────────────────────────────────────────────────────────────
@@ -213,17 +221,35 @@ function grit(pattern: string, paths: string | string[] = ".", options: { lang?:
 	if (options.dryRun) flags.push("--dry-run");
 	if (options.lang) flags.push("--language", options.lang);
 
-	const result = Bun.spawnSync(["grit", "apply", ...flags, pattern, ...[paths].flat()]);
+	const result = Bun.spawnSync(["grit", "apply", ...flags, pattern, ...[paths].flat()], { env: process.env });
+	if (result.exitCode !== 0) {
+		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
+		throw new Error(`grit failed (exit ${result.exitCode}): ${diagnostic || "no diagnostics"}`);
+	}
 
 	const files = [];
-	for (const line of result.stdout.toString().split("\n")) {
-		if (!line.startsWith("{")) continue;
-		const record = JSON.parse(line);
+	for (const line of result.stdout.toString().split("\n").filter(Boolean)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			throw new Error(`grit returned malformed JSONL: ${JSON.stringify(line.slice(0, 200))}`);
+		}
+		if (typeof parsed !== "object" || parsed === null) {
+			throw new Error(`grit returned malformed match data: ${JSON.stringify(line.slice(0, 200))}`);
+		}
+		const record = parsed as Record<string, unknown>;
 		const matched = record.original ?? record; // rewrites nest the match under "original"
-		if (matched.sourceFile) files.push({ file: matched.sourceFile, matches: matched.ranges.length });
-	}
-	if (result.exitCode !== 0 && files.length === 0) {
-		throw new Error(`grit failed: ${result.stderr.toString().trim()}`);
+		if (typeof matched !== "object" || matched === null) {
+			throw new Error(`grit returned malformed match data: ${JSON.stringify(line.slice(0, 200))}`);
+		}
+		const match = matched as Record<string, unknown>;
+		if (match.sourceFile !== undefined) {
+			if (typeof match.sourceFile !== "string" || !Array.isArray(match.ranges)) {
+				throw new Error(`grit returned malformed match data: ${JSON.stringify(line.slice(0, 200))}`);
+			}
+			files.push({ file: match.sourceFile, matches: match.ranges.length });
+		}
 	}
 	return files;
 }
