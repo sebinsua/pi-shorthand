@@ -302,6 +302,26 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		},
 	);
 
+	test.skipIf(process.platform !== "darwin")(
+		"an ignored state.json directory cannot collide with macOS recovery metadata",
+		async () => {
+			const repo = await makeRepo({
+				".gitignore": "state.json/\n",
+				"tracked.txt": "before\n",
+			});
+			await mkdir(path.join(repo, "state.json"));
+			await Bun.write(path.join(repo, "state.json", "kept.txt"), "user data\n");
+
+			const result = await run(repo, `await Bun.write("tracked.txt", "after\\n");`);
+
+			expect(result.exitCode).toBe(0);
+			expect(result.applied).toEqual(["tracked.txt"]);
+			expect(await Bun.file(path.join(repo, "tracked.txt")).text()).toBe("after\n");
+			expect(await Bun.file(path.join(repo, "state.json", "kept.txt")).text()).toBe("user data\n");
+			expect((await lstat(repo)).isDirectory()).toBe(true);
+		},
+	);
+
 	test.skipIf(process.platform !== "darwin")("macOS recovery rejects paths outside owned temporary roots", async () => {
 		const repo = await makeRepo(FILES);
 		const stateFile = macRecoveryFile(repo);
