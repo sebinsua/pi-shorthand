@@ -14,13 +14,14 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, constants, mkdirSync, type Stats } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { Lang, parse } from "@ast-grep/napi";
 import { $ } from "bun";
 import { structuredPatch } from "diff";
+import { appendRunHistory, historyEnabled, RUN_HISTORY_FILE } from "./history.ts";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 
@@ -102,12 +103,11 @@ const PRELUDE = path.join(import.meta.dir, "prelude.ts");
 // (e.g. Pi's project installs), one further up. Like `npm run`, look in every one from here up.
 const NODE_MODULES = ancestors(import.meta.dir).map((dir) => path.join(dir, "node_modules"));
 const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much the model sees
-const LOG_FILE = path.join(homedir(), ".cache", "pi-shorthand", "runs.jsonl");
 let RUN_ID = ""; // set from RunOptions when the runner starts
 
 /** Appends one event to the log, e.g. log("program exited", { exitCode: 0 }). */
 function log(event: string, details: Record<string, unknown> = {}) {
-	appendFileSync(LOG_FILE, `${JSON.stringify({ time: new Date().toISOString(), run: RUN_ID, event, ...details })}\n`);
+	appendRunHistory(event, { run: RUN_ID, ...details });
 }
 
 async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> {
@@ -122,7 +122,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 
 	try {
 		tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
-		log("started", { repo, cwd, timeoutMs: options.timeoutMs, rollback: options.rollback });
+		log("started", { timeoutMs: options.timeoutMs, rollback: options.rollback });
 		const open = process.platform === "darwin" ? openMacOverlay : openLinuxOverlay;
 		const overlay = await open(repo, tempDir);
 		log("overlay opened");
@@ -169,9 +169,9 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			));
 		}
 		log("finished", {
-			changed: changes.map((change) => change.file),
-			applied: applied.map((change) => change.file),
-			conflicts,
+			changed: changes.length,
+			applied: applied.length,
+			conflicts: conflicts.length,
 		});
 
 		result = {
@@ -415,7 +415,7 @@ async function runProgram(
 		[process.execPath, "--preload", executionPrelude, executionProgramPath],
 		executionCwd,
 	);
-	log("program started", { output: outputFile, timeoutMs: options.timeoutMs });
+	log("program started", { timeoutMs: options.timeoutMs });
 	if (options.testProgramStartMarker) await Bun.write(options.testProgramStartMarker, "started");
 	const child = spawn(command, args, {
 		cwd: executionCwd,
@@ -437,7 +437,7 @@ async function runProgram(
 		overlay.executionDir,
 		options.testWriterInspectionFailure,
 	);
-	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning });
+	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning: stillRunning.length });
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
 	try {
@@ -522,12 +522,22 @@ function seconds(elapsed: string): number {
 
 /** The last command or helper call this run's program logged, e.g. "$ find / -name x". */
 async function lastLoggedStep(): Promise<string | undefined> {
-	const lines = (await Bun.file(LOG_FILE).text()).trimEnd().split("\n").slice(-500);
+	let lines: string[];
+	try {
+		lines = (await Bun.file(RUN_HISTORY_FILE).text()).trimEnd().split("\n").slice(-500);
+	} catch {
+		return undefined;
+	}
 	for (const line of lines.toReversed()) {
-		const event = JSON.parse(line);
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line);
+		} catch {
+			continue;
+		}
 		if (event.run !== RUN_ID) continue;
 		if (event.event === "command") return `$ ${event.command}`;
-		if (event.event === "helper") return `${event.helper}(${event.args.slice(1, -1)}) (${event.ms} ms)`;
+		if (event.event === "helper") return `${event.helper} (${event.ms} ms)`;
 	}
 	return undefined;
 }
@@ -553,7 +563,7 @@ function programEnvironment(excludesFile: string, repo: string, overlay: Overlay
 		// So programs can import the extension's own packages, e.g. "@ast-grep/napi". A repository's own
 		// node_modules still wins: NODE_PATH is only a fallback.
 		NODE_PATH: [...nodeModules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
-		PI_SHORTHAND_LOG: LOG_FILE, // the prelude logs each command and helper call here
+		...(historyEnabled() ? { PI_SHORTHAND_LOG: RUN_HISTORY_FILE, PI_SHORTHAND_HISTORY_SANDBOX: "1" } : {}),
 		PI_SHORTHAND_RUN: RUN_ID,
 		GIT_OPTIONAL_LOCKS: "0", // read-only git commands should not dirty copied or mounted metadata
 		GIT_CONFIG_COUNT: String(count + 1),
@@ -956,7 +966,6 @@ function entriesEqual(a: FilesystemEntry | null, b: FilesystemEntry | null): boo
 }
 
 if (import.meta.main) {
-	mkdirSync(path.dirname(LOG_FILE), { recursive: true });
 	const abort = new AbortController();
 	process.on("SIGTERM", () => abort.abort());
 	const options: RunOptions = await Bun.stdin.json();

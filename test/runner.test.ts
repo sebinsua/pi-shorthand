@@ -41,13 +41,28 @@ async function makeRepo(files: Record<string, string>): Promise<string> {
 	return repo;
 }
 
-function startRunner(repo: string, program: string, options: Partial<RunOptions> = {}) {
-	const input: RunOptions = { runId: "test", cwd: repo, program, timeoutMs: 5000, rollback: "all", ...options };
-	return Bun.spawn(["bun", RUNNER], { stdin: new Response(JSON.stringify(input)), stdout: "pipe", stderr: "pipe" });
+function startRunner(
+	repo: string,
+	program: string,
+	options: Partial<RunOptions> = {},
+	environment: Record<string, string> = {},
+) {
+	const input: RunOptions = { runId: randomUUID(), cwd: repo, program, timeoutMs: 5000, rollback: "all", ...options };
+	return Bun.spawn(["bun", RUNNER], {
+		stdin: new Response(JSON.stringify(input)),
+		stdout: "pipe",
+		stderr: "pipe",
+		env: { ...process.env, ...environment },
+	});
 }
 
-async function run(repo: string, program: string, options: Partial<RunOptions> = {}): Promise<RunResult> {
-	const runner = startRunner(repo, program, options);
+async function run(
+	repo: string,
+	program: string,
+	options: Partial<RunOptions> = {},
+	environment: Record<string, string> = {},
+): Promise<RunResult> {
+	const runner = startRunner(repo, program, options, environment);
 	const [stdout, stderr] = await Promise.all([new Response(runner.stdout).text(), new Response(runner.stderr).text()]);
 	if ((await runner.exited) !== 0) throw new Error(`runner failed: ${stderr}`);
 	return JSON.parse(stdout);
@@ -1233,7 +1248,22 @@ describe.skipIf(!hasOverlay)("runner", () => {
 
 		expect(result.timedOut).toBe(true);
 		expect(result.stillRunning).toEqual([]);
-		expect(result.lastStep).toMatch(/^grep\("oldApi","src"\) \(\d+ ms\)$/);
+		expect(result.lastStep).toMatch(/^grep \(\d+ ms\)$/);
+	});
+
+	test("a timeout still returns normally when history is disabled", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`grep("oldApi", "src");\nwhile (true) {}`,
+			{ timeoutMs: 300 },
+			{
+				PI_SHORTHAND_HISTORY: "0",
+			},
+		);
+
+		expect(result.timedOut).toBe(true);
+		expect(result.lastStep).toBeUndefined();
 	});
 
 	test("warns about $ commands that aren't awaited", async () => {

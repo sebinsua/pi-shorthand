@@ -54,7 +54,12 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
   is in progress, shorthand checks it again immediately before replacing it and reports a conflict.
   A non-cooperating writer can still race the final filesystem rename or removal itself.
 - To try it with only `read` and `code`: `pi --tools read,code`.
-- To watch runs as they happen, including each command a program starts: `tail -f ~/.cache/pi-shorthand/runs.jsonl`.
+- Run history is stored in `~/.cache/pi-shorthand/runs.jsonl` with directory mode `0700` and file
+  mode `0600`. It records timestamps, opaque run IDs, lifecycle events, exit status, durations,
+  counts, helper names, and shell executable names. It does not record programs, output, errors,
+  arguments, repository paths, file paths, or diffs. The log rotates at 1 MiB and expires after
+  seven days. Set `PI_SHORTHAND_HISTORY=0` to disable it. To watch enabled history:
+  `tail -f ~/.cache/pi-shorthand/runs.jsonl`.
 
 ## Developing
 

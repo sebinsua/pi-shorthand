@@ -13,28 +13,25 @@
  * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
  */
 
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
+import { appendRunHistory } from "./history.ts";
 
 function log(event: string, details: Record<string, unknown>) {
 	const { PI_SHORTHAND_LOG, PI_SHORTHAND_RUN } = process.env;
 	if (!PI_SHORTHAND_LOG) return;
-	appendFileSync(
-		PI_SHORTHAND_LOG,
-		`${JSON.stringify({ time: new Date().toISOString(), run: PI_SHORTHAND_RUN, event, ...details })}\n`,
-	);
+	appendRunHistory(event, { run: PI_SHORTHAND_RUN, ...details }, PI_SHORTHAND_LOG);
 }
 
 /** Runs a helper, logging how long it took and how many results it returned. */
-function logged<T>(helper: string, args: unknown[], run: () => T): T {
+function logged<T>(helper: string, _args: unknown[], run: () => T): T {
 	const startedAt = performance.now();
 	const result = run();
-	const results = Array.isArray(result) ? result.length : result;
+	const results = Array.isArray(result) ? result.length : typeof result === "number" ? result : undefined;
 	log("helper", {
 		helper,
-		args: JSON.stringify(args).slice(0, 200),
 		ms: Math.round(performance.now() - startedAt),
 		results,
 	});
@@ -44,8 +41,9 @@ function logged<T>(helper: string, args: unknown[], run: () => T): T {
 /** Bun's shell, logging each command as it starts. */
 const $ = new Proxy(bunShell, {
 	apply(target, thisArg, args: Parameters<typeof bunShell>) {
-		const [strings, ...values] = args;
-		log("command", { command: String.raw({ raw: strings.raw }, ...values).slice(0, 200) });
+		const [strings] = args;
+		const words = strings.raw[0].trim().split(/\s+/);
+		log("command", { command: words.find((word) => !word.includes("=")) ?? "" });
 		return Reflect.apply(target, thisArg, args);
 	},
 });

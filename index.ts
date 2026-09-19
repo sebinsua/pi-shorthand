@@ -5,17 +5,15 @@
 
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { callLine, countLines, resultLines } from "./display.ts";
+import { RUN_HISTORY_FILE } from "./history.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
-
-// Where runner.ts logs each step. (Not imported from runner.ts, which only runs under Bun.)
-const LOG_FILE = path.join(homedir(), ".cache", "pi-shorthand", "runs.jsonl");
 
 // Runs typically take well under a second. Programs that run tests or builds pass a longer timeout.
 const DEFAULT_TIMEOUT_SECONDS = 2;
@@ -159,10 +157,10 @@ export function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<R
 function latestStep(runId: string): string | undefined {
 	let tail: string;
 	try {
-		const size = statSync(LOG_FILE).size;
+		const size = statSync(RUN_HISTORY_FILE).size;
 		const length = Math.min(size, 64 * 1024);
 		const buffer = Buffer.alloc(length);
-		const file = openSync(LOG_FILE, "r");
+		const file = openSync(RUN_HISTORY_FILE, "r");
 		readSync(file, buffer, 0, length, size - length);
 		closeSync(file);
 		tail = buffer.toString("utf8");
