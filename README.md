@@ -47,7 +47,8 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 
 - Only files git tracks, or would track, are applied.
 - On macOS your repo is briefly swapped for the overlay while a program runs (about 150 ms), so your
-  editor may notice. On Linux nothing outside the program sees it (about 15 ms).
+  editor may notice. On Linux each run snapshots the checkout first; reflinks make that cheap where
+  supported, while other filesystems copy its contents and use corresponding temporary space.
 - To try it with only `read` and `code`: `pi --tools read,code`.
 - To watch runs as they happen, including each command a program starts: `tail -f ~/.cache/pi-shorthand/runs.jsonl`.
 

@@ -4,6 +4,7 @@
  * is also where the changes are read from. There's nothing to undo afterwards.
  */
 
+import { type BigIntStats, constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
@@ -12,10 +13,14 @@ import type { Overlay } from "./runner.ts";
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const bwrap = Bun.which("bwrap");
 	if (!bwrap) throw new Error("The code tool needs bubblewrap (0.9 or later) on Linux.");
-	const filesAtStart = await gitVisibleFiles(repo);
 
+	// OverlayFS forbids changing a mounted lower tree. The real checkout remains live, so take an
+	// independent copy first; reflinks make this cheap on filesystems that support them.
+	const lower = path.join(tempDir, "lower");
 	const upper = path.join(tempDir, "upper");
 	const work = path.join(tempDir, "work");
+	await copyStableTree(repo, lower);
+	const filesAtStart = await gitVisibleFiles(lower);
 	await fs.mkdir(upper);
 	await fs.mkdir(work);
 
@@ -26,7 +31,7 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 		"/",
 		"/",
 		"--overlay-src",
-		repo,
+		lower,
 		"--overlay",
 		upper,
 		work,
@@ -38,13 +43,84 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	];
 
 	return {
-		originalDir: repo,
+		originalDir: lower,
 		writableDir: upper,
 		gitExcludes: [],
 		wrap,
 		changes: async () => [...(await writtenFiles(upper)), ...(await deletedFiles(filesAtStart, repo, wrap))],
 		close: async () => {},
 	};
+}
+
+/** Copies a coherent tree, retrying if anything in the source changes during the copy. */
+async function copyStableTree(source: string, destination: string) {
+	for (let attempt = 0; attempt < 3; attempt++) {
+		let before: string;
+		try {
+			before = await treeIdentity(source);
+		} catch (error) {
+			if (isMissing(error)) continue;
+			throw new Error(`Could not inspect the repository before snapshotting: ${errorMessage(error)}`, {
+				cause: error,
+			});
+		}
+		await fs.rm(destination, { recursive: true, force: true });
+		try {
+			await fs.cp(source, destination, {
+				recursive: true,
+				preserveTimestamps: true,
+				verbatimSymlinks: true,
+				mode: constants.COPYFILE_FICLONE,
+			});
+		} catch (error) {
+			let after: string;
+			try {
+				after = await treeIdentity(source);
+			} catch (inspectionError) {
+				if (isMissing(inspectionError)) continue;
+				throw new Error(`Could not verify the repository after a snapshot error: ${errorMessage(inspectionError)}`, {
+					cause: inspectionError,
+				});
+			}
+			if (after !== before) continue;
+			throw new Error(`Could not copy the repository snapshot: ${errorMessage(error)}`, { cause: error });
+		}
+		let after: string;
+		try {
+			after = await treeIdentity(source);
+		} catch (error) {
+			if (isMissing(error)) continue;
+			throw new Error(`Could not verify the repository snapshot: ${errorMessage(error)}`, { cause: error });
+		}
+		if (after === before) return;
+	}
+	throw new Error("The repository kept changing while shorthand tried to snapshot it. Please retry.");
+}
+
+/** Metadata that changes whenever an entry is written, replaced, added or removed. */
+async function treeIdentity(root: string): Promise<string> {
+	const records = [identityRecord(".", await fs.lstat(root, { bigint: true }))];
+	for (const entry of await fs.readdir(root, { recursive: true, withFileTypes: true })) {
+		const file = path.join(entry.parentPath, entry.name);
+		if (!entry.isFile() && !entry.isDirectory() && !entry.isSymbolicLink()) {
+			throw new Error(`Unsupported repository entry type at ${JSON.stringify(path.relative(root, file))}`);
+		}
+		const stats = await fs.lstat(file, { bigint: true });
+		records.push(identityRecord(path.relative(root, file), stats));
+	}
+	return records.toSorted().join("\0");
+}
+
+function identityRecord(file: string, stats: BigIntStats): string {
+	return `${file}\0${stats.dev}:${stats.ino}:${stats.mode}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+}
+
+function isMissing(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /** Regular files in the upper directory, except git's own writes to .git (e.g. refreshing its index). */

@@ -224,6 +224,37 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		},
 	);
 
+	test.skipIf(process.platform !== "linux")(
+		"a run keeps reading its starting snapshot after an external edit",
+		async () => {
+			const repo = await makeRepo(FILES);
+			const ready = path.join(path.dirname(repo), "program-started");
+			const edited = path.join(path.dirname(repo), "external-edit-finished");
+			const runner = startRunner(
+				repo,
+				`await Bun.write(${JSON.stringify(ready)}, "ready");
+			while (!(await Bun.file(${JSON.stringify(edited)}).exists())) await Bun.sleep(10);
+			const original = await Bun.file("src/a.ts").text();
+			await Bun.write("src/generated.ts", original);`,
+			);
+			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
+			expect(await Bun.file(ready).exists()).toBe(true);
+			await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
+			await Bun.write(edited, "edited");
+
+			const [stdout, stderr] = await Promise.all([
+				new Response(runner.stdout).text(),
+				new Response(runner.stderr).text(),
+			]);
+			expect(await runner.exited, stderr).toBe(0);
+			const result: RunResult = JSON.parse(stdout);
+
+			expect(result.applied).toEqual(["src/generated.ts"]);
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
+			expect(await Bun.file(path.join(repo, "src/generated.ts")).text()).toBe(FILES["src/a.ts"]);
+		},
+	);
+
 	test("two runs on the same repository both apply", async () => {
 		const repo = await makeRepo(FILES);
 		const [first, second] = await Promise.all([
