@@ -1342,7 +1342,33 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		);
 
 		expect(result.exitCode).toBe(1);
-		expect(result.output).toContain('git grep returned malformed output: "broken"');
+		expect(result.output).toContain('git grep returned malformed output: "broken\\n"');
+	});
+
+	test("grep preserves newline, tab, and Unicode filenames", async () => {
+		const files = {
+			"src/line\nbreak.ts": "needle newline\n",
+			"src/tab\tname.ts": "needle tab\n",
+			"src/雪.ts": "needle Unicode\n",
+		};
+		const repo = await makeRepo(files);
+		const result = Bun.spawnSync(
+			[
+				"bun",
+				"--preload",
+				path.join(import.meta.dir, "../prelude.ts"),
+				"-e",
+				`console.log(JSON.stringify(grep("needle")));`,
+			],
+			{ cwd: repo, env: { ...process.env, PI_SHORTHAND_LOG: "" } },
+		);
+
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+		expect(JSON.parse(result.stdout.toString())).toEqual([
+			{ file: "src/line\nbreak.ts", line: 1, text: "needle newline" },
+			{ file: "src/tab\tname.ts", line: 1, text: "needle tab" },
+			{ file: "src/雪.ts", line: 1, text: "needle Unicode" },
+		]);
 	});
 
 	test("grit rejects partial output on failure and malformed successful JSONL", async () => {

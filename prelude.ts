@@ -73,13 +73,19 @@ function grep(pattern: string | RegExp, paths: string | string[] = ".") {
 	const output = git(["grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...[paths].flat()], [1]);
 
 	const matches = [];
-	for (const line of output.split("\n")) {
-		if (line === "") continue;
-		const [file, lineNumber, text] = line.split("\0");
-		if (!file || !/^\d+$/.test(lineNumber ?? "") || text === undefined) {
-			throw new Error(`git grep returned malformed output: ${JSON.stringify(line.slice(0, 200))}`);
+	let offset = 0;
+	while (offset < output.length) {
+		const fileEnd = output.indexOf("\0", offset);
+		const lineEnd = fileEnd < 0 ? -1 : output.indexOf("\0", fileEnd + 1);
+		const textEnd = lineEnd < 0 ? -1 : output.indexOf("\n", lineEnd + 1);
+		const file = fileEnd < 0 ? "" : output.slice(offset, fileEnd);
+		const lineNumber = lineEnd < 0 ? "" : output.slice(fileEnd + 1, lineEnd);
+		if (!file || !/^\d+$/.test(lineNumber) || textEnd < 0) {
+			throw new Error(`git grep returned malformed output: ${JSON.stringify(output.slice(offset, offset + 200))}`);
 		}
+		const text = output.slice(lineEnd + 1, textEnd);
 		matches.push({ file, line: Number(lineNumber), text });
+		offset = textEnd + 1;
 	}
 	return matches;
 }
