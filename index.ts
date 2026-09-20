@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { callLine, countLines, resultLines, unstructuredResultText } from "./display.ts";
+import { callLine, countLines, fileMetadataSummary, resultLines, unstructuredResultText } from "./display.ts";
 import { RUN_HISTORY_FILE } from "./history.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
@@ -212,19 +212,8 @@ function summaryLine(run: RunResult): string {
 function fileLine(change: FileChange): string {
 	const letter = { added: "A", modified: "M", deleted: "D" }[change.kind];
 	const { additions, deletions } = countLines(change.patch);
-	let metadata = "";
-	if (change.beforeType && change.afterType && change.beforeType !== change.afterType) {
-		metadata = ` (${change.beforeType} → ${change.afterType})`;
-	} else if (change.afterType === "symlink" && change.beforeType !== "symlink") {
-		metadata = " (symlink)";
-	} else if (
-		change.beforeMode !== undefined &&
-		change.afterMode !== undefined &&
-		change.beforeMode !== change.afterMode
-	) {
-		metadata = ` (${change.beforeMode.toString(8)} → ${change.afterMode.toString(8)})`;
-	}
-	return `  ${letter} ${change.path}${metadata} +${additions} −${deletions}`;
+	const metadata = fileMetadataSummary(change);
+	return `  ${letter} ${change.path}${metadata ? ` (${metadata})` : ""} +${additions} −${deletions}`;
 }
 
 function textForModel(run: RunResult, toolCallId: string): string {
