@@ -998,6 +998,35 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		},
 	);
 
+	test.skipIf(process.platform !== "darwin")(
+		"macOS change discovery preserves newline, tab, and Unicode filenames",
+		async () => {
+			const modified = "src/line\nbreak.ts";
+			const deleted = "src/tab\tname.ts";
+			const added = "src/雪-added.ts";
+			const repo = await makeRepo({ ...FILES, [modified]: "before\n", [deleted]: "delete me\n" });
+
+			const result = await run(
+				repo,
+				`await Bun.write(${JSON.stringify(modified)}, "after\\n");
+				await Bun.file(${JSON.stringify(deleted)}).delete();
+				await Bun.write(${JSON.stringify(added)}, "added\\n");`,
+			);
+
+			expect(result.exitCode).toBe(0);
+			const expected: Array<{ path: string; kind: "added" | "deleted" | "modified" }> = [
+				{ path: modified, kind: "modified" as const },
+				{ path: deleted, kind: "deleted" as const },
+				{ path: added, kind: "added" as const },
+			].toSorted((a, b) => a.path.localeCompare(b.path));
+			expect(result.changes.map(({ path: filePath, kind }) => ({ path: filePath, kind }))).toEqual(expected);
+			expect(result.applied).toEqual(expected.map(({ path: filePath }) => filePath));
+			expect(await Bun.file(path.join(repo, modified)).text()).toBe("after\n");
+			expect(await Bun.file(path.join(repo, deleted)).exists()).toBe(false);
+			expect(await Bun.file(path.join(repo, added)).text()).toBe("added\n");
+		},
+	);
+
 	test("removing an ignore rule applies newly visible files and tracked ignored files", async () => {
 		const repo = await makeRepo({ ".gitignore": "*.tmp\n" });
 		await Bun.write(path.join(repo, "tracked.tmp"), "before\n");

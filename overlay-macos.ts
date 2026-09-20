@@ -10,6 +10,7 @@ import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
+import { Database } from "bun:sqlite";
 import { copyStableTree } from "./overlay-linux.ts";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
 
@@ -60,7 +61,7 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 					throw new Error(`Could not terminate every sandbox subprocess (cleanup exit ${result.exitCode}).`);
 				}
 			},
-			changes: () => changesInDatabase(agentfs, database, base, mount),
+			changes: () => changesInDatabase(database, base, mount),
 			close: async () => {
 				if (closed) return;
 				closed = true;
@@ -292,37 +293,99 @@ async function gitMetadataDirectories(repo: string): Promise<string[]> {
 }
 
 /** Snapshot the AgentFS database while its server owns the live database lock. */
-async function changesInDatabase(agentfs: string, database: string, base: string, mount: string) {
+async function changesInDatabase(database: string, base: string, mount: string) {
 	const snapshotDir = path.join(path.dirname(path.dirname(database)), "database-snapshot");
 	await cloneDatabase(path.dirname(database), "run.db", snapshotDir, "run.db");
-	const output = await $`${agentfs} diff ${path.join(snapshotDir, "run.db")}`.quiet().text();
+	const records = agentFsChangeRecords(path.join(snapshotDir, "run.db"));
 
 	const changes: { file: string; entry: FilesystemEntry | null }[] = [];
-	for (const line of output.split("\n")) {
-		const match = line.match(/^([AMD]) (\S) \/(.+)$/);
-		if (!match || path.basename(match[3]).startsWith("._")) continue;
-		const [, change, type, file] = match;
+	for (const { deleted, type, file } of records) {
+		if (path.basename(file).startsWith("._")) continue;
 		if (file === ".git" || file.startsWith(".git/")) continue;
 
-		if (change !== "D" && (type === "f" || type === "l")) {
+		if (!deleted && (type === "f" || type === "l")) {
 			changes.push({ file, entry: await readEntry(path.join(mount, file)) });
 		}
-		if (change !== "D" && type === "d") {
+		if (!deleted && type === "d") {
 			const original = await fs.lstat(path.join(base, file)).catch(() => null);
 			if (original && !original.isDirectory()) {
 				throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
 			}
 		}
-		if (change !== "D" && !["f", "l", "d"].includes(type)) {
+		if (!deleted && !["f", "l", "d"].includes(type)) {
 			throw new Error(`Unsupported AgentFS entry type ${JSON.stringify(type)} at ${JSON.stringify(file)}.`);
 		}
-		if (change === "D") {
-			for (const deleted of await filesUnder(path.join(base, file))) {
-				changes.push({ file: path.join(file, deleted), entry: null });
+		if (deleted) {
+			for (const descendant of await filesUnder(path.join(base, file))) {
+				changes.push({ file: path.join(file, descendant), entry: null });
 			}
 		}
 	}
 	return changes;
+}
+
+interface AgentFsChangeRecord {
+	file: string;
+	type: string;
+	deleted: boolean;
+}
+
+/** Reads structured delta paths from AgentFS's SQLite database; CLI `diff` cannot represent newlines safely. */
+export function agentFsChangeRecords(database: string): AgentFsChangeRecord[] {
+	const sqlite = new Database(database, { readonly: true, strict: true });
+	try {
+		const children = sqlite.query(
+			"SELECT d.name, d.ino, i.mode FROM fs_dentry d JOIN fs_inode i ON d.ino = i.ino WHERE d.parent_ino = ? ORDER BY d.name",
+		);
+		const records: AgentFsChangeRecord[] = [];
+		const directories: Array<{ inode: number; prefix: string }> = [{ inode: 1, prefix: "" }];
+		const visited = new Set<number>([1]);
+		for (const directory of directories) {
+			for (const row of children.all(directory.inode) as Array<{ name: string; ino: number; mode: number }>) {
+				const name = agentFsComponent(row.name);
+				const file = directory.prefix ? `${directory.prefix}/${name}` : name;
+				const type = agentFsType(row.mode);
+				records.push({ file, type, deleted: false });
+				if (type === "d") {
+					if (visited.has(row.ino)) throw new Error(`AgentFS directory cycle at ${JSON.stringify(file)}.`);
+					visited.add(row.ino);
+					directories.push({ inode: row.ino, prefix: file });
+				}
+			}
+		}
+		for (const row of sqlite.query("SELECT path FROM fs_whiteout ORDER BY path").all() as Array<{ path: string }>) {
+			records.push({ file: agentFsPath(row.path), type: "?", deleted: true });
+		}
+		return records.toSorted((a, b) => a.file.localeCompare(b.file));
+	} finally {
+		sqlite.close();
+	}
+}
+
+function agentFsComponent(name: string): string {
+	if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\0")) {
+		throw new Error(`Invalid AgentFS path component ${JSON.stringify(name)}.`);
+	}
+	return name;
+}
+
+function agentFsPath(value: string): string {
+	const components = value.replace(/^\/+/, "").split("/").map(agentFsComponent);
+	if (components.length === 0) throw new Error(`Invalid AgentFS path ${JSON.stringify(value)}.`);
+	return components.join("/");
+}
+
+function agentFsType(mode: number): string {
+	switch (mode & 0o170000) {
+		case 0o040000:
+			return "d";
+		case 0o100000:
+			return "f";
+		case 0o120000:
+			return "l";
+		default:
+			return "?";
+	}
 }
 
 async function filesUnder(original: string): Promise<string[]> {
