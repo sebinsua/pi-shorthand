@@ -299,36 +299,39 @@ async function changesInDatabase(database: string, base: string, mount: string) 
 	const records = agentFsChangeRecords(path.join(snapshotDir, "run.db"));
 
 	const changes: { file: string; entry: FilesystemEntry | null }[] = [];
-	for (const { deleted, type, file } of records) {
+	for (const record of records) {
+		const { file } = record;
 		if (path.basename(file).startsWith("._")) continue;
 		if (file === ".git" || file.startsWith(".git/")) continue;
 
-		if (!deleted && (type === "f" || type === "l")) {
-			changes.push({ file, entry: await readEntry(path.join(mount, file)) });
-		}
-		if (!deleted && type === "d") {
-			const original = await fs.lstat(path.join(base, file)).catch(() => null);
-			if (original && !original.isDirectory()) {
-				throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
-			}
-		}
-		if (!deleted && !["f", "l", "d"].includes(type)) {
-			throw new Error(`Unsupported AgentFS entry type ${JSON.stringify(type)} at ${JSON.stringify(file)}.`);
-		}
-		if (deleted) {
+		if (record.deleted) {
 			for (const descendant of await filesUnder(path.join(base, file))) {
 				changes.push({ file: path.join(file, descendant), entry: null });
 			}
+			continue;
+		}
+
+		switch (record.type) {
+			case "f":
+			case "l":
+				changes.push({ file, entry: await readEntry(path.join(mount, file)) });
+				break;
+			case "d": {
+				const original = await fs.lstat(path.join(base, file)).catch(() => null);
+				if (original && !original.isDirectory()) {
+					throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
+				}
+				break;
+			}
+			case "unsupported":
+				throw new Error(`Unsupported AgentFS entry type at ${JSON.stringify(file)}.`);
 		}
 	}
 	return changes;
 }
 
-interface AgentFsChangeRecord {
-	file: string;
-	type: string;
-	deleted: boolean;
-}
+type AgentFsEntryType = "d" | "f" | "l" | "unsupported";
+type AgentFsChangeRecord = { file: string; type: AgentFsEntryType; deleted: false } | { file: string; deleted: true };
 
 /** Reads structured delta paths from AgentFS's SQLite database; CLI `diff` cannot represent newlines safely. */
 export function agentFsChangeRecords(database: string): AgentFsChangeRecord[] {
@@ -354,7 +357,7 @@ export function agentFsChangeRecords(database: string): AgentFsChangeRecord[] {
 			}
 		}
 		for (const row of sqlite.query("SELECT path FROM fs_whiteout ORDER BY path").all() as Array<{ path: string }>) {
-			records.push({ file: agentFsPath(row.path), type: "?", deleted: true });
+			records.push({ file: agentFsPath(row.path), deleted: true });
 		}
 		return records.toSorted((a, b) => a.file.localeCompare(b.file));
 	} finally {
@@ -375,7 +378,7 @@ function agentFsPath(value: string): string {
 	return components.join("/");
 }
 
-function agentFsType(mode: number): string {
+function agentFsType(mode: number): AgentFsEntryType {
 	switch (mode & 0o170000) {
 		case 0o040000:
 			return "d";
@@ -384,7 +387,7 @@ function agentFsType(mode: number): string {
 		case 0o120000:
 			return "l";
 		default:
-			return "?";
+			return "unsupported";
 	}
 }
 

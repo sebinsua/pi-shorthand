@@ -37,5 +37,5 @@ test("AgentFS change records preserve newline, tab, and Unicode paths", async ()
 	expect(records).toContainEqual({ file: "src/tab\tname.ts", type: "f", deleted: false });
 	expect(records).toContainEqual({ file: "src/雪.ts", type: "f", deleted: false });
 	expect(records).toContainEqual({ file: "src/link\nname", type: "l", deleted: false });
-	expect(records).toContainEqual({ file: "deleted\nname.ts", type: "?", deleted: true });
+	expect(records).toContainEqual({ file: "deleted\nname.ts", deleted: true });
 });
