@@ -1,6 +1,6 @@
 # pi-shorthand
 
-![A code call in Pi: the verdict, then the diff it applied, then the program's output](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png)
+![A code call in Pi: the verdict, then the diff it applied, then the program's output](docs/screenshot.png)
 
 A [Pi](https://github.com/earendil-works/pi) tool for token-efficient writes. The model writes a whole
 change as one small Bun program, in shorthand, instead of calling `read`, `edit` and `bash` over
