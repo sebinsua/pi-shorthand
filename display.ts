@@ -10,6 +10,11 @@
 import { getLanguageFromPath, highlightCode, keyHint, renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
 import type { FileChange, RunResult } from "./runner.ts";
 
+type ToolBackground = "toolSuccessBg" | "toolErrorBg";
+
+const ANSI_CUBE_VALUES = [0, 95, 135, 175, 215, 255];
+const ANSI_GRAY_VALUES = Array.from({ length: 24 }, (_, index) => 8 + index * 10);
+
 const OUTPUT_PREVIEW_LINES = 5; // like Pi's bash tool
 const INLINE_DIFF_LINES = 40; // a longer diff collapses to a list of its files…
 const LISTED_FILES = 8; // …showing this many, then "and N more files"
@@ -74,9 +79,10 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 
 	// The sections, each after a blank line.
 	const sections: string[][] = [];
-	if (applied.length > 0) sections.push(diffLines(applied, expanded, theme));
+	const background: ToolBackground = run.exitCode === 0 && run.conflicts.length === 0 ? "toolSuccessBg" : "toolErrorBg";
+	if (applied.length > 0) sections.push(diffLines(applied, expanded, theme, background));
 	if (output && (expanded || !error)) sections.push(outputLines(output, expanded, run.changes.length > 0, theme));
-	if (notApplied.length > 0) sections.push(notAppliedLines(notApplied, expanded, theme));
+	if (notApplied.length > 0) sections.push(notAppliedLines(notApplied, expanded, theme, background));
 	for (const section of sections) lines.push("", ...section);
 	return lines;
 }
@@ -132,8 +138,8 @@ function outputLines(output: string, expanded: boolean, labelled: boolean, theme
 }
 
 /** Each file's diff under its name, in Pi's own diff style. A long diff collapses to a list of files. */
-function diffLines(changes: FileChange[], expanded: boolean, theme: Theme): string[] {
-	const files = changes.map((change) => [fileLine(change, theme), ...renderFileDiff(change, theme)]);
+function diffLines(changes: FileChange[], expanded: boolean, theme: Theme, background: ToolBackground): string[] {
+	const files = changes.map((change) => [fileLine(change, theme), ...renderFileDiff(change, theme, background)]);
 	const total = files.reduce((sum, file) => sum + file.length, 0);
 	if (!expanded && total > INLINE_DIFF_LINES) {
 		return [...fileList(changes, theme), theme.fg("muted", `(${keyHint("app.tools.expand", "to see the diff")})`)];
@@ -145,7 +151,7 @@ function diffLines(changes: FileChange[], expanded: boolean, theme: Theme): stri
 	return [...lines.slice(0, EXPANDED_DIFF_LINES), theme.fg("muted", `… ${more} more lines of diff`)];
 }
 
-function renderFileDiff(change: FileChange, theme: Theme): string[] {
+function renderFileDiff(change: FileChange, theme: Theme, background: ToolBackground): string[] {
 	const diff = toPiDiff(change.patch);
 	const language = getLanguageFromPath(change.path);
 	if (!language || diff === " binary file changed") return renderDiff(diff).split("\n");
@@ -153,7 +159,7 @@ function renderFileDiff(change: FileChange, theme: Theme): string[] {
 	const rendered: string[] = [];
 	let hunk: string[] = [];
 	const flush = () => {
-		if (hunk.length > 0) rendered.push(...renderSyntaxHunk(hunk, language, theme));
+		if (hunk.length > 0) rendered.push(...renderSyntaxHunk(hunk, language, theme, background));
 		hunk = [];
 	};
 	for (const line of diff.split("\n")) {
@@ -168,7 +174,7 @@ function renderFileDiff(change: FileChange, theme: Theme): string[] {
 	return rendered;
 }
 
-function renderSyntaxHunk(lines: string[], language: string, theme: Theme): string[] {
+function renderSyntaxHunk(lines: string[], language: string, theme: Theme, background: ToolBackground): string[] {
 	const parsed = lines.map((line) => {
 		const match = line.match(/^([+\- ])(\s*\d*) (.*)$/);
 		return match ? { prefix: match[1], number: match[2], code: match[3] } : undefined;
@@ -183,19 +189,114 @@ function renderSyntaxHunk(lines: string[], language: string, theme: Theme): stri
 	return parsed.map((line, index) => {
 		if (!line) return theme.fg("toolDiffContext", lines[index]);
 		if (line.prefix === "-") {
-			return theme.fg("toolDiffRemoved", `-${line.number} `) + oldHighlighted[oldIndex++];
+			const content = theme.fg("toolDiffRemoved", `-${line.number} `) + oldHighlighted[oldIndex++];
+			return tintedDiffLine(content, "toolDiffRemoved", background, theme);
 		}
 		if (line.prefix === "+") {
-			return theme.fg("toolDiffAdded", `+${line.number} `) + newHighlighted[newIndex++];
+			const content = theme.fg("toolDiffAdded", `+${line.number} `) + newHighlighted[newIndex++];
+			return tintedDiffLine(content, "toolDiffAdded", background, theme);
 		}
 		oldIndex++;
 		return theme.fg("toolDiffContext", ` ${line.number} `) + newHighlighted[newIndex++];
 	});
 }
 
-function notAppliedLines(changes: FileChange[], expanded: boolean, theme: Theme): string[] {
+function tintedDiffLine(
+	line: string,
+	changeColor: "toolDiffAdded" | "toolDiffRemoved",
+	baseBackground: ToolBackground,
+	theme: Theme,
+): string {
+	const base = ansiRgb(theme.getBgAnsi(baseBackground));
+	const change = ansiRgb(theme.getFgAnsi(changeColor));
+	if (!base || !change) return line;
+	const [red, green, blue] = base.map((channel, index) => Math.round(channel * 0.86 + change[index] * 0.14));
+	const background =
+		theme.getColorMode() === "truecolor"
+			? `\x1b[48;2;${red};${green};${blue}m`
+			: `\x1b[48;5;${ansi256(red, green, blue)}m`;
+	return `${background}${line}${theme.getBgAnsi(baseBackground)}`;
+}
+
+function ansiRgb(code: string): [number, number, number] | undefined {
+	const truecolor = code.match(/\[(?:38|48);2;(\d+);(\d+);(\d+)m/);
+	if (truecolor) return [Number(truecolor[1]), Number(truecolor[2]), Number(truecolor[3])];
+	const indexed = code.match(/\[(?:38|48);5;(\d+)m/);
+	return indexed ? rgbFromAnsi256(Number(indexed[1])) : undefined;
+}
+
+function rgbFromAnsi256(index: number): [number, number, number] | undefined {
+	if (index < 0 || index > 255) return undefined;
+	if (index < 16) {
+		const palette = [
+			[0, 0, 0],
+			[128, 0, 0],
+			[0, 128, 0],
+			[128, 128, 0],
+			[0, 0, 128],
+			[128, 0, 128],
+			[0, 128, 128],
+			[192, 192, 192],
+			[128, 128, 128],
+			[255, 0, 0],
+			[0, 255, 0],
+			[255, 255, 0],
+			[0, 0, 255],
+			[255, 0, 255],
+			[0, 255, 255],
+			[255, 255, 255],
+		] as const;
+		return [...palette[index]];
+	}
+	if (index >= 232) {
+		const gray = 8 + (index - 232) * 10;
+		return [gray, gray, gray];
+	}
+	const cube = index - 16;
+	return [
+		ansiCubeChannel(Math.floor(cube / 36)),
+		ansiCubeChannel(Math.floor((cube % 36) / 6)),
+		ansiCubeChannel(cube % 6),
+	];
+}
+
+function ansiCubeChannel(value: number): number {
+	return value === 0 ? 0 : 55 + value * 40;
+}
+
+function ansi256(red: number, green: number, blue: number): number {
+	const [redIndex, greenIndex, blueIndex] = [red, green, blue].map((channel) =>
+		closestIndex(channel, ANSI_CUBE_VALUES),
+	);
+	const cube = [ANSI_CUBE_VALUES[redIndex], ANSI_CUBE_VALUES[greenIndex], ANSI_CUBE_VALUES[blueIndex]];
+	const cubeIndex = 16 + 36 * redIndex + 6 * greenIndex + blueIndex;
+	const cubeDistance = colorDistance([red, green, blue], cube);
+
+	const luminance = Math.round(0.299 * red + 0.587 * green + 0.114 * blue);
+	const grayOffset = closestIndex(luminance, ANSI_GRAY_VALUES);
+	const gray = ANSI_GRAY_VALUES[grayOffset];
+	const grayDistance = colorDistance([red, green, blue], [gray, gray, gray]);
+	const spread = Math.max(red, green, blue) - Math.min(red, green, blue);
+	return spread < 10 && grayDistance < cubeDistance ? 232 + grayOffset : cubeIndex;
+}
+
+function closestIndex(value: number, choices: number[]): number {
+	let closest = 0;
+	for (let index = 1; index < choices.length; index++) {
+		if (Math.abs(value - choices[index]) < Math.abs(value - choices[closest])) closest = index;
+	}
+	return closest;
+}
+
+function colorDistance(first: number[], second: number[]): number {
+	return (
+		(first[0] - second[0]) ** 2 * 0.299 + (first[1] - second[1]) ** 2 * 0.587 + (first[2] - second[2]) ** 2 * 0.114
+	);
+}
+
+function notAppliedLines(changes: FileChange[], expanded: boolean, theme: Theme, background: ToolBackground): string[] {
 	const heading = theme.fg("muted", `Would have changed ${fileCount(changes)} · `) + stats(changes, theme);
-	if (expanded) return [heading, "", ...diffLines(changes, true, theme)];
+	if (expanded) return [heading, "", ...diffLines(changes, true, theme, background)];
 	return [heading + theme.fg("muted", ` (${keyHint("app.tools.expand", "to see the diff")})`)];
 }
 

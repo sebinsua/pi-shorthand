@@ -7,7 +7,14 @@ import { renderCodeResult } from "../index.ts";
 import type { FileChange, RunResult } from "../runner.ts";
 
 // Plain text: no colours, so the tests read the words and layout.
-const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+const theme = {
+	name: "dark",
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	getColorMode: () => "truecolor",
+	getBgAnsi: () => "\x1b[48;2;40;50;40m",
+	getFgAnsi: (color: string) => (color === "toolDiffAdded" ? "\x1b[38;2;181;189;104m" : "\x1b[38;2;204;102;102m"),
+} as unknown as Theme;
 beforeAll(() => initTheme("dark")); // renderDiff uses Pi's global theme
 
 const change = (path: string, added = 1, removed = 1): FileChange => ({
@@ -212,6 +219,21 @@ describe("sections", () => {
 
 		expect(removed).toContain(highlightCode("export const oldValue = 1;", "typescript")[0]);
 		expect(added).toContain(highlightCode("export const newValue = 2;", "typescript")[0]);
+		expect(removed).toContain("\x1b[48;2;");
+		expect(added).toContain("\x1b[48;2;");
+		expect(removed).toEndWith("\x1b[48;2;40;50;40m");
+		expect(added).toEndWith("\x1b[48;2;40;50;40m");
+
+		const indexedTheme = {
+			...theme,
+			getColorMode: () => "256color",
+			getBgAnsi: () => "\x1b[48;5;235m",
+			getFgAnsi: (color: string) => (color === "toolDiffAdded" ? "\x1b[38;5;64m" : "\x1b[38;5;124m"),
+		} as unknown as Theme;
+		const indexed = resultLines(result({ changes: [typescript], applied: [typescript.path] }), true, indexedTheme);
+		const indexedAdded = indexed.find((line) => Bun.stripANSI(line).includes("+1 export const newValue"));
+		expect(indexedAdded).toStartWith("\x1b[48;5;22m");
+		expect(indexedAdded).toEndWith("\x1b[48;5;235m");
 	});
 
 	test("output is labelled as the program's when there's also a diff", () => {
