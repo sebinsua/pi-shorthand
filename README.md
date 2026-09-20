@@ -1,13 +1,13 @@
 # pi-shorthand
 
-![A code call in Pi: the verdict, then the diff it applied, then the program's output](docs/screenshot.png)
+![A code call in Pi: the verdict, then the diff it applied, then the program's output](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png)
 
 A [Pi](https://github.com/earendil-works/pi) tool for token-efficient writes. The model writes a whole
 change as one small Bun program, in shorthand, instead of calling `read`, `edit` and `bash` over
 and over: fewer tokens, and fewer round trips.
 
-The program sees your repo as normal, but its writes are held back. If it succeeds, they're applied
-and the model gets the diff. If it fails, nothing changes.
+The program sees your repo as normal, but its writes are held back. By default, they're applied only
+if the program succeeds and destination files are unchanged, and the model gets the diff.
 
 ## Install
 
@@ -20,7 +20,7 @@ Or from GitHub (`pi install git:github.com/sebinsua/pi-shorthand`), or a local c
 A project install (`pi install -l`) only loads once you trust the project: Pi asks, or run `pi --approve`.
 
 You also need Bun, git, and either [bubblewrap](https://github.com/containers/bubblewrap) 0.9+
-(Linux) or [AgentFS](https://github.com/tursodatabase/agentfs) (macOS:
+(Linux) or [AgentFS](https://github.com/tursodatabase/agentfs) and `clang` (macOS:
 `curl -fsSL https://agentfs.ai/install | bash`).
 
 ## What a program can use
@@ -42,6 +42,7 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 
 ## Options
 
+- `title`: a short description shown with the call (required).
 - `rollback`: `"all"` (default) applies nothing if the program fails. After a timeout, `"file"`
   keeps changed files that were no longer open for writing if writer inspection succeeds. Other
   failures apply nothing because open writers cannot be identified after the process exits.

@@ -1,7 +1,7 @@
 {
 	"name": "pi-shorthand",
-	"version": "0.1.1",
-	"description": "Pi tool for token-efficient writes: the model makes a whole change with one Bun program, whose writes are held in an overlay and applied only if it succeeds.",
+	"version": "0.2.0",
+	"description": "Pi tool for token-efficient writes: the model makes a whole change with one isolated Bun program.",
 	"keywords": [
 		"ast-grep",
 		"bun",
