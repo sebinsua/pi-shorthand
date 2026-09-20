@@ -1,0 +1,284 @@
+import { chmod, lstat, mkdir, readFile, readlink, symlink } from "node:fs/promises";
+import * as path from "node:path";
+import { $ } from "bun";
+
+export type JsonEvent = Record<string, any>;
+
+export interface UsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+}
+
+export interface ChangeRecord {
+	status: string;
+	path: string;
+	originalPath?: string;
+}
+
+export interface EventSummary {
+	turns: number;
+	tools: Record<string, number>;
+	failedTools: Record<string, number>;
+	failedCodeCalls: number;
+	toolOutcomes: Array<{
+		toolCallId?: string;
+		toolName: string;
+		failed: boolean;
+		exitCode?: number | null;
+		timedOut?: boolean;
+		conflicts?: number;
+	}>;
+	usage: UsageTotals;
+}
+
+export interface RunMeasurement {
+	verified: boolean;
+	seconds: number;
+	usage: UsageTotals;
+}
+
+export interface FrozenExtension {
+	label: string;
+	source: string;
+	path: string;
+	revision: string | null;
+	dirty: ChangeRecord[];
+	fingerprint: string;
+}
+
+export function processOutcome(exitCode: number, stderr: string, exceededBudget: boolean, invalidEventLines: number) {
+	return { exitCode, stderr, exceededBudget, invalidEventLines };
+}
+
+export async function runVerification(command: string, cwd: string, budgetMs: number) {
+	if (budgetMs <= 0) return { command, exitCode: null, passed: false, timedOut: true, durationMs: 0, stderr: "" };
+	const startedAt = performance.now();
+	const child = Bun.spawn(["sh", "-c", command], {
+		cwd,
+		detached: true,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	let timedOut = false;
+	let forceTimer: ReturnType<typeof setTimeout> | undefined;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		killGroup(child.pid, "SIGTERM");
+		forceTimer = setTimeout(() => killGroup(child.pid, "SIGKILL"), 200);
+	}, budgetMs);
+	const [exitCode, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stderr).text(),
+		new Response(child.stdout).arrayBuffer(),
+	]);
+	clearTimeout(timer);
+	if (forceTimer) clearTimeout(forceTimer);
+	return {
+		command,
+		exitCode,
+		passed: exitCode === 0 && !timedOut,
+		timedOut,
+		durationMs: performance.now() - startedAt,
+		stderr,
+	};
+}
+
+const zeroCost = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+
+export function summarizeEvents(events: JsonEvent[]): EventSummary {
+	const tools: Record<string, number> = {};
+	const failedTools: Record<string, number> = {};
+	const toolOutcomes: EventSummary["toolOutcomes"] = [];
+	const usage: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: zeroCost() };
+
+	for (const event of events) {
+		if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
+			tools[event.toolName] = (tools[event.toolName] ?? 0) + 1;
+		}
+		if (event.type === "tool_execution_end" && typeof event.toolName === "string") {
+			const details = record(event.result?.details);
+			const failed = structuredToolFailure(event, details);
+			if (failed) failedTools[event.toolName] = (failedTools[event.toolName] ?? 0) + 1;
+			toolOutcomes.push({
+				toolCallId: string(event.toolCallId),
+				toolName: event.toolName,
+				failed,
+				exitCode: numberOrNull(details?.exitCode),
+				timedOut: boolean(details?.timedOut),
+				conflicts: Array.isArray(details?.conflicts) ? details.conflicts.length : undefined,
+			});
+		}
+		if (event.type !== "message_end" || event.message?.role !== "assistant") continue;
+		const item = record(event.message.usage);
+		if (!item) continue;
+		for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+			usage[key] += finite(item[key]);
+		}
+		const cost = record(item.cost);
+		if (cost) {
+			for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
+				usage.cost[key] += finite(cost[key]);
+			}
+		}
+	}
+
+	return {
+		turns: events.filter((event) => event.type === "turn_start").length,
+		tools,
+		failedTools,
+		failedCodeCalls: failedTools.code ?? 0,
+		toolOutcomes,
+		usage,
+	};
+}
+
+function structuredToolFailure(event: JsonEvent, details: JsonEvent | undefined): boolean {
+	if (event.isError === true) return true;
+	if (event.toolName !== "code" || !details) return false;
+	return (
+		details.timedOut === true ||
+		(typeof details.exitCode === "number" && details.exitCode !== 0) ||
+		(Array.isArray(details.conflicts) && details.conflicts.length > 0)
+	);
+}
+
+/** Parses `git status --porcelain=v1 -z`; unlike shortstat this includes untracked files. */
+export function parseGitStatus(output: string): ChangeRecord[] {
+	const fields = output.split("\0");
+	const changes: ChangeRecord[] = [];
+	for (let index = 0; index < fields.length; index++) {
+		const field = fields[index];
+		if (!field) continue;
+		const status = field.slice(0, 2);
+		const file = field.slice(3);
+		if (status.includes("R") || status.includes("C")) {
+			const originalPath = fields[++index];
+			changes.push({ status, path: file, ...(originalPath ? { originalPath } : {}) });
+		} else changes.push({ status, path: file });
+	}
+	return changes;
+}
+
+export async function gitStatus(directory: string): Promise<ChangeRecord[]> {
+	const result = await $`git status --porcelain=v1 -z --untracked-files=all`.cwd(directory).nothrow().quiet();
+	if (result.exitCode !== 0) throw new Error(`Could not inspect ${directory}: ${result.stderr.toString().trim()}`);
+	return parseGitStatus(result.stdout.toString());
+}
+
+/** Alternates which revision runs first, reducing order and cache bias. */
+export function pairedOrder(run: number): ["baseline", "candidate"] | ["candidate", "baseline"] {
+	return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
+}
+
+export function aggregateRuns(runs: RunMeasurement[], budgetSeconds: number) {
+	const completed = runs.filter((run) => run.verified);
+	const totalCost = runs.reduce((sum, run) => sum + run.usage.cost.total, 0);
+	return {
+		attempts: runs.length,
+		verifiedCompletions: completed.length,
+		completionRate: runs.length ? completed.length / runs.length : 0,
+		budgetSeconds,
+		totalCost,
+		costPerVerifiedCompletion: completed.length ? totalCost / completed.length : null,
+		meanLatencySeconds: runs.length ? runs.reduce((sum, run) => sum + run.seconds, 0) / runs.length : 0,
+	};
+}
+
+/** Copies tracked, dirty and untracked source files once, so later source edits cannot mix revisions. */
+export async function freezeExtension(source: string, destination: string, label: string): Promise<FrozenExtension> {
+	source = path.resolve(source);
+	await mkdir(destination, { recursive: true });
+	const listed = await $`git ls-files -z --cached --others --exclude-standard`.cwd(source).nothrow().quiet();
+	if (listed.exitCode !== 0) throw new Error(`Extension must be a Git working tree: ${source}`);
+	const files = listed.stdout.toString().split("\0").filter(Boolean).toSorted();
+	const fingerprint = await fingerprintFiles(source, files);
+	for (const file of files) await copyEntry(path.join(source, file), path.join(destination, file));
+	const dependencies = path.join(source, "node_modules");
+	if (await lstat(dependencies).catch(() => null))
+		await symlink(dependencies, path.join(destination, "node_modules"), "dir");
+	if ((await fingerprintFiles(destination, files)) !== fingerprint) {
+		throw new Error(`Frozen extension differs from its source: ${source}`);
+	}
+	const revisionResult = await $`git rev-parse HEAD`.cwd(source).nothrow().quiet();
+	return {
+		label,
+		source,
+		path: destination,
+		revision: revisionResult.exitCode === 0 ? revisionResult.stdout.toString().trim() : null,
+		dirty: await gitStatus(source),
+		fingerprint,
+	};
+}
+
+export async function fixtureIdentity(directory: string): Promise<{ changes: ChangeRecord[]; fingerprint: string }> {
+	const listed = await $`git ls-files -z --cached --others --exclude-standard`.cwd(directory).nothrow().quiet();
+	if (listed.exitCode !== 0) throw new Error(`Fixture must be a Git working tree: ${directory}`);
+	const files = listed.stdout.toString().split("\0").filter(Boolean).toSorted();
+	return { changes: await gitStatus(directory), fingerprint: await fingerprintFiles(directory, files) };
+}
+
+export async function copyFixture(source: string, destination: string): Promise<void> {
+	const option = process.platform === "darwin" ? "-cR" : "-R";
+	const result = await $`cp ${option} ${source} ${destination}`.nothrow().quiet();
+	if (result.exitCode !== 0) throw new Error(`Could not copy fixture: ${result.stderr.toString().trim()}`);
+}
+
+async function copyEntry(source: string, destination: string): Promise<void> {
+	const info = await lstat(source).catch(() => null);
+	if (!info) return;
+	await mkdir(path.dirname(destination), { recursive: true });
+	if (info.isSymbolicLink()) await symlink(await readlink(source), destination);
+	else {
+		await Bun.write(destination, Bun.file(source));
+		await chmod(destination, info.mode & 0o777);
+	}
+}
+
+async function fingerprintFiles(root: string, files: string[]): Promise<string> {
+	const hash = new Bun.CryptoHasher("sha256");
+	for (const file of files) {
+		const full = path.join(root, file);
+		const info = await lstat(full).catch(() => null);
+		if (!info) {
+			hash.update(`${file}\0missing\0`);
+			continue;
+		}
+		hash.update(`${file}\0${info.mode}\0`);
+		hash.update(info.isSymbolicLink() ? await readlink(full) : await readFile(full));
+		hash.update("\0");
+	}
+	return hash.digest("hex");
+}
+
+function killGroup(pid: number, signal: NodeJS.Signals): void {
+	try {
+		process.kill(-pid, signal);
+	} catch {
+		// It exited between the timer firing and the signal.
+	}
+}
+
+function record(value: unknown): JsonEvent | undefined {
+	return typeof value === "object" && value !== null ? (value as JsonEvent) : undefined;
+}
+
+function finite(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function string(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function boolean(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function numberOrNull(value: unknown): number | null | undefined {
+	return value === null || typeof value === "number" ? value : undefined;
+}
