@@ -2,8 +2,8 @@
  * Preloaded into every `code` program. On top of ordinary Bun and Node it adds these globals:
  * $ (Bun shell), glob, grep, sg (ast-grep) and grit (GritQL).
  *
- * sg is ast-grep's own JavaScript API (@ast-grep/napi: sg.parse, sg.Lang, sg.findInFiles, …) plus two
- * shortcuts, sg.find and sg.rewrite. Programs can also import "@ast-grep/napi" directly.
+ * sg is ast-grep's own JavaScript API plus file-backed search, rewrite and placement helpers.
+ * Programs can also import "@ast-grep/napi" directly.
  *
  * Everything except $ is synchronous: models often call helpers like these without await.
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
@@ -13,12 +13,13 @@
  * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
  */
 
-import { lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
 import { appendRunHistory } from "./history.ts";
+import { file as selectFile, insert, move, remember, remove } from "./placement.ts";
 
 function log(event: string, details: Record<string, unknown>) {
 	const { PI_SHORTHAND_LOG, PI_SHORTHAND_RUN } = process.env;
@@ -181,6 +182,29 @@ function find(pattern: string | NapiConfig, files: string | string[] = "."): SgM
 	return matches;
 }
 
+function one(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch {
+	const matches = find(pattern, files);
+	if (matches.length !== 1)
+		throw new Error(`sg.one expected exactly one match, found ${matches.length} for ${JSON.stringify(pattern)}`);
+	return matches[0];
+}
+
+/** Explicit destinations may be ignored or missing, but cannot resolve outside the repository. */
+function placementFile(path: string) {
+	let ancestor = resolve(repositoryRoot, gitPath(path));
+	const missing: string[] = [];
+	while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
+		missing.unshift(basename(ancestor));
+		ancestor = dirname(ancestor);
+	}
+	const target = resolve(realpathSync(ancestor), ...missing);
+	const relativeTarget = relative(realpathSync(repositoryRoot), target);
+	if (relativeTarget === ".." || relativeTarget.startsWith(`..${sep}`) || isAbsolute(relativeTarget)) {
+		throw new Error(`path is outside the repository: ${JSON.stringify(path)}`);
+	}
+	return selectFile(target);
+}
+
 /**
  * Rewrite matches in place. `replacement` is either a template using the same $X / $$$X
  * metavariables, or a function returning the new text. A function returning anything other than a
@@ -244,7 +268,7 @@ function toMatch(file: string, node: SgNode, source: string, pattern: string | N
 			if (captured) vars[name] = captured.text();
 		}
 	}
-	return { ...vars, file, line: node.range().start.line + 1, text: node.text(), vars, node };
+	return remember({ ...vars, file, line: node.range().start.line + 1, text: node.text(), vars, node }, source);
 }
 
 // ── GritQL ────────────────────────────────────────────────────────────────────────
@@ -298,6 +322,11 @@ Object.assign(globalThis, {
 	sg: {
 		...astGrep,
 		find: (...args: Parameters<typeof find>) => logged("sg.find", args, () => find(...args)),
+		one: (...args: Parameters<typeof one>) => logged("sg.one", args, () => one(...args)),
+		file: (...args: Parameters<typeof placementFile>) => logged("sg.file", args, () => placementFile(...args)),
+		insert: (...args: Parameters<typeof insert>) => logged("sg.insert", args, () => insert(...args)),
+		move: (...args: Parameters<typeof move>) => logged("sg.move", args, () => move(...args)),
+		remove: (...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args)),
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),

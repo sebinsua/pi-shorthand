@@ -18,6 +18,31 @@ A function returns the new text; returning anything else (`undefined`, `null`, `
 match alone. If nested matches would produce overlapping edits, `sg.rewrite` throws instead of
 silently dropping a replacement or returning an inaccurate count.
 
+## Inserting, moving and removing syntax
+
+For JS/TS, use matches from `sg.find` or `sg.one(pattern, files)`, which requires exactly one match.
+`sg.file(path)` selects a root inside the repository, including ignored files; missing files and
+directories are created only on insertion.
+
+```ts
+sg.insert("initialize();", { before: sg.one("run();", "src/app.ts") });
+sg.move(sg.one("function helper() { $$$BODY }", "src/old.ts"), {
+	endOf: sg.file("src/new.ts"),
+});
+sg.remove(sg.find("obsolete();", "src")); // single match or array; validates the batch before writing
+```
+
+Choose one destination: `before`/`after` a whole statement or declaration (`"run();"`), or
+`startOf`/`endOf` a file root or `statement_block`. For a function, select its body explicitly.
+Argument lists and class bodies aren't supported.
+
+To copy, use `sg.insert(source.text, destination)`. `sg.move(source, destination, transform?)`
+accepts an optional `(text) => string` returning non-empty replacement text.
+
+**Rematch after each edit to a file**; use array removal for matches from one search. Adjacent comments stay in
+place, and interior whitespace is preserved. Imports and bindings aren't repaired. If placement
+rejects joined statement boundaries, add explicit semicolons.
+
 ## Renaming a name
 
 A bare name as the pattern (`sg.rewrite("oldName", "newName")`) only matches plain identifiers, not

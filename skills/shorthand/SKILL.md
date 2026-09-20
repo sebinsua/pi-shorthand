@@ -11,7 +11,7 @@ check it, and print a short summary.
 
 - [writing.md](writing.md): the everyday part. The environment, Bun's file and shell APIs, and the
   shape of a program that edits and checks many files.
-- [ast-grep.md](ast-grep.md): when a text replace isn't safe. Structural search and rewrite, rule
+- [ast-grep.md](ast-grep.md): when a text replace isn't safe. Structural search, rewrite and placement, rule
   objects, and ast-grep's own API.
 - [gritql.md](gritql.md): GritQL rewrites, including other languages.
 
