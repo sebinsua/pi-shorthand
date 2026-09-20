@@ -21,6 +21,19 @@ export function callLine(args: { title?: string; timeout?: number; rollback?: st
 	return `${theme.fg("toolTitle", theme.bold("code"))} ${args.title ?? ""}${suffix ? theme.fg("muted", ` (${suffix})`) : ""}`;
 }
 
+/** Text to show when a completed tool result has no structured RunResult details. */
+export function unstructuredResultText(content: readonly unknown[]): string {
+	const text = content
+		.flatMap((block) =>
+			typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block
+				? [String(block.text)]
+				: [],
+		)
+		.join("\n")
+		.trim();
+	return text || "Code failed without result details";
+}
+
 /** Lines that belong to the verdict line above them. */
 function indent(line: string): string {
 	return `  ${line}`;

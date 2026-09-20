@@ -8,10 +8,10 @@ import { closeSync, openSync, readSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { callLine, countLines, resultLines } from "./display.ts";
+import { callLine, countLines, resultLines, unstructuredResultText } from "./display.ts";
 import { RUN_HISTORY_FILE } from "./history.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
@@ -101,16 +101,24 @@ export default function (pi: ExtensionAPI) {
 			return new Text(callLine(args, theme), 0, 0);
 		},
 
-		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) {
-				const progress = (result.details as { progress?: string } | undefined)?.progress;
-				return new Text(theme.fg("muted", progress ? `running… ${progress}` : "running…"), 0, 0);
-			}
-			const run = result.details as RunResult | undefined;
-			if (!run) return new Text(theme.fg("muted", "running…"), 0, 0);
-			return new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
+		renderResult(result, options, theme) {
+			return renderCodeResult(result, options, theme);
 		},
 	});
+}
+
+export function renderCodeResult(
+	result: { content: readonly unknown[]; details?: unknown },
+	{ expanded, isPartial }: { expanded: boolean; isPartial: boolean },
+	theme: Theme,
+): Text {
+	if (isPartial) {
+		const progress = (result.details as { progress?: string } | undefined)?.progress;
+		return new Text(theme.fg("muted", progress ? `running… ${progress}` : "running…"), 0, 0);
+	}
+	const run = result.details as RunResult | undefined;
+	if (!run) return new Text(theme.fg("error", unstructuredResultText(result.content)), 0, 0);
+	return new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
 }
 
 /**

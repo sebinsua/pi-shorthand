@@ -2,7 +2,8 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { callLine, resultLines } from "../display.ts";
+import { callLine, resultLines, unstructuredResultText } from "../display.ts";
+import { renderCodeResult } from "../index.ts";
 import type { FileChange, RunResult } from "../runner.ts";
 
 // Plain text: no colours, so the tests read the words and layout.
@@ -135,6 +136,35 @@ describe("the verdict", () => {
 			"code Rename (rollback per file, timeout 5s)",
 		);
 		expect(callLine({ title: "Rename" }, theme)).toBe("code Rename");
+	});
+});
+
+describe("unstructured completed results", () => {
+	test("show the final infrastructure error instead of pending progress", () => {
+		expect(unstructuredResultText([{ type: "text", text: "runner failed: EACCES" }])).toBe("runner failed: EACCES");
+
+		const partial = renderCodeResult(
+			{ content: [{ type: "text", text: "running" }], details: { progress: "1.0 s · grep" } },
+			{ expanded: false, isPartial: true },
+			theme,
+		);
+		expect(Bun.stripANSI(partial.render(200).join("\n")).trimEnd()).toBe("running… 1.0 s · grep");
+
+		const completed = renderCodeResult(
+			{ content: [{ type: "text", text: "runner failed: EACCES" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		expect(Bun.stripANSI(completed.render(200).join("\n")).trimEnd()).toBe("runner failed: EACCES");
+
+		const empty = renderCodeResult(
+			{ content: [{ type: "image", data: "ignored" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		const emptyText = Bun.stripANSI(empty.render(200).join("\n")).trimEnd();
+		expect(emptyText).toBe("Code failed without result details");
+		expect(emptyText).not.toContain("running");
 	});
 });
 
