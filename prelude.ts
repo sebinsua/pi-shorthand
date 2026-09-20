@@ -204,6 +204,12 @@ function rewrite(
 			if (typeof newText === "string") edits.push(node.replace(newText)); // anything else (undefined, null, false) leaves it
 		}
 		if (edits.length === 0) continue;
+		const ordered = edits.toSorted((left, right) => left.startPos - right.startPos || right.endPos - left.endPos);
+		for (let index = 1; index < ordered.length; index++) {
+			if (ordered[index].startPos < ordered[index - 1].endPos) {
+				throw new Error(`sg.rewrite produced overlapping edits in ${JSON.stringify(file)}`);
+			}
+		}
 
 		writeFileSync(file, parsed.root.commitEdits(edits));
 		count += edits.length;

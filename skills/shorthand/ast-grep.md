@@ -15,7 +15,8 @@ sg.rewrite("oldApi($A)", (m) => m.A !== "0" && `newApi(${m.A})`, "src"); // func
 ```
 
 A function returns the new text; returning anything else (`undefined`, `null`, `false`) leaves that
-match alone.
+match alone. If nested matches would produce overlapping edits, `sg.rewrite` throws instead of
+silently dropping a replacement or returning an inaccurate count.
 
 ## Renaming a name
 

@@ -1401,6 +1401,15 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "src/x.ts")).text()).toBe("bar();\nbar(1, 2);\n");
 	});
 
+	test("sg.rewrite rejects overlapping nested edits", async () => {
+		const repo = await makeRepo({ "src/a.ts": "foo(foo(1));\n" });
+		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A)", "src/a.ts");`);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain('sg.rewrite produced overlapping edits in "src/a.ts"');
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("foo(foo(1));\n");
+	});
+
 	test("sg accepts a list of directories, and null to leave a match alone", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(
