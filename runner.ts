@@ -31,16 +31,24 @@ export interface RunOptions {
 	program: string;
 	timeoutMs: number;
 	rollback: "all" | "file";
-	testApplyFailureAfter?: number;
-	testApplyDelayMs?: number;
-	testApplyDelayAfter?: number;
-	testApplyFailureAfterBackup?: number;
-	testBeforeCommitDelayMs?: number;
-	testBeforeCommitMarker?: string;
-	testProgramStartMarker?: string;
-	testWriterInspectionFailure?: boolean;
-	testCleanupFailure?: boolean;
-	testWorkspaceCleanupFailure?: boolean;
+	testHooks?: RunTestHooks;
+}
+
+interface RunTestHooks {
+	apply?: ApplicationTestHooks;
+	programStartMarker?: string;
+	writerInspectionFailure?: boolean;
+	workspaceCleanupFailure?: boolean;
+}
+
+interface ApplicationTestHooks {
+	failAfter?: number;
+	delayMs?: number;
+	delayAfter?: number;
+	failAfterBackup?: number;
+	beforeCommitDelayMs?: number;
+	beforeCommitMarker?: string;
+	cleanupFailure?: boolean;
 }
 
 export interface RunResult {
@@ -137,7 +145,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			throw error;
 		} finally {
 			try {
-				await closeOverlay(overlay, options.testWorkspaceCleanupFailure);
+				await closeOverlay(overlay, options.testHooks?.workspaceCleanupFailure);
 			} catch (error) {
 				const warning = cleanupWarning("isolated workspace", error);
 				if (executionError) attachCleanupWarning(executionError, warning);
@@ -155,18 +163,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 				applied,
 				conflicts,
 				warnings: applicationWarnings,
-			} = await applyChanges(
-				repo,
-				requested,
-				abort,
-				options.testApplyFailureAfter,
-				options.testApplyDelayMs,
-				options.testApplyDelayAfter,
-				options.testApplyFailureAfterBackup,
-				options.testBeforeCommitDelayMs,
-				options.testCleanupFailure,
-				options.testBeforeCommitMarker,
-			));
+			} = await applyChanges(repo, requested, { abort, testHooks: options.testHooks?.apply }));
 		}
 		log("finished", {
 			changed: changes.length,
@@ -416,7 +413,7 @@ async function runProgram(
 		executionCwd,
 	);
 	log("program started", { timeoutMs: options.timeoutMs });
-	if (options.testProgramStartMarker) await Bun.write(options.testProgramStartMarker, "started");
+	if (options.testHooks?.programStartMarker) await Bun.write(options.testHooks.programStartMarker, "started");
 	const child = spawn(command, args, {
 		cwd: executionCwd,
 		detached: true,
@@ -435,7 +432,7 @@ async function runProgram(
 		child,
 		options.timeoutMs,
 		overlay.executionDir,
-		options.testWriterInspectionFailure,
+		options.testHooks?.writerInspectionFailure,
 	);
 	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning: stillRunning.length });
 	killAll(); // anything it left running
@@ -658,15 +655,18 @@ interface PreparedChange {
 async function applyChanges(
 	repo: string,
 	changes: Change[],
-	abort: AbortSignal,
-	failAfter?: number,
-	delayAfterMs?: number,
-	delayAfter = 1,
-	failAfterBackup?: number,
-	beforeCommitDelayMs?: number,
-	failCleanup?: boolean,
-	beforeCommitMarker?: string,
+	options: { abort: AbortSignal; testHooks?: ApplicationTestHooks },
 ): Promise<{ applied: Change[]; conflicts: string[]; warnings: string[] }> {
+	const { abort, testHooks = {} } = options;
+	const {
+		failAfter,
+		delayMs,
+		delayAfter = 1,
+		failAfterBackup,
+		beforeCommitDelayMs,
+		beforeCommitMarker,
+		cleanupFailure,
+	} = testHooks;
 	const prepared: PreparedChange[] = [];
 	try {
 		for (const change of changes) {
@@ -711,11 +711,11 @@ async function applyChanges(
 			if (!(await destinationMatches(repo, item.change))) {
 				await rollbackApplied(repo, committed);
 				const conflicts = await conflictingFiles(repo, changes);
-				const warnings = await cleanupWarnings(prepared, failCleanup);
+				const warnings = await cleanupWarnings(prepared, cleanupFailure);
 				return { applied: [], conflicts, warnings };
 			}
 			if (index === 0 && abort.aborted) {
-				const warnings = await cleanupWarnings(prepared, failCleanup);
+				const warnings = await cleanupWarnings(prepared, cleanupFailure);
 				return { applied: [], conflicts: [], warnings };
 			}
 
@@ -737,7 +737,7 @@ async function applyChanges(
 			}
 
 			if (failAfter === index + 1) throw new Error(`Injected application failure after ${index + 1} change(s).`);
-			if (delayAfterMs && index + 1 === delayAfter) await Bun.sleep(delayAfterMs);
+			if (delayMs && index + 1 === delayAfter) await Bun.sleep(delayMs);
 		}
 	} catch (error) {
 		try {
@@ -753,7 +753,7 @@ async function applyChanges(
 		throw error;
 	}
 
-	const warnings = await cleanupWarnings(prepared, failCleanup);
+	const warnings = await cleanupWarnings(prepared, cleanupFailure);
 	return { applied: changes, conflicts: [], warnings };
 }
 

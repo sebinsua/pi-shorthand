@@ -56,6 +56,17 @@ function startRunner(
 	});
 }
 
+type TestHooks = NonNullable<RunOptions["testHooks"]>;
+type ApplicationTestHooks = NonNullable<TestHooks["apply"]>;
+
+function withTestHooks(testHooks: TestHooks): Partial<RunOptions> {
+	return { testHooks };
+}
+
+function withApplicationTestHooks(apply: ApplicationTestHooks): Partial<RunOptions> {
+	return withTestHooks({ apply });
+}
+
 async function run(
 	repo: string,
 	program: string,
@@ -165,7 +176,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 	test("a workspace cleanup failure preserves the applied result and reports a warning", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, `await Bun.write("src/a.ts", "updated\\n");`, {
-			testWorkspaceCleanupFailure: true,
+			testHooks: { workspaceCleanupFailure: true },
 		});
 
 		expect(result.applied).toEqual(["src/a.ts"]);
@@ -176,7 +187,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 	test("a workspace cleanup failure does not replace the program failure", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, `throw new Error("program failed");`, {
-			testWorkspaceCleanupFailure: true,
+			testHooks: { workspaceCleanupFailure: true },
 		});
 
 		expect(result.exitCode).not.toBe(0);
@@ -215,7 +226,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 
 	test("rolls back executable modes and file/symlink transitions after an application failure", async () => {
 		const repo = await makeMetadataRepo();
-		const runner = startRunner(repo, METADATA_PROGRAM, { testApplyFailureAfter: 7 });
+		const runner = startRunner(repo, METADATA_PROGRAM, withApplicationTestHooks({ failAfter: 7 }));
 		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
 
 		expect(exitCode).not.toBe(0);
@@ -456,7 +467,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			writer.write("// open\\n");
 			writer.flush();
 			await Bun.sleep(30_000);`,
-			{ rollback: "file", timeoutMs: 300, testWriterInspectionFailure: true },
+			{ rollback: "file", timeoutMs: 300, testHooks: { writerInspectionFailure: true } },
 		);
 
 		expect(result.timedOut).toBe(true);
@@ -517,7 +528,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			try {
 				if (outcome === "cancellation") {
 					const started = path.join(path.dirname(repo), "detached-program-started");
-					const runner = startRunner(repo, program, { timeoutMs: 60_000, testProgramStartMarker: started });
+					const runner = startRunner(repo, program, { timeoutMs: 60_000, testHooks: { programStartMarker: started } });
 					for (let attempt = 0; attempt < 100 && !(await Bun.file(started).exists()); attempt++) await Bun.sleep(20);
 					expect(await Bun.file(started).exists()).toBe(true);
 					await Bun.sleep(100);
@@ -553,11 +564,11 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			const secondStarted = path.join(path.dirname(secondRepo), "second-isolated-run-started");
 			const first = startRunner(firstRepo, firstProgram, {
 				timeoutMs: 60_000,
-				testProgramStartMarker: firstStarted,
+				testHooks: { programStartMarker: firstStarted },
 			});
 			const second = startRunner(secondRepo, secondProgram, {
 				timeoutMs: 60_000,
-				testProgramStartMarker: secondStarted,
+				testHooks: { programStartMarker: secondStarted },
 			});
 			try {
 				for (let attempt = 0; attempt < 200; attempt++) {
@@ -668,7 +679,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			`await Bun.write("src/a.ts", "program a\\n");
 			await Bun.file("src/b.ts").delete();
 			await Bun.write("src/new.ts", "new\\n");`,
-			{ testApplyFailureAfter: 3 },
+			withApplicationTestHooks({ failAfter: 3 }),
 		);
 		const [stdout, stderr, exitCode] = await Promise.all([
 			new Response(runner.stdout).text(),
@@ -688,9 +699,11 @@ describe.skipIf(!hasOverlay)("runner", () => {
 
 	test("a failure between backup and install restores the original", async () => {
 		const repo = await makeRepo(FILES);
-		const runner = startRunner(repo, `await Bun.write("src/a.ts", "program a\\n");`, {
-			testApplyFailureAfterBackup: 1,
-		});
+		const runner = startRunner(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");`,
+			withApplicationTestHooks({ failAfterBackup: 1 }),
+		);
 		const [stderr, exitCode] = await Promise.all([new Response(runner.stderr).text(), runner.exited]);
 
 		expect(exitCode).not.toBe(0);
@@ -701,9 +714,11 @@ describe.skipIf(!hasOverlay)("runner", () => {
 
 	test("backup cleanup failure reports applied changes with a warning", async () => {
 		const repo = await makeRepo(FILES);
-		const result = await run(repo, `await Bun.write("src/a.ts", "program a\\n");`, {
-			testCleanupFailure: true,
-		});
+		const result = await run(
+			repo,
+			`await Bun.write("src/a.ts", "program a\\n");`,
+			withApplicationTestHooks({ cleanupFailure: true }),
+		);
 
 		expect(result.applied).toEqual(["src/a.ts"]);
 		expect(result.warnings).toContainEqual(expect.stringContaining("backup cleanup failed"));
@@ -720,7 +735,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`await Bun.write("src/a.ts", "program a\\n");
 			await Bun.write("src/b.ts", "program b\\n");`,
-			{ testBeforeCommitDelayMs: 500, testBeforeCommitMarker: preparedMarker },
+			withApplicationTestHooks({ beforeCommitDelayMs: 500, beforeCommitMarker: preparedMarker }),
 		);
 		for (let attempt = 0; attempt < 200 && !(await Bun.file(preparedMarker).exists()); attempt++) await Bun.sleep(10);
 		expect(await Bun.file(preparedMarker).exists()).toBe(true);
@@ -744,9 +759,13 @@ describe.skipIf(!hasOverlay)("runner", () => {
 				program: `await Bun.write("src/a.ts", "program a\\n");`,
 				timeoutMs: 5000,
 				rollback: "all",
-				testBeforeCommitDelayMs: 500,
-				testBeforeCommitMarker: preparedMarker,
-				testCleanupFailure: true,
+				testHooks: {
+					apply: {
+						beforeCommitDelayMs: 500,
+						beforeCommitMarker: preparedMarker,
+						cleanupFailure: true,
+					},
+				},
 			},
 			abort.signal,
 		);
@@ -776,7 +795,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			await Bun.write("src/b.ts", "program b\\n");`,
 				timeoutMs: 5000,
 				rollback: "all",
-				testApplyDelayMs: 500,
+				testHooks: { apply: { delayMs: 500 } },
 			},
 			abort.signal,
 		);
@@ -802,7 +821,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`await Bun.write("src/a.ts", "program a\\n");
 			await Bun.write("src/b.ts", "program b\\n");`,
-			{ testApplyDelayMs: 500 },
+			withApplicationTestHooks({ delayMs: 500 }),
 		);
 		for (
 			let attempt = 0;
@@ -828,7 +847,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			`await Bun.write("src/a.ts", "program a\\n");
 			await Bun.write("src/api.ts", "program api\\n");
 			await Bun.write("src/b.ts", "program b\\n");`,
-			{ testApplyDelayMs: 500, testApplyDelayAfter: 2 },
+			withApplicationTestHooks({ delayMs: 500, delayAfter: 2 }),
 		);
 		for (
 			let attempt = 0;
@@ -864,8 +883,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			await Bun.write("src/b.ts", "program b\\n");`,
 				timeoutMs: 5000,
 				rollback: "all",
-				testApplyDelayMs: 500,
-				testApplyDelayAfter: 2,
+				testHooks: { apply: { delayMs: 500, delayAfter: 2 } },
 			},
 			abort.signal,
 		).then(
@@ -903,7 +921,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`await Bun.write("src/a.ts", "program a\\n");
 			await Bun.write("src/b.ts", "program b\\n");`,
-			{ testApplyDelayMs: 500 },
+			withApplicationTestHooks({ delayMs: 500 }),
 		);
 		for (
 			let attempt = 0;
@@ -1068,7 +1086,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			`await Bun.sleep(500);
 			const original = await Bun.file("src/a.ts").text();
 			await Bun.write("src/generated.ts", original);`,
-			{ testProgramStartMarker: ready },
+			{ testHooks: { programStartMarker: ready } },
 		);
 		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 		expect(await Bun.file(ready).exists()).toBe(true);
@@ -1094,7 +1112,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			`await Bun.sleep(500);
 			await Bun.write("src/a.ts", "program edit\\n");
 			await Bun.write("src/generated.ts", "should not apply\\n");`,
-			{ testProgramStartMarker: ready },
+			{ testHooks: { programStartMarker: ready } },
 		);
 		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 		expect(await Bun.file(ready).exists()).toBe(true);
@@ -1120,7 +1138,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`await Bun.sleep(500);
 			await Bun.write("src/a.ts", "program edit\\n");`,
-			{ testProgramStartMarker: ready },
+			{ testHooks: { programStartMarker: ready } },
 		);
 		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 		expect(await Bun.file(ready).exists()).toBe(true);
@@ -1144,7 +1162,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 				`await Bun.sleep(500);
 				await Bun.write("src/a.ts", "program edit\\n");
 				throw new Error("fail after writing");`,
-				{ testProgramStartMarker: ready },
+				{ testHooks: { programStartMarker: ready } },
 			);
 			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 			expect(await Bun.file(ready).exists()).toBe(true);
@@ -1167,7 +1185,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 				repo,
 				`await Bun.write("src/a.ts", "program edit\\n");
 				await Bun.sleep(30_000);`,
-				{ timeoutMs: 60_000, testProgramStartMarker: ready },
+				{ timeoutMs: 60_000, testHooks: { programStartMarker: ready } },
 			);
 			for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 			expect(await Bun.file(ready).exists()).toBe(true);
@@ -1191,7 +1209,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`await Bun.sleep(500);
 			await Bun.write("src/a.ts", "program edit\\n");`,
-			{ testProgramStartMarker: ready },
+			{ testHooks: { programStartMarker: ready } },
 		);
 		for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt++) await Bun.sleep(20);
 		expect(await Bun.file(ready).exists()).toBe(true);
@@ -1230,7 +1248,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`await Bun.sleep(500);
 			await Bun.write("src/a.ts", "first\\n");`,
-			{ testProgramStartMarker: firstReady },
+			{ testHooks: { programStartMarker: firstReady } },
 		);
 		for (let attempt = 0; attempt < 100 && !(await Bun.file(firstReady).exists()); attempt++) await Bun.sleep(20);
 		expect(await Bun.file(firstReady).exists()).toBe(true);
@@ -1239,7 +1257,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			repo,
 			`const prior = await Bun.file("src/a.ts").text();
 			await Bun.write("src/a.ts", prior + "second\\n");`,
-			{ testProgramStartMarker: secondReady },
+			{ testHooks: { programStartMarker: secondReady } },
 		);
 		await Bun.sleep(100);
 		expect(await Bun.file(secondReady).exists()).toBe(false);
@@ -1259,11 +1277,11 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		const repo = await makeRepo(FILES);
 		const firstReady = path.join(path.dirname(repo), "lock-holder-ready");
 		const secondStarted = path.join(path.dirname(repo), "cancelled-run-started");
-		const first = startRunner(repo, `await Bun.sleep(500);`, { testProgramStartMarker: firstReady });
+		const first = startRunner(repo, `await Bun.sleep(500);`, { testHooks: { programStartMarker: firstReady } });
 		for (let attempt = 0; attempt < 100 && !(await Bun.file(firstReady).exists()); attempt++) await Bun.sleep(20);
 		expect(await Bun.file(firstReady).exists()).toBe(true);
 
-		const second = startRunner(repo, ``, { testProgramStartMarker: secondStarted });
+		const second = startRunner(repo, ``, { testHooks: { programStartMarker: secondStarted } });
 		await Bun.sleep(100);
 		second.kill("SIGTERM");
 		expect(await second.exited).not.toBe(0);
