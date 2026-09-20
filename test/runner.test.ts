@@ -1507,6 +1507,16 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		]);
 	});
 
+	test("glob includes a tracked dangling symlink", async () => {
+		const repo = await makeRepo(FILES);
+		await symlink("missing-target", path.join(repo, "src/dangling.ts"));
+		await $`git add src/dangling.ts && git -c user.name=test -c user.email=test@test commit -qm symlink`.cwd(repo);
+
+		const result = await run(repo, `console.log(JSON.stringify(glob("src/*.ts")));`);
+
+		expect(JSON.parse(result.output)).toContain("src/dangling.ts");
+	});
+
 	test("glob and sg skip a tracked file the program has deleted", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(

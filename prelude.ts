@@ -13,7 +13,7 @@
  * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
@@ -116,7 +116,7 @@ function gitFiles(pathspec = "."): string[] {
 	const output = git(["ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard", "--", pathspec]);
 	// Git still lists a tracked file the program has deleted, so check the final filesystem too.
 	return [...new Set(output.split("\0"))]
-		.filter((file) => file && existsSync(resolve(repositoryRoot, file)))
+		.filter((file) => file && lstatSync(resolve(repositoryRoot, file), { throwIfNoEntry: false }))
 		.toSorted();
 }
 
@@ -163,7 +163,10 @@ type SgMatch = {
  */
 function sourceFiles(helper: string, files: string | string[]): string[] {
 	const found = [...new Set([files].flat().flatMap(selectFiles))];
-	const parseable = found.filter((file) => LANGUAGES[file.split(".").pop()!]);
+	const parseable = found.filter(
+		(file) =>
+			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
+	);
 	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${JSON.stringify(files)}`);
 	return parseable;
 }
