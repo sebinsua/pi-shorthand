@@ -1453,6 +1453,56 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		}
 	});
 
+	test("sg explains path-versus-placement arguments before any file is edited", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`
+			for (const helper of ["find", "one", "rewrite"]) {
+				try {
+					const files = ["src/a.ts", sg.file("src/b.ts")];
+					if (helper === "rewrite") sg.rewrite("oldApi($A)", "newApi($A)", files);
+					else sg[helper]("oldApi($A)", files);
+				} catch (error) { console.log(error.message); }
+			}`,
+		);
+		for (const helper of ["find", "one", "rewrite"])
+			expect(result.output).toContain(`sg.${helper}: files must be a path string or an array of path strings`);
+		expect(result.output).toContain('Pass the object\'s .file path instead (repository-relative: "src/b.ts")');
+		expect(result.exitCode).toBe(0);
+		expect(result.changes).toEqual([]);
+	});
+
+	test("sg suggests an executable contextual pattern for a standalone class method", async () => {
+		const source = "class C { format(x: number): string { return String(x); } }\n";
+		const repo = await makeRepo({ "src/a.ts": source });
+		const failure = await run(repo, 'sg.one("format($$$PARAMS): string { $$$BODY }", "src/a.ts");');
+		expect(failure.exitCode).toBe(1);
+		expect(failure.output).toContain("sg.one:");
+		const suggestion = failure.output.match(/Replace only the pattern argument with (\{[^\n]+\})\./)?.[1];
+		expect(suggestion).toBeDefined();
+		const pattern = JSON.parse(suggestion!);
+		const correction = await run(
+			repo,
+			`sg.rewrite(${JSON.stringify(pattern)}, m => m.text.replace("String(x)", "String(x + 1)"), "src/a.ts");`,
+		);
+		expect(correction.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(source.replace("String(x)", "String(x + 1)"));
+	});
+
+	test("sg leaves unrelated invalid patterns as errors without suggesting a class-method match", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			'try { sg.rewrite("a(); b();", "c();", "src/a.ts"); } catch (error) { console.log(error.message); }',
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("sg.rewrite:");
+		expect(result.output).toContain("Patterns must parse as one syntax node");
+		expect(result.output).not.toContain("This class-method pattern");
+		expect(result.applied).toEqual([]);
+	});
+
 	test("sg.rewrite fills an empty $$$ with nothing, not the literal text", async () => {
 		const repo = await makeRepo({ "src/x.ts": "foo();\nfoo(1, 2);\n" });
 		await run(repo, `sg.rewrite("foo($$$ARGS)", "bar($$$ARGS)", "src");`);

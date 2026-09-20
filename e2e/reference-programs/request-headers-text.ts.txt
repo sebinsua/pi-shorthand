@@ -1,0 +1,7 @@
+for (const file of ["api.ts", "view.ts"]) {
+  const source = await Bun.file(file).text();
+  await Bun.write(file, source.replaceAll("id: string)", "id: string, headers?: HeadersInit)")
+    .replaceAll(" + id)", " + id, { headers })")
+    .replace("readProject(id)", "readProject(id, headers)")
+    .replace("readOwner(project.ownerId)", "readOwner(project.ownerId, headers)"));
+}

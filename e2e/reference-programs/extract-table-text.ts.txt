@@ -1,0 +1,11 @@
+const source = await Bun.file("writer.ts").text();
+const start = source.indexOf("  format(");
+const end = source.indexOf("  record(", start);
+const method = source.slice(start, end);
+const declaration = method.replace(/^  /gm, "").replace(/^format/, "export function renderTable");
+await Bun.write("table.ts", 'import type { Cell, FormatOptions } from "./types";\n' + declaration);
+await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + source.slice(0, start)
+  + "  format(rows: readonly (readonly Cell[])[], options: FormatOptions = {}): string { return renderTable(rows, options); }\n"
+  + source.slice(end));
+const exported = await Bun.file("export.ts").text();
+await Bun.write("export.ts", exported.replaceAll("TableWriter", "renderTable").replace("./writer", "./table").replace("new renderTable().format", "renderTable"));

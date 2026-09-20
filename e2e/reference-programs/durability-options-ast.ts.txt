@@ -1,0 +1,9 @@
+for (const file of glob("*.ts")) {
+  const root = sg.parse(sg.Lang.TypeScript, await Bun.file(file).text()).root();
+  const edits = root.findAll("store.save($KEY, $OPTION)").flatMap(call => {
+    const option = call.getMatch("OPTION");
+    return ["true", "false"].includes(option.kind())
+      ? [option.replace(`{ durable: ${option.text()} }`)] : [];
+  });
+  if (edits.length) await Bun.write(file, root.commitEdits(edits));
+}

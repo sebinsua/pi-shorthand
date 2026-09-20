@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { $ } from "bun";
@@ -345,6 +345,24 @@ export async function materializeTask(task: Task, root: string): Promise<void> {
 			include: ["*.ts"],
 		}),
 	);
+	// Provision the same compiler for ordinary shell calls and shorthand programs.
+	// Links reuse the installed toolchain without downloads or copying dependencies.
+	const typescript = path.resolve(import.meta.dir, "../node_modules/typescript");
+	const { version } = JSON.parse(await readFile(path.join(typescript, "package.json"), "utf8"));
+	await writeFile(
+		path.join(root, "package.json"),
+		JSON.stringify({
+			name: "shorthand-benchmark-fixture",
+			private: true,
+			type: "module",
+			scripts: { check: "tsc --noEmit" },
+			devDependencies: { typescript: version },
+		}),
+	);
+	await writeFile(path.join(root, ".gitignore"), "node_modules/\n");
+	await mkdir(path.join(root, "node_modules/.bin"), { recursive: true });
+	await symlink(typescript, path.join(root, "node_modules/typescript"), "dir");
+	await symlink("../typescript/bin/tsc", path.join(root, "node_modules/.bin/tsc"));
 	await $`git init -q`.cwd(root).quiet();
 	await $`git add .`.cwd(root).quiet();
 	await $`git -c user.name=Benchmark -c user.email=benchmark@localhost -c commit.gpgsign=false commit -qm ${task.revision}`

@@ -6,6 +6,7 @@
  *     [--check "<shell command>"] [--budget-seconds 600] [--budget-dollars 2]
  *     [--documentation shipped,minimal] [--skills none,shorthand]
  *     [--extension <path> | --baseline-extension <path> --candidate-extension <path>]
+ *     [--seed-messages <recovery-context.json>]
  *
  * Paired extension runs use separate frozen snapshots, alternate execution order, and start from copies of the
  * same recorded fixture. A completion is verified only when Pi succeeds within budget and --check passes.
@@ -40,6 +41,7 @@ import {
 } from "./conditions.ts";
 import { saveChanges } from "./artifacts.ts";
 import { sessionReport } from "./report.ts";
+import { seedSession } from "./seed-session.ts";
 
 const { values: args } = parseArgs({
 	options: {
@@ -61,6 +63,7 @@ const { values: args } = parseArgs({
 		extension: { type: "string" },
 		"baseline-extension": { type: "string" },
 		"candidate-extension": { type: "string" },
+		"seed-messages": { type: "string" },
 	},
 });
 if (!args.repo || !args.task) throw new Error("Usage: bun e2e/run.ts --repo <path or git URL> --task <task> …");
@@ -87,6 +90,11 @@ if (paired && (!args["baseline-extension"] || !args["candidate-extension"])) {
 }
 if (paired && selectedSetups.every((setup) => setup === "baseline"))
 	throw new Error("Paired extensions require a shorthand setup");
+if (args["seed-messages"] && selectedSetups.includes("baseline"))
+	throw new Error("Recovery seeds require an explicit extension in every condition");
+const seeds: Record<string, JsonEvent[]> | null = args["seed-messages"]
+	? await Bun.file(args["seed-messages"]).json()
+	: null;
 
 mkdirSync(resultsRoot, { recursive: true });
 const workDir = await mkdtemp(path.join(tmpdir(), "pi-shorthand-e2e-"));
@@ -215,11 +223,28 @@ async function runPi(
 		}
 	}
 	const reasoningArgs = ["--thinking", args.reasoning ?? "high"];
+	let seedRecord: { source: string; fingerprint: string; messages: number } | null = null;
+	const sessionArgs = ["--no-session"];
+	if (seeds && extension) {
+		const messages = seeds[extension.label];
+		const seed = seedSession(messages, copy, extension.path);
+		const sessionFile = path.join(workDir, `${name}.session.jsonl`);
+		const serialized = [seed.header, ...seed.entries].map((item) => JSON.stringify(item)).join("\n") + "\n";
+		await Bun.write(sessionFile, serialized);
+		const savedSeed = path.join(resultsRoot, `${name}.seed.jsonl`);
+		await Bun.write(savedSeed, serialized);
+		seedRecord = {
+			source: savedSeed,
+			fingerprint: new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex"),
+			messages: messages.length,
+		};
+		sessionArgs.splice(0, sessionArgs.length, "--session", sessionFile);
+	}
 	const command = [
 		"pi",
 		"--mode",
 		"json",
-		"--no-session",
+		...sessionArgs,
 		"-ne",
 		"--no-skills",
 		"--no-context-files",
@@ -232,12 +257,17 @@ async function runPi(
 		...reasoningArgs,
 		...setupArgs,
 		"-p",
-		args.task!,
+		seeds ? "Continue with the task." : args.task!,
 	];
 	const startedAt = performance.now();
 	const pi = Bun.spawn(command, {
 		cwd: copy,
-		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_SHORTHAND_HISTORY: "0" },
+		env: {
+			...process.env,
+			PATH: [path.join(copy, "node_modules/.bin"), process.env.PATH].filter(Boolean).join(path.delimiter),
+			PI_CODING_AGENT_DIR: agentDir,
+			PI_SHORTHAND_HISTORY: "0",
+		},
 		detached: true,
 		stdin: "ignore",
 		stdout: "pipe",
@@ -296,6 +326,7 @@ async function runPi(
 		budgetSeconds,
 		extension: extension ?? null,
 		startingFixture,
+		seed: seedRecord,
 		seconds: durationMs / 1000,
 		timing: {
 			endToEndMs: durationMs,

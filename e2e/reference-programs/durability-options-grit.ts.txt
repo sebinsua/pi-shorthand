@@ -1,0 +1,1 @@
+grit('`store.save($key, $option)` where { $option <: or { `true`, `false` }, $option => `{ durable: $option }` }', ".");

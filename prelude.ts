@@ -163,7 +163,17 @@ type SgMatch = {
  * of any of those. Warns if there are none, since that's almost always a mistake.
  */
 function sourceFiles(helper: string, files: string | string[]): string[] {
-	const found = [...new Set([files].flat().flatMap(selectFiles))];
+	const inputs = Array.isArray(files) ? files : [files];
+	for (const input of inputs) {
+		if (typeof input === "string") continue;
+		const target = input as unknown as { file?: unknown } | null;
+		const hint =
+			target && typeof target.file === "string"
+				? ` Pass the object's .file path instead (repository-relative: ${JSON.stringify(relative(repositoryRoot, resolve(target.file)).replaceAll("\\", "/"))}). sg.file() returns a placement target, not a path.`
+				: "";
+		throw new TypeError(`${helper}: files must be a path string or an array of path strings.${hint}`);
+	}
+	const found = [...new Set(inputs.flatMap(selectFiles))];
 	const parseable = found.filter(
 		(file) =>
 			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
@@ -173,20 +183,49 @@ function sourceFiles(helper: string, files: string | string[]): string[] {
 }
 
 function find(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch[] {
+	return findMatches("sg.find", pattern, files);
+}
+
+function findMatches(helper: string, pattern: string | NapiConfig, files: string | string[]): SgMatch[] {
 	const matches: SgMatch[] = [];
-	for (const file of sourceFiles("sg.find", files)) {
+	for (const file of sourceFiles(helper, files)) {
 		const parsed = parseFile(file);
 		if (!parsed) continue;
-		for (const node of parsed.root.findAll(pattern)) matches.push(toMatch(file, node, parsed.source, pattern));
+		for (const node of findNodes(helper, parsed.root, pattern))
+			matches.push(toMatch(file, node, parsed.source, pattern));
 	}
 	return matches;
 }
 
 function one(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch {
-	const matches = find(pattern, files);
+	const matches = findMatches("sg.one", pattern, files);
 	if (matches.length !== 1)
 		throw new Error(`sg.one expected exactly one match, found ${matches.length} for ${JSON.stringify(pattern)}`);
 	return matches[0];
+}
+
+/** Keep parse failures local to the pattern argument, with a verified contextual alternative when possible. */
+function findNodes(helper: string, root: SgNode, pattern: string | NapiConfig): SgNode[] {
+	try {
+		return root.findAll(pattern);
+	} catch (error) {
+		if (typeof pattern !== "string" || !(error instanceof Error) || !error.message.includes("Multiple AST nodes"))
+			throw error;
+		const contextual = {
+			rule: { pattern: { context: `class C { ${pattern} }`, selector: "method_definition" } },
+		};
+		let matchesMethod = false;
+		try {
+			matchesMethod = root.findAll(contextual).length > 0;
+		} catch {
+			// A class context is not suitable for every invalid snippet. Preserve the original failure below.
+		}
+		const hint = matchesMethod
+			? `This class-method pattern needs a class context. Replace only the pattern argument with ${JSON.stringify(contextual)}.`
+			: 'Patterns must parse as one syntax node. For a fragment, use { rule: { pattern: { context: "complete surrounding code", selector: "node_kind" } } }.';
+		error.message = `${helper}: ${error.message}\n${hint}`;
+		throw error;
+	}
 }
 
 /** Explicit destinations may be ignored or missing, but cannot resolve outside the repository. */
@@ -222,7 +261,7 @@ function rewrite(
 		if (!parsed) continue;
 
 		const edits = [];
-		for (const node of parsed.root.findAll(pattern)) {
+		for (const node of findNodes("sg.rewrite", parsed.root, pattern)) {
 			const match = toMatch(file, node, parsed.source, pattern);
 			const newText =
 				typeof replacement === "function"

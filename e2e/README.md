@@ -2,7 +2,7 @@
 
 This harness compares how Pi completes coding tasks with different editing interfaces. It records the whole
 session, checks the result independently, and keeps evidence for human review. The checked-in suite is a small,
-dependency-free pilot; it does not establish performance on large repositories or public benchmarks.
+locally provisioned pilot; it does not establish performance on large repositories or public benchmarks.
 
 ## Plan without calling a model
 
@@ -18,7 +18,7 @@ it starts Pi immediately.
 ## Tasks and verification
 
 [tasks.ts](tasks.ts) contains versioned starting files, outcome-only prompts, reference solutions, and evaluators.
-Only starting files and a TypeScript configuration are copied into the agent's fixture. Reference solutions and
+Starting files, a TypeScript configuration, and a package with a `check` script are copied into the agent's fixture. Reference solutions and
 evaluators stay outside it. These are evaluation boundaries, not a security sandbox against a malicious agent.
 
 | Task                   | Category               | Independent checks                                                                                  |
@@ -30,11 +30,21 @@ evaluators stay outside it. These are evaluation boundaries, not a security sand
 | `shared-validation`    | Extraction             | Shared module use, removed duplicate normalisation, state and error ordering                        |
 | `request-cancellation` | Multi-file propagation | Signal identity through both requests, old callers and failure propagation                          |
 
-Every task also runs TypeScript checking using this checkout's installed compiler. Preparation creates a local
+Every task also runs TypeScript checking using this checkout's installed compiler. Fixtures link that same
+compiler under ignored `node_modules` for `npm run check` and `npx tsc`; the runner puts the fixture's `.bin` on
+PATH for every condition. Preparation creates a local
 Git repository from the embedded revision; it needs no downloads. Content fingerprints identify the exact input.
 The regression tests require each starting fixture to fail its evaluator and its reference solution to pass.
 These compact tasks are a starting point; add larger repository tasks before interpreting small differences as
 general performance gains.
+
+`guidance-tasks.ts` contains three additional fixtures for testing documentation changes: table-formatting
+extraction, boolean-option migration with comment preservation, and request-header propagation. They are
+separate from the default suite. Use `materializeTask` to prepare a fixture and pass
+`bun /absolute/path/to/e2e/guidance-tasks.ts <task-id> "$PWD"` as the runner's `--check` command. Paired
+`--baseline-extension`/`--candidate-extension` runs with `--skills shorthand --runs 2` alternate old/new
+guidance order; both snapshots should use identical execution code. These tasks test transfer beyond the
+original fixtures, not general repository performance.
 
 ## Conditions
 
@@ -90,6 +100,14 @@ Extension source is copied to frozen paths before attempts begin. Installed depe
 not update them during an experiment. Model, reasoning, prompt, task/category IDs, enabled tools, documentation,
 skill choice, fixture fingerprint and extension identity are recorded in summaries.
 
+For a controlled recovery comparison, add `--seed-messages <file.json>`. The file maps extension labels
+(`baseline` and `candidate` in paired mode) to Pi message arrays containing the original task, relevant reads,
+the failed tool call and its error. Seeds must end with a failed tool result and contain complete tool exchanges;
+private reasoning blocks are rejected. `{{fixture}}` and `{{extension}}` in string values are replaced with each
+attempt's paths. The runner saves the seed and its fingerprint, then asks Pi to “Continue with the task.”
+The stock `baseline` setup cannot use seeds. Seeded runs measure recovery from a constructed context, excluding
+the initial failure's execution time; keep them separate from whole-session completion measurements.
+
 ## Budgets and results
 
 A result is verified only when Pi exits successfully, the independent check passes, and the time/spending
@@ -126,9 +144,17 @@ tool-call counts alone are not a fluency score.
 ## Local validation
 
 ```sh
-bun test test/e2e-harness.test.ts test/e2e-suite.test.ts
+bun test test/e2e-harness.test.ts test/e2e-suite.test.ts test/guidance-tasks.test.ts test/seed-session.test.ts
 npm run check
 ```
 
 These commands do not call a model. Legacy real-model results and synthetic smoke results can coexist in an old
 results directory; do not combine them blindly with new experiments. Use a fresh `--results-dir` for a study.
+
+## Local reference edits and recovery
+
+[reference-edits.md](reference-edits.md) compares verified ast-grep, GritQL and source-text programs with the
+recorded agent programs. Run `bun e2e/reference-edits.ts` to execute the references, or
+`bun e2e/replay-edit-errors.ts` to reproduce two observed API failures and verify minimal corrections. These
+commands use temporary repositories and the real overlay backend, with independent evaluation after editing.
+They do not call a model. The restored shorthand skill remains fixed during this investigation.

@@ -18,6 +18,19 @@ afterEach(async () => {
 	await Promise.all(temporary.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+test("copied fixtures provide the same local TypeScript compiler without downloads", async () => {
+	const root = await directory();
+	const fixture = path.join(root, "fixture");
+	const copy = path.join(root, "copy");
+	await materializeTask(taskById("empty-average"), fixture);
+	await $`cp -R ${fixture} ${copy}`.quiet();
+	const expected = (await $`${path.resolve("node_modules/.bin/tsc")} --version`.text()).trim();
+	const version = await $`npx --no-install tsc --version`.cwd(copy).text();
+	expect(version.trim()).toBe(expected);
+	expect((await $`npm run --silent check`.cwd(copy).nothrow().quiet()).exitCode).toBe(0);
+	expect(await $`git ls-files node_modules`.cwd(copy).text()).toBe("");
+});
+
 for (const task of tasks)
 	test(`evaluator rejects initial ${task.id} and accepts its reference solution`, async () => {
 		const root = await directory();

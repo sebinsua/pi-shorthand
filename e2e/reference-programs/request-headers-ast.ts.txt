@@ -1,0 +1,11 @@
+for (const file of ["api.ts", "view.ts"]) {
+  const root = sg.parse(sg.Lang.TypeScript, await Bun.file(file).text()).root();
+  const edits = root.findAll({ rule: { kind: "formal_parameters" } })
+    .map(params => params.replace("(id: string, headers?: HeadersInit)"));
+  for (const [pattern, replacement] of [
+    ["fetch($URL)", m => `fetch(${m.getMatch("URL").text()}, { headers })`],
+    ["readProject($ID)", m => `readProject(${m.getMatch("ID").text()}, headers)`],
+    ["readOwner($ID)", m => `readOwner(${m.getMatch("ID").text()}, headers)`],
+  ]) for (const call of root.findAll(pattern)) edits.push(call.replace(replacement(call)));
+  await Bun.write(file, root.commitEdits(edits));
+}

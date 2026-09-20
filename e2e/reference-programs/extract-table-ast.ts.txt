@@ -1,0 +1,12 @@
+const file = "writer.ts";
+const source = await Bun.file(file).text();
+const method = sg.one({ rule: { pattern: {
+  context: "class C { format($$$PARAMS): string { $$$BODY } }",
+  selector: "method_definition",
+} } }, file);
+const declaration = method.text.replace(/^format/, "export function renderTable").replace(/^  /gm, "");
+await Bun.write("table.ts", 'import type { Cell, FormatOptions } from "./types";\n' + declaration + "\n");
+const delegate = method.text.replace(method.node.field("body").text(), "{ return renderTable(rows, options); }");
+await Bun.write(file, 'import { renderTable } from "./table";\n' + source.replace(method.text, delegate));
+const exported = await Bun.file("export.ts").text();
+await Bun.write("export.ts", exported.replaceAll("TableWriter", "renderTable").replace("./writer", "./table").replace("new renderTable().format", "renderTable"));

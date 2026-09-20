@@ -1,0 +1,5 @@
+grit('`format($params): string { $body }` where { $new_files += file(name="table.ts", body=`import type { Cell, FormatOptions } from "./types";\nexport function renderTable($params): string {\n    $body\n}\n`), $body => `return renderTable(rows, options);` }', "writer.ts");
+await Bun.write("table.ts", (await Bun.file("table.ts").text()).replace(/^  /gm, ""));
+await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + await Bun.file("writer.ts").text());
+const exported = await Bun.file("export.ts").text();
+await Bun.write("export.ts", exported.replaceAll("TableWriter", "renderTable").replace("./writer", "./table").replace("new renderTable().format", "renderTable"));

@@ -15,28 +15,28 @@ import { callLine, countLines, fileMetadataSummary, resultLines, unstructuredRes
 import { RUN_HISTORY_FILE } from "./history.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
-// Runs typically take well under a second. Programs that run tests or builds pass a longer timeout.
+// Runs typically take well under a second. Longer transformations can request more time.
 const DEFAULT_TIMEOUT_SECONDS = 2;
 
-const DESCRIPTION = `Make a repository change with one TypeScript program, run by Bun as a transaction: its writes are applied only if it exits successfully, and you get the diff. Put the checks that prove the change worked (type-check, targeted tests, no leftover matches) in the same program, and throw if they fail. Work out what to change inside the program (e.g. with grep) rather than copying lists from earlier output.
+const DESCRIPTION = `Make a repository change with one TypeScript program, run by Bun as a transaction: its writes are applied only if it exits successfully, and you get the diff. Keep the program focused on editing. Run tests, type-checks, builds and other verification separately afterward with the shell tool. Work out what to change inside the program (e.g. with grep) rather than copying lists from earlier output.
 
-Use it when a change takes several deterministic steps (reads, searches, multi-file edits, structural rewrites, checks) and you already know what to do with each intermediate result. If seeing an intermediate result could change your plan, look first with a normal tool call.
+Use it when a change takes several deterministic editing steps (reads, searches, multi-file edits, structural rewrites) and you already know what to do with each intermediate result. If seeing an intermediate result could change your plan, look first with a normal tool call.
 
 The program runs in an isolated copy of the working directory. Use relative paths for repository files. On Linux, host paths outside the repository are read-only and $TMPDIR is private to the run; on macOS the real checkout's absolute path is intentionally inaccessible. Top-level await works, and so do ordinary Bun and Node APIs. These globals are synchronous, and see the files git sees (not node_modules or ignored files):
 - glob(pattern, dir?) → string[]
 - grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
-- sg.find(pattern, files?) → {file, line, text, vars}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a file, directory, glob or a list of them (JS/TS).
-- sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (its captures are on it: m.X) and returns the new text, or null to leave it.
+- sg.find(pattern, files?) → {file, line, text, vars, node}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a file, directory, glob or a list of them (JS/TS).
+- sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (capture text: m.X; captured syntax node: m.node.getMatch("X")) and returns the new text, or null to leave it. Conditional node-kind checks can stay inside this helper.
 - sg.one(pattern, files?) requires exactly one match. sg.file(path) selects a JS/TS file root (also works for new files).
 - sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. JS/TS statements/declarations only; containers are file roots or matched statement blocks. Rematch after editing a file. move's optional function transforms its text; insert(match.text, destination) copies.
 - sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
 - grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[], e.g. grit("\`a($x)\` => \`b($x)\`", "src")
-Bun's shell $ needs await: await $\`bun test src/foo.test.ts\`. You can also run the ast-grep, grit and git CLIs with it. For how to write these programs, see the shorthand skill.
+Bun's shell $ needs await: const files = await $\`git ls-files\`.text(). Inside code, you can also run the ast-grep, grit and git CLIs with it; don't assume bundled CLIs exist in ordinary shell tool calls. Read existing source at runtime and reuse text or captures rather than embedding unchanged bodies or whole expected files in the program. For how to write these programs, see the shorthand skill.
 
 Throw or exit non-zero to fail. rollback decides what a failure undoes:
 - "all" (default): nothing is applied; you get the error and the candidate diff.
 - "file": on timeout, files not open for writing are applied if writer inspection succeeds. If inspection fails, or on another failure, nothing is applied.
-The default timeout is 2 seconds; pass a longer timeout when the program runs tests or builds. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Print what you need to know (counts, assertions), not whole files.`;
+The default timeout is 2 seconds; pass a longer timeout for longer transformations. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Print a short summary, not whole files.`;
 
 export default function (pi: ExtensionAPI) {
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
@@ -50,10 +50,9 @@ export default function (pi: ExtensionAPI) {
 		name: "code",
 		label: "Code",
 		description: DESCRIPTION,
-		promptSnippet:
-			"Make a change with one Bun program, run as a transaction: its edits are kept only if it exits 0, so put your checks inside it",
+		promptSnippet: "Make a change with one transactional Bun editing program; run verification separately afterward",
 		promptGuidelines: [
-			"Use code when several related reads, searches, edits or checks can be done without looking at intermediate results: put that logic in one program rather than many read/edit/bash calls.",
+			"Use code when several related reads, searches or edits can be done without looking at intermediate results: put that transformation logic in one program. Run application verification afterward with the shell tool.",
 			"Don't use code to explore when you need to see results before deciding what to do.",
 		],
 		parameters: Type.Object({

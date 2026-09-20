@@ -1,0 +1,30 @@
+const writerPath = "writer.ts";
+const writerSource = await Bun.file(writerPath).text();
+const formatMethod = sg.one(
+  "format($ROWS: readonly (readonly Cell[])[], $OPTIONS: FormatOptions = {}): string { $$$BODY }",
+  writerPath,
+);
+const methodText = formatMethod.text;
+const bodyStart = methodText.indexOf("{", methodText.indexOf("): string"));
+if (bodyStart < 0 || !methodText.endsWith("}")) throw new Error("Could not locate format body");
+const body = methodText.slice(bodyStart + 1, -1);
+
+const tableSource = `import type { Cell, FormatOptions } from "./types";\n\nexport function renderTable(rows: readonly (readonly Cell[])[], options: FormatOptions = {}): string {${body}}\n`;
+await Bun.write("table.ts", tableSource);
+
+const delegatedMethod = `format(rows: readonly (readonly Cell[])[], options: FormatOptions = {}): string {\n    return renderTable(rows, options);\n  }`;
+let nextWriter = writerSource.replace(methodText, delegatedMethod);
+if (nextWriter === writerSource) throw new Error("Could not replace TableWriter.format");
+nextWriter = nextWriter.replace(
+  'import type { Cell, FormatOptions } from "./types";\n',
+  'import type { Cell, FormatOptions } from "./types";\nimport { renderTable } from "./table";\n',
+);
+await Bun.write(writerPath, nextWriter);
+
+const exportPath = "export.ts";
+let exportSource = await Bun.file(exportPath).text();
+exportSource = exportSource.replace('import { TableWriter } from "./writer";', 'import { renderTable } from "./table";');
+exportSource = exportSource.replace("return new TableWriter().format(rows, options);", "return renderTable(rows, options);");
+await Bun.write(exportPath, exportSource);
+
+console.log("Extracted TableWriter.format into table.ts and updated callers");

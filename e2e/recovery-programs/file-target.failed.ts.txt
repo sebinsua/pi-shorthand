@@ -1,0 +1,27 @@
+const api = sg.file("api.ts");
+const view = sg.file("view.ts");
+
+const project = sg.one("export async function readProject(id: string) { $$$BODY }", api);
+const owner = sg.one("export async function readOwner(id: string) { $$$BODY }", api);
+const projectView = sg.one("export async function projectView(id: string) { $$$BODY }", view);
+
+const updateApiFunction = (match: typeof project) => {
+  const updated = match.text
+    .replace("(id: string)", "(id: string, headers?: HeadersInit)")
+    .replace("fetch(", "fetch(")
+    .replace(/fetch\(([^)]*)\)/, "fetch($1, { headers })");
+  if (updated === match.text) throw new Error(`Failed to update ${match.text}`);
+  return updated;
+};
+
+sg.rewrite("export async function readProject(id: string) { $$$BODY }", updateApiFunction(project), api);
+sg.rewrite("export async function readOwner(id: string) { $$$BODY }", updateApiFunction(owner), api);
+
+const updatedView = projectView.text
+  .replace("(id: string)", "(id: string, headers?: HeadersInit)")
+  .replace("readProject(id)", "readProject(id, headers)")
+  .replace("readOwner(project.ownerId)", "readOwner(project.ownerId, headers)");
+if (updatedView === projectView.text) throw new Error("Failed to update projectView");
+sg.rewrite("export async function projectView(id: string) { $$$BODY }", updatedView, view);
+
+console.log("Added optional headers to API reads and projectView.");

@@ -8,6 +8,7 @@ and over: fewer tokens, and fewer round trips.
 
 The program sees your repo as normal, but its writes are held back. By default, they're applied only
 if the program succeeds and destination files are unchanged, and the model gets the diff.
+The program performs the edit; tests, type-checks and other verification run separately afterward.
 
 ## Install
 
@@ -28,7 +29,7 @@ You also need Bun, git, and either [bubblewrap](https://github.com/containers/bu
 Anything in Bun or Node, plus these globals (no imports):
 
 ```ts
-await $`bun test src/api.test.ts`; // Bun's shell (the only async one)
+await $`git ls-files`.text(); // Bun's shell (the only async one)
 glob("src/**/*.ts"); // → ["src/a.ts", …]
 grep("oldApi(", "src"); // → [{ file, line, text }, …]
 sg.find("oldApi($$$ARGS)", "src"); // ast-grep search

@@ -18,6 +18,16 @@ A function returns the new text; returning anything else (`undefined`, `null`, `
 match alone. If nested matches would produce overlapping edits, `sg.rewrite` throws instead of
 silently dropping a replacement or returning an inaccurate count.
 
+The callback also receives `m.node`, the matched ast-grep node. Inspect a capture's syntax without
+leaving `sg.rewrite`:
+
+```ts
+sg.rewrite("pause($DELAY)", (m) => (m.node.getMatch("DELAY")?.kind() === "number" ? `sleep(${m.DELAY})` : null), "src");
+```
+
+This keeps dynamic expressions unchanged. The helper handles file discovery, parsing and writing;
+you don't need a `sg.parse`/`commitEdits` loop just to filter by a captured node's kind.
+
 ## Inserting, moving and removing syntax
 
 For JS/TS, use matches from `sg.find` or `sg.one(pattern, files)`, which requires exactly one match.
@@ -78,7 +88,7 @@ sg.find(
 
 ## ast-grep's own API
 
-When an edit depends on context a pattern can't express, use ast-grep's JavaScript API directly.
+When patterns, rule objects and rewrite callbacks cannot express the edit, use ast-grep's JavaScript API directly.
 It's on `sg` under its usual names, and `import { parse, Lang } from "@ast-grep/napi"` works too:
 
 ```ts
