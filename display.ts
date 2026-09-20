@@ -7,7 +7,7 @@
  * on failure the output, then what would have changed; for an exploration, just the output.
  */
 
-import { keyHint, renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
+import { getLanguageFromPath, highlightCode, keyHint, renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
 import type { FileChange, RunResult } from "./runner.ts";
 
 const OUTPUT_PREVIEW_LINES = 5; // like Pi's bash tool
@@ -133,7 +133,7 @@ function outputLines(output: string, expanded: boolean, labelled: boolean, theme
 
 /** Each file's diff under its name, in Pi's own diff style. A long diff collapses to a list of files. */
 function diffLines(changes: FileChange[], expanded: boolean, theme: Theme): string[] {
-	const files = changes.map((change) => [fileLine(change, theme), ...renderDiff(toPiDiff(change.patch)).split("\n")]);
+	const files = changes.map((change) => [fileLine(change, theme), ...renderFileDiff(change, theme)]);
 	const total = files.reduce((sum, file) => sum + file.length, 0);
 	if (!expanded && total > INLINE_DIFF_LINES) {
 		return [...fileList(changes, theme), theme.fg("muted", `(${keyHint("app.tools.expand", "to see the diff")})`)];
@@ -143,6 +143,54 @@ function diffLines(changes: FileChange[], expanded: boolean, theme: Theme): stri
 	if (lines.length <= EXPANDED_DIFF_LINES) return lines;
 	const more = lines.length - EXPANDED_DIFF_LINES;
 	return [...lines.slice(0, EXPANDED_DIFF_LINES), theme.fg("muted", `… ${more} more lines of diff`)];
+}
+
+function renderFileDiff(change: FileChange, theme: Theme): string[] {
+	const diff = toPiDiff(change.patch);
+	const language = getLanguageFromPath(change.path);
+	if (!language || diff === " binary file changed") return renderDiff(diff).split("\n");
+
+	const rendered: string[] = [];
+	let hunk: string[] = [];
+	const flush = () => {
+		if (hunk.length > 0) rendered.push(...renderSyntaxHunk(hunk, language, theme));
+		hunk = [];
+	};
+	for (const line of diff.split("\n")) {
+		if (/^\s+\.\.\.$/.test(line)) {
+			flush();
+			rendered.push(theme.fg("toolDiffContext", line));
+		} else {
+			hunk.push(line);
+		}
+	}
+	flush();
+	return rendered;
+}
+
+function renderSyntaxHunk(lines: string[], language: string, theme: Theme): string[] {
+	const parsed = lines.map((line) => {
+		const match = line.match(/^([+\- ])(\s*\d*) (.*)$/);
+		return match ? { prefix: match[1], number: match[2], code: match[3] } : undefined;
+	});
+	const oldLines = parsed.flatMap((line) => (line && line.prefix !== "+" ? [line.code] : []));
+	const newLines = parsed.flatMap((line) => (line && line.prefix !== "-" ? [line.code] : []));
+	const oldHighlighted = highlightCode(oldLines.join("\n"), language);
+	const newHighlighted = highlightCode(newLines.join("\n"), language);
+	let oldIndex = 0;
+	let newIndex = 0;
+
+	return parsed.map((line, index) => {
+		if (!line) return theme.fg("toolDiffContext", lines[index]);
+		if (line.prefix === "-") {
+			return theme.fg("toolDiffRemoved", `-${line.number} `) + oldHighlighted[oldIndex++];
+		}
+		if (line.prefix === "+") {
+			return theme.fg("toolDiffAdded", `+${line.number} `) + newHighlighted[newIndex++];
+		}
+		oldIndex++;
+		return theme.fg("toolDiffContext", ` ${line.number} `) + newHighlighted[newIndex++];
+	});
 }
 
 function notAppliedLines(changes: FileChange[], expanded: boolean, theme: Theme): string[] {

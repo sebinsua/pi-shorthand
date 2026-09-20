@@ -1,7 +1,7 @@
 /** How results look in Pi, checked as plain text against hand-built results. */
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { highlightCode, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { callLine, resultLines, unstructuredResultText } from "../display.ts";
 import { renderCodeResult } from "../index.ts";
 import type { FileChange, RunResult } from "../runner.ts";
@@ -201,6 +201,19 @@ describe("what went wrong", () => {
 });
 
 describe("sections", () => {
+	test("code diffs combine syntax highlighting with colored change gutters", () => {
+		const typescript = change("src/example.ts");
+		typescript.patch = typescript.patch
+			.replace("-old 0", "-export const oldValue = 1;")
+			.replace("+new 0", "+export const newValue = 2;");
+		const lines = resultLines(result({ changes: [typescript], applied: [typescript.path] }), true, theme);
+		const removed = lines.find((line) => Bun.stripANSI(line).includes("-1 export const oldValue"));
+		const added = lines.find((line) => Bun.stripANSI(line).includes("+1 export const newValue"));
+
+		expect(removed).toContain(highlightCode("export const oldValue = 1;", "typescript")[0]);
+		expect(added).toContain(highlightCode("export const newValue = 2;", "typescript")[0]);
+	});
+
 	test("output is labelled as the program's when there's also a diff", () => {
 		const run = result({ changes: [change("a.ts")], applied: ["a.ts"], output: "done\n" });
 		const lines = show(run);
