@@ -313,7 +313,7 @@ async function destinationMatches(repo: string, change: Change): Promise<boolean
 	if (!(await safeParentChain(repo, target))) return false;
 	try {
 		const current = await snapshotEntry(target);
-		return entriesEqual(current?.entry ?? null, change.before) && (await safeParentChain(repo, target));
+		return entriesEqual(current, change.before) && (await safeParentChain(repo, target));
 	} catch (error) {
 		if (error instanceof UnsupportedEntryError) return false;
 		throw error;
@@ -620,7 +620,7 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 	for (const { file, entry: after } of candidates) {
 		if (ignored.has(file) || seen.has(file)) continue;
 		seen.add(file);
-		const before = (await snapshotEntry(path.join(overlay.originalDir, file)))?.entry ?? null;
+		const before = await snapshotEntry(path.join(overlay.originalDir, file));
 		if (!before && !after) continue;
 		if (entriesEqual(before, after)) continue; // read or copy-up, not changed
 		changes.push({ file, before, after });
@@ -905,15 +905,10 @@ function ancestors(dir: string): string[] {
 	return parent === dir ? [dir] : [dir, ...ancestors(parent)];
 }
 
-interface EntrySnapshot {
-	entry: FilesystemEntry;
-	identity: { dev: number; ino: number; mode: number };
-}
-
 class UnsupportedEntryError extends Error {}
 
 /** Reads one regular file or symlink without following it, rejecting unstable or unsupported entries. */
-async function snapshotEntry(file: string): Promise<EntrySnapshot | null> {
+async function snapshotEntry(file: string): Promise<FilesystemEntry | null> {
 	let initial;
 	try {
 		initial = await fs.lstat(file);
@@ -921,13 +916,12 @@ async function snapshotEntry(file: string): Promise<EntrySnapshot | null> {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 		throw error;
 	}
-	const identity = { dev: initial.dev, ino: initial.ino, mode: initial.mode };
 	if (initial.isSymbolicLink()) {
 		const target = await fs.readlink(file);
 		const final = await fs.lstat(file).catch(() => null);
 		if (!final || !sameIdentity(initial, final))
 			throw new Error(`Filesystem entry changed while reading ${JSON.stringify(file)}.`);
-		return { entry: { type: "symlink", target }, identity };
+		return { type: "symlink", target };
 	}
 	if (!initial.isFile()) throw new UnsupportedEntryError(`Unsupported filesystem entry at ${JSON.stringify(file)}.`);
 
@@ -945,7 +939,7 @@ async function snapshotEntry(file: string): Promise<EntrySnapshot | null> {
 		const leaf = await fs.lstat(file).catch(() => null);
 		if (!leaf || !sameIdentity(after, leaf))
 			throw new Error(`Filesystem entry changed while reading ${JSON.stringify(file)}.`);
-		return { entry: { type: "file", contents, mode: after.mode & 0o7777 }, identity };
+		return { type: "file", contents, mode: after.mode & 0o7777 };
 	} finally {
 		await handle?.close().catch(() => {});
 	}
