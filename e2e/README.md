@@ -1,24 +1,134 @@
-# End-to-end comparisons
+# Session comparisons
 
-Every attempt runs from a copy of one recorded Git working tree, including its dirty and untracked files. The
-summary records Pi's exit status and stderr, structured tool outcomes, separate token/cache/cost categories,
-model and tool time, the final tracked and untracked changes, and the independent check result. A run counts as
-verified only when Pi exits successfully within `--budget-seconds` and `--check` passes.
+This harness compares how Pi completes coding tasks with different editing interfaces. It records the whole
+session, checks the result independently, and keeps evidence for human review. The checked-in suite is a small,
+dependency-free pilot; it does not establish performance on large repositories or public benchmarks.
 
-```sh
-bun e2e/run.ts --repo /path/to/fixture --task "Rename the API" \
-  --setup code --check "bun test" --runs 3 --budget-seconds 600
-```
-
-For a revision comparison, give both extension working trees. Each is copied to a separate frozen path before
-the first attempt. Their order alternates, while every attempt starts from the same fixture state.
+## Plan without calling a model
 
 ```sh
-bun e2e/run.ts --repo /path/to/fixture --task "Rename the API" \
-  --setup code --check "bun test" --runs 3 \
-  --baseline-extension /path/to/baseline --candidate-extension /path/to/candidate
+bun e2e/suite.ts
+bun e2e/suite.ts --tasks status-options,shared-validation --documentation shipped,minimal
 ```
 
-Raw Pi events and stderr are written under `e2e/results/`. `summary.jsonl` contains one `run` record per attempt
-and an `experiment` record with completion rate, total cost per verified completion, and mean end-to-end latency
-for each revision. Cost is Pi's estimate for the configured model rather than an invoice.
+The suite prints the tasks and conditions and exits. **Only `--execute` starts model sessions.** Tests use a fake
+Pi executable and never call a model. The lower-level `run.ts` command retains its existing behaviour: invoking
+it starts Pi immediately.
+
+## Tasks and verification
+
+[tasks.ts](tasks.ts) contains versioned starting files, outcome-only prompts, reference solutions, and evaluators.
+Only starting files and a TypeScript configuration are copied into the agent's fixture. Reference solutions and
+evaluators stay outside it. These are evaluation boundaries, not a security sandbox against a malicious agent.
+
+| Task                   | Category               | Independent checks                                                                                  |
+| ---------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- |
+| `extract-quote`        | Method extraction      | Pricing, rounding, validation order, delegated callers, and history state                           |
+| `empty-average`        | Small edit             | Empty/non-empty behaviour and public return type                                                    |
+| `status-options`       | API migration          | Runtime equivalence, AST check for remaining numeric arguments, unchanged dynamic calls and strings |
+| `concurrency-map`      | Implementation         | Ordered results, actual concurrency, limit validation, error identity and stopping new work         |
+| `shared-validation`    | Extraction             | Shared module use, removed duplicate normalisation, state and error ordering                        |
+| `request-cancellation` | Multi-file propagation | Signal identity through both requests, old callers and failure propagation                          |
+
+Every task also runs TypeScript checking using this checkout's installed compiler. Preparation creates a local
+Git repository from the embedded revision; it needs no downloads. Content fingerprints identify the exact input.
+The regression tests require each starting fixture to fail its evaluator and its reference solution to pass.
+These compact tasks are a starting point; add larger repository tasks before interpreting small differences as
+general performance gains.
+
+## Conditions
+
+| `--setups` value | Enabled tools                                                                             |
+| ---------------- | ----------------------------------------------------------------------------------------- |
+| `baseline`       | `read,bash,edit,write` (stock coding tools)                                               |
+| `code`           | Stock tools plus `code`; measures optional adoption                                       |
+| `replace`        | `read,bash,code`; replaces dedicated editing tools, retaining exploration/test facilities |
+| `read-code`      | `read,code`; a separately constrained workflow                                            |
+
+Shell writes remain possible in `baseline`, `code`, and `replace`. The report exposes shell commands for review;
+it does not assume every shell call writes files or that all successful changes used shorthand.
+
+`--documentation shipped|minimal` accepts a comma-separated list. `shipped` uses the normal tool description,
+snippet and workflow guidelines. `minimal` wraps registration with an API-only description and no workflow
+guidelines; it preserves implementation and parameter schema. It does not modify the shipped extension.
+
+`--skills none|shorthand` also accepts a list. `shorthand` explicitly makes the existing skill available; it does
+not force the model to read it. The baseline always appears once, without shorthand documentation or skill.
+Other conditions are the product of setup, revision, documentation, and skill choices. Their order rotates on
+each repetition. With two conditions this alternates the order; a full cycle requires as many repetitions as
+conditions. Keep the initial matrix small.
+
+Every attempt has a fresh agent directory. Authentication and custom model definitions are copied from the
+configured Pi agent directory, with private permissions, then removed at the end. Ambient settings, system
+prompt files, context files, skills, templates, and extensions are excluded. Explicit extensions and skills are
+the only exceptions. Environment variables still supply credentials and provider configuration. Reasoning is
+explicitly `high` by default. `--offline` disables Pi startup network operations, not model requests.
+
+## Execute deliberately
+
+For example, after deciding to spend on model calls:
+
+```sh
+bun e2e/suite.ts --execute --tasks status-options,shared-validation \
+  --setups baseline,replace,code --runs 3 --budget-seconds 600 --budget-dollars 2
+```
+
+For your own prepared repository:
+
+```sh
+bun e2e/run.ts --repo /path/to/fixture --task "Implement the requested feature" \
+  --setups baseline,replace,code --check "bun test" --runs 3
+```
+
+`--setup` remains available for a single setup. The fixture is recorded once per experiment, including dirty,
+untracked and ignored files; every attempt starts from a copy. Fingerprints cover Git-visible files. A URL is
+cloned once and a JavaScript package is prepared with `bun install`; use a prepared local repository to pin its
+dependencies and revision precisely.
+
+For extension revision comparisons, add `--baseline-extension <path>` and `--candidate-extension <path>`.
+Extension source is copied to frozen paths before attempts begin. Installed dependencies are symlinked, so do
+not update them during an experiment. Model, reasoning, prompt, task/category IDs, enabled tools, documentation,
+skill choice, fixture fingerprint and extension identity are recorded in summaries.
+
+## Budgets and results
+
+A result is verified only when Pi exits successfully, the independent check passes, and the time/spending
+limits are not exceeded. Without `--check`, a run cannot be verified. The time budget includes verification and
+artifact capture. `--budget-dollars` stops Pi when reported cumulative cost exceeds the limit and disqualifies
+that attempt. Usage arrives at response boundaries, so this is **not a hard billing cap**: an in-flight response
+can overshoot. Costs depend on Pi's provider/model estimates, not invoices.
+
+`--results-dir` defaults to `e2e/results/`. Each attempt produces:
+
+- Raw Pi JSONL events and stderr.
+- A second JSONL timeline with harness observation timestamps.
+- A Markdown session report with programs/commands, results, per-response cost, subsequent actions, and review notes.
+- An artifact directory containing `final.patch`, changed-file before/after contents, and `changes.json`.
+- A `run` record in `summary.jsonl`; each experiment adds aggregates by condition, including failed-attempt cost
+  in cost per verified completion. Task/category fields support later grouping across the suite.
+
+Artifacts are captured **before** evaluator execution and relative to the recorded working tree, not HEAD.
+The JSON manifest preserves binary content (base64), permissions and symlink targets, including deletions and
+untracked additions. The patch is a readable content comparison; the manifest is authoritative for modes and
+symlinks. Original fixture and extension temporary copies are removed after the experiment.
+
+To review an older log:
+
+```sh
+bun e2e/report.ts e2e/results/example.jsonl
+```
+
+Review interface mistakes separately from failed application tests: a transaction rolling back a bad application
+change is not necessarily tool misuse. Reports identify timeout/conflict/no-change observations but leave
+ambiguous failure causes and shell writes for human annotation. Inspect matched tasks and a random sample;
+tool-call counts alone are not a fluency score.
+
+## Local validation
+
+```sh
+bun test test/e2e-harness.test.ts test/e2e-suite.test.ts
+npm run check
+```
+
+These commands do not call a model. Legacy real-model results and synthetic smoke results can coexist in an old
+results directory; do not combine them blindly with new experiments. Use a fresh `--results-dir` for a study.

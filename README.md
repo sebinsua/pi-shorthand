@@ -73,6 +73,8 @@ hook runs it; `npm run format` fixes formatting.
 `npm test` runs the tests against real overlays (it needs AgentFS on macOS, bubblewrap on Linux).
 `test/linux.sh` runs them on Linux in Docker.
 
-`bun e2e/run.ts --repo <path or git URL> --task "…" --setup baseline|code|read-code --check "…"` runs Pi
-with a real model on a fresh copy of a repo and summarises what it did (time, turns, tool calls,
-tokens, whether the check passed).
+`bun e2e/suite.ts` previews the local benchmark suite without calling a model. Add `--execute` to run it.
+The [comparison harness](e2e/README.md) supports stock, optional and replacement editing tools, controlled
+documentation/skills, independent task checks, saved final changes and session reports.
+`bun e2e/run.ts --repo <path or git URL> --task "…" --setups baseline,replace,code --check "…"` runs Pi
+with a real model on fresh copies of your own repository.

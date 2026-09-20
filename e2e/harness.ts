@@ -71,10 +71,10 @@ export async function runVerification(command: string, cwd: string, budgetMs: nu
 		killGroup(child.pid, "SIGTERM");
 		forceTimer = setTimeout(() => killGroup(child.pid, "SIGKILL"), 200);
 	}, budgetMs);
-	const [exitCode, stderr] = await Promise.all([
+	const [exitCode, stderr, stdout] = await Promise.all([
 		child.exited,
 		new Response(child.stderr).text(),
-		new Response(child.stdout).arrayBuffer(),
+		new Response(child.stdout).text(),
 	]);
 	clearTimeout(timer);
 	if (forceTimer) clearTimeout(forceTimer);
@@ -85,6 +85,7 @@ export async function runVerification(command: string, cwd: string, budgetMs: nu
 		timedOut,
 		durationMs: performance.now() - startedAt,
 		stderr,
+		stdout,
 	};
 }
 
