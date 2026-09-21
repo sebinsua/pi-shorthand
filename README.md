@@ -26,4 +26,8 @@ On Linux, install bubblewrap 0.9 or later. For Debian and Ubuntu:
 sudo apt install bubblewrap
 ```
 
-Editing programs run in an isolated workspace with host files outside the repository kept read-only.
+## Technical choices
+
+pi-shorthand gives Pi a programming environment instead of a patch format. This makes multi-file and structural edits possible in one call, but does not guarantee that Pi will find it easier or more reliable than its built-in edit tool. Which works better depends on the model and the task.
+
+Programs edit an isolated snapshot, with host files outside the repository kept read-only. By default, a failure keeps completed files and rolls back files involved in failed or interrupted edits; changes are applied only if their destination files have not changed. Progress is reported while a program runs, but no run history is written to disk.
