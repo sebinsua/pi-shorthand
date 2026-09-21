@@ -1,6 +1,6 @@
 /**
  * Preloaded into every `code` program. On top of ordinary Bun and Node it adds these globals:
- * $ (Bun shell), glob, grep, sg (ast-grep) and grit (GritQL).
+ * $ (Bun shell), edit, glob, grep, sg (ast-grep) and grit (GritQL).
  *
  * sg is ast-grep's own JavaScript API plus file-backed search, rewrite and placement helpers.
  * Programs can also import "@ast-grep/napi" directly.
@@ -305,6 +305,9 @@ function replacementEdits(result: unknown, node: SgNode, file: string): Edit[] {
 	});
 }
 
+const rewriteStaleAdvice =
+	"this match predates a change to its file. For independent edits from one selection, rerun with sg.rewrite(matches, callback) to apply them together. Otherwise, select again after editing.";
+
 type Replacement = string | ((match: SgMatch) => RewriteResult);
 type RewriteArgs =
 	| [pattern: string | NapiConfig, replacement: Replacement, files?: FileScope]
@@ -337,7 +340,7 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 	}
 	// A callback can run arbitrary code, including writes: don't overwrite changes made after selection.
 	const sources = new Map<string, string | null>();
-	for (const match of matches) getMatchSnapshot(match, sources);
+	for (const match of matches) getMatchSnapshot(match, sources, rewriteStaleAdvice);
 	writeFileSync(file, matches[0].node.getRoot().root().commitEdits(edits));
 	return count;
 }
@@ -351,7 +354,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		const groups = new Map<string, SgMatch[]>();
 		const sources = new Map<string, string | null>();
 		for (const match of (Array.isArray(target) ? target : [target]) as SgMatch[]) {
-			const saved = getMatchSnapshot(match, sources);
+			const saved = getMatchSnapshot(match, sources, rewriteStaleAdvice);
 			if (!match.vars || typeof match.line !== "number")
 				throw new Error("sg.rewrite expects matches from sg.one or sg.find");
 			const file = explicitPath(match.file);
@@ -363,7 +366,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		let count = 0;
 		for (const [file, matches] of groups) {
 			const currentSources = new Map<string, string | null>();
-			for (const match of matches) getMatchSnapshot(match, currentSources);
+			for (const match of matches) getMatchSnapshot(match, currentSources, rewriteStaleAdvice);
 			count += applyRewrites(matches, replacement, file);
 		}
 		return count;
@@ -468,8 +471,40 @@ function grit(pattern: string, paths: FileScope = ".", options: { lang?: string;
 	return files;
 }
 
+function normalizeEditLineEndings(text: string): string {
+	return text.replace(/\r\n?/g, "\n");
+}
+
+/** Replace exactly one literal occurrence, tolerating line endings. Synchronous; await is safe. */
+function editText({ path, oldText, newText }: { path: string; oldText: string; newText: string }): void {
+	if (typeof path !== "string" || typeof oldText !== "string" || typeof newText !== "string")
+		throw new Error("edit expects { path, oldText, newText } strings");
+	if (!oldText) throw new Error("edit: oldText must not be empty; use Bun.write to create a file");
+	const source = readFileSync(path, "utf8");
+	const searchable = normalizeEditLineEndings(source);
+	const needle = normalizeEditLineEndings(oldText);
+	const start = searchable.indexOf(needle);
+	if (start === -1)
+		throw new Error(`edit ${JSON.stringify(path)}: oldText not found; read the file and use its exact text`);
+	if (searchable.indexOf(needle, start + 1) !== -1)
+		throw new Error(`edit ${JSON.stringify(path)}: oldText matches more than once; include more surrounding text`);
+	// Translate normalized offsets back so untouched bytes (including BOMs and mixed endings) survive.
+	const originalOffset = (offset: number) => {
+		let original = 0;
+		for (let normalized = 0; normalized < offset; normalized++, original++) {
+			if (source[original] === "\r" && source[original + 1] === "\n") original++;
+		}
+		return original;
+	};
+	writeFileSync(
+		path,
+		source.slice(0, originalOffset(start)) + newText + source.slice(originalOffset(start + needle.length)),
+	);
+}
+
 const globals = {
 	$,
+	edit: (...args: Parameters<typeof editText>) => logged("edit", args, () => editText(...args)),
 	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
 	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
 	sg: {

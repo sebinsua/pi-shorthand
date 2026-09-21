@@ -1,7 +1,7 @@
 {
 	"name": "pi-shorthand",
 	"version": "0.2.0",
-	"description": "Pi tool for token-efficient writes: the model makes a whole change with one isolated Bun program.",
+	"description": "Pi tool for editing repositories with Bun programs, text edits and structural transformations.",
 	"keywords": [
 		"ast-grep",
 		"bun",

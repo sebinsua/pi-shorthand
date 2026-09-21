@@ -180,6 +180,58 @@ const METADATA_PROGRAM = `
 `;
 
 describe.skipIf(!hasOverlay)("runner", () => {
+	describe("literal text edits", () => {
+		test("matches LF text in a CRLF file while preserving the BOM and untouched mixed endings", async () => {
+			const repo = await makeRepo({ "config.txt": "\uFEFFheader\r\none\r\ntwo\r\ntail\n" });
+			const result = await run(repo, `edit({ path: "config.txt", oldText: "one\\ntwo", newText: "three\\nfour" });`);
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "config.txt")).bytes()).toEqual(
+				new TextEncoder().encode("\uFEFFheader\r\nthree\nfour\r\ntail\n"),
+			);
+		});
+
+		test("composes edits with literal replacement text and preserves surrounding bytes", async () => {
+			const repo = await makeRepo({ "config.txt": "😀\r\ntimeoutMs: 1000\r\nkeep\r\n" });
+			const result = await run(
+				repo,
+				`
+				edit({ path: "config.txt", oldText: "timeoutMs: 1000", newText: "timeoutMs: 3000" });
+				await edit({ path: "config.txt", oldText: "timeoutMs: 3000", newText: "$& $1 $$" });
+				edit({ path: "config.txt", oldText: "keep", newText: "" });
+			`,
+			);
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "config.txt")).text()).toBe("😀\r\n$& $1 $$\r\n\r\n");
+		});
+
+		for (const [source, oldText, message] of [
+			["original", "absent", "oldText not found"],
+			["repeat repeat", "repeat", "matches more than once"],
+			["aaa", "aa", "matches more than once"],
+			["a\r\nb a\nb", "a\nb", "matches more than once"],
+			["original", "", "oldText must not be empty"],
+		]) {
+			test(`rejects ${JSON.stringify(oldText)} in ${JSON.stringify(source)} without writing`, async () => {
+				const repo = await makeRepo({ "config.txt": source });
+				const result = await run(
+					repo,
+					`
+					let rejected = false;
+					try { edit(${JSON.stringify({ path: "config.txt", oldText, newText: "changed" })}); }
+					catch (error) {
+						if (!String(error).includes(${JSON.stringify(message)})) throw error;
+						rejected = true;
+					}
+					if (!rejected) throw new Error("Expected rejection");
+					if (await Bun.file("config.txt").text() !== ${JSON.stringify(source)}) throw new Error("File changed");
+				`,
+				);
+				expect(result.exitCode).toBe(0);
+				expect(result.applied).toEqual([]);
+			});
+		}
+	});
+
 	describe("transaction application", () => {
 		test("applies a successful program's changes and reports them", async () => {
 			const repo = await makeRepo(FILES);
@@ -1367,6 +1419,67 @@ describe.skipIf(!hasOverlay)("runner", () => {
 });
 
 describe.skipIf(!hasOverlay)("automatic formatting", () => {
+	for (const [writer, program] of [
+		["Bun", 'await Bun.write("a.ts", "newApi();\\nadded();\\n");'],
+		["Node", '(await import("node:fs")).writeFileSync("a.ts", "newApi();\\nadded();\\n");'],
+		["edit", 'edit({ path: "a.ts", oldText: "oldApi();", newText: "newApi();\\nadded();" });'],
+		["ast-grep", 'sg.rewrite("oldApi();", "newApi();\\nadded();", "a.ts");'],
+		["Grit", 'grit("`oldApi()` => `newApi()`", "a.ts");'],
+	]) {
+		test(`shared text preservation covers ${writer} writes without a formatter`, async () => {
+			const repo = await makeRepo({ "a.ts": "\uFEFFoldApi();\r\n" });
+			const result = await run(repo, program, {}, { PI_SHORTHAND_FORMAT: "0" });
+			expect(result.exitCode).toBe(0);
+			const expected = writer === "Grit" ? "\uFEFFnewApi();\r\n" : "\uFEFFnewApi();\r\nadded();\r\n";
+			expect(await Bun.file(path.join(repo, "a.ts")).bytes()).toEqual(new TextEncoder().encode(expected));
+		});
+	}
+
+	test("shared text preservation feeds formatters, which can set the final convention", async () => {
+		const repo = await makeRepo({
+			"a.ts": "\uFEFFold();\r\n",
+			"package.json": '{"scripts":{"format":"oxfmt"}}',
+			".gitignore": "node_modules/\n",
+		});
+		await Bun.write(
+			path.join(repo, "node_modules/.bin/oxfmt"),
+			`#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+if (readFileSync("a.ts", "utf8") !== "\\uFEFFnew();\\r\\n") throw new Error("Not preserved before formatting");
+writeFileSync("a.ts", "new();\\n");
+`,
+		);
+		await chmod(path.join(repo, "node_modules/.bin/oxfmt"), 0o755);
+		const result = await run(repo, 'await Bun.write("a.ts", "new();\\n");');
+		expect(result.exitCode).toBe(0);
+		expect(result.warnings).toEqual([]);
+		expect(await Bun.file(path.join(repo, "a.ts")).bytes()).toEqual(new TextEncoder().encode("new();\n"));
+	});
+
+	test("shared text preservation can be disabled for deliberate conversions", async () => {
+		const repo = await makeRepo({ "a.txt": "\uFEFFold\r\n" });
+		const result = await run(repo, 'await Bun.write("a.txt", "new\\n");', {}, { PI_SHORTHAND_PRESERVE_TEXT: "0" });
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.txt")).bytes()).toEqual(new TextEncoder().encode("new\n"));
+	});
+
+	test("shared text preservation excludes binary and new files and removes format-only changes", async () => {
+		const repo = await makeRepo({ "a.txt": "\uFEFFsame\r\n", "binary.dat": "old\u0000\r\n" });
+		const result = await run(
+			repo,
+			`
+			await Bun.write("a.txt", "same\\n");
+			await Bun.write("binary.dat", new Uint8Array([255, 0, 10]));
+			await Bun.write("new.txt", "new\\n");
+		`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.applied).toEqual(["binary.dat", "new.txt"]);
+		expect(await Bun.file(path.join(repo, "a.txt")).bytes()).toEqual(new TextEncoder().encode("\uFEFFsame\r\n"));
+		expect(await Bun.file(path.join(repo, "binary.dat")).bytes()).toEqual(new Uint8Array([255, 0, 10]));
+		expect(await Bun.file(path.join(repo, "new.txt")).bytes()).toEqual(new TextEncoder().encode("new\n"));
+	});
+
 	for (const timeout of [false, true])
 		test(`retains the pre-format candidate after formatter ${timeout ? "timeout" : "failure"} with partial writes`, async () => {
 			const repo = await makeRepo({
@@ -1730,6 +1843,10 @@ try { sg.rewrite([a, b], "next($A)"); } catch(e) { console.log(e.message); }`,
 		expect(result.output).toContain("overlapping edits");
 		expect(result.output).toContain("omit the file scope");
 		expect(result.output).toContain("Stale match");
+		expect(result.output).toContain(
+			"For independent edits from one selection, rerun with sg.rewrite(matches, callback)",
+		);
+		expect(result.output).toContain("Otherwise, select again after editing");
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("old(1);\n");
 		expect(await Bun.file(path.join(repo, "b.ts")).text()).toBe("changed();\n");
 	});

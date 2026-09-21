@@ -2,9 +2,8 @@
 
 ![A code call in Pi: the verdict, then the diff it applied, then the program's output](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2)
 
-A [Pi](https://github.com/earendil-works/pi) tool for token-efficient writes. The model writes a whole
-change as one small Bun program, in shorthand, instead of calling `read`, `edit` and `bash` over
-and over: fewer tokens, and fewer round trips.
+A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with Bun programs.
+The model can combine ordinary JavaScript, text edits and structural transformations in one call.
 
 The program sees your repo as normal, but its writes are held back. By default, they're applied only
 if the program succeeds and destination files are unchanged, and the model gets the diff.

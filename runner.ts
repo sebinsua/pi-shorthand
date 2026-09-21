@@ -25,6 +25,7 @@ import { appendRunHistory, historyEnabled, RUN_HISTORY_FILE } from "./history.ts
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits } from "./program-lint.ts";
+import { preserveTextFormat } from "./text-format.ts";
 
 export interface RunOptions {
 	runId: string; // identifies this run's events in the log
@@ -142,6 +143,17 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 		try {
 			program = await runProgram({ ...options, cwd }, abort, overlay, repo, tempDir);
 			changes = await findChanges(overlay);
+			const preserved: { file: string; base64: string }[] = [];
+			if (process.env.PI_SHORTHAND_PRESERVE_TEXT !== "0") {
+				for (const change of changes) {
+					if (change.before?.type !== "file" || change.after?.type !== "file") continue;
+					const contents = preserveTextFormat(change.before.contents, change.after.contents);
+					if (contents === change.after.contents) continue;
+					change.after = { ...change.after, contents };
+					preserved.push({ file: change.file, base64: Buffer.from(contents).toString("base64") });
+				}
+				changes = changes.filter((change) => !entriesEqual(change.before, change.after));
+			}
 			const files = changes.filter((change) => change.after?.type === "file").map((change) => change.file);
 			if (program.exitCode === 0 && !abort.aborted && files.length && process.env.PI_SHORTHAND_FORMAT !== "0") {
 				try {
@@ -152,7 +164,9 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 							cwd: repo,
 							timeoutMs: 10_000,
 							testHooks: undefined,
-							program: `import { formatChanged } from ${JSON.stringify(module)}; console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process.cwd())));`,
+							program: `import { formatChanged } from ${JSON.stringify(module)};
+for (const { file, base64 } of ${JSON.stringify(preserved)}) await Bun.write(file, Buffer.from(base64, "base64"));
+console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process.cwd())));`,
 						},
 						abort,
 						overlay,

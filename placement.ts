@@ -62,7 +62,11 @@ export function file(filename: string): FileTarget {
 	);
 }
 
-export function getMatchSnapshot(match: Match, sources = new Map<string, string | null>()): Snapshot {
+export function getMatchSnapshot(
+	match: Match,
+	sources = new Map<string, string | null>(),
+	staleAdvice = "match the file again after editing it",
+): Snapshot {
 	const saved = snapshots.get(match);
 	if (!saved) throw new Error("Expected a file-backed match from sg.find, sg.one, or sg.file");
 	if (
@@ -74,7 +78,7 @@ export function getMatchSnapshot(match: Match, sources = new Map<string, string 
 		sources.set(saved.file, existsSync(saved.file) ? readFileSync(saved.file, "utf8") : null);
 	const source = sources.get(saved.file);
 	if ((source !== null) !== saved.existed || (saved.existed && source !== saved.source)) {
-		throw new Error(`Stale match in ${match.file}; match the file again after editing it`);
+		throw new Error(`Stale match in ${match.file}; ${staleAdvice}`);
 	}
 	return saved;
 }

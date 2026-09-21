@@ -3,6 +3,7 @@ import type { ShorthandGlobals } from "./prelude.ts";
 
 declare global {
 	const $: ShorthandGlobals["$"];
+	const edit: ShorthandGlobals["edit"];
 	const glob: ShorthandGlobals["glob"];
 	const grep: ShorthandGlobals["grep"];
 	const sg: ShorthandGlobals["sg"];

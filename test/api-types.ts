@@ -2,6 +2,9 @@ import type { ShorthandGlobals } from "../api.d.ts";
 
 // Checked by npm run check, never executed. These exercise the public program types.
 export function supportedProgram() {
+	edit({ path: "src/config.ts", oldText: "timeoutMs: 1000", newText: "timeoutMs: 3000" });
+	// @ts-expect-error A replacement requires newText.
+	edit({ path: "src/config.ts", oldText: "timeoutMs: 1000" });
 	const api: ShorthandGlobals["sg"] = sg;
 	const target = api.file("src/app.ts");
 	sg.find("run($A)", target);

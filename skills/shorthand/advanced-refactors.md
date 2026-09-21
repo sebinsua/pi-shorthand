@@ -1,0 +1,167 @@
+# Advanced refactors
+
+Use this guide for extraction, complex structural rewrites, syntax placement or other languages.
+The everyday file and replacement operations are in [SKILL.md](SKILL.md).
+
+## Extract existing source
+
+Select and reuse the implementation rather than copying it into the program or searching for braces.
+This extracts a state-independent method, leaves a delegate, and updates its direct caller:
+
+```ts
+const pattern = { rule: { kind: "method_definition", has: { field: "name", regex: "^format$" } } };
+const method = sg.one(pattern, "writer.ts");
+await Bun.write(
+	"table.ts",
+	'import type { Cell, FormatOptions } from "./types";\n' +
+		method.text.replace(/^format\b/, "export function renderTable"),
+);
+sg.rewrite(method, (m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"));
+await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + (await Bun.file("writer.ts").text()));
+sg.rewrite('import { TableWriter } from "./writer"', 'import { renderTable } from "./table"', "export.ts");
+sg.rewrite("new TableWriter().format($$$ARGS)", "renderTable($$$ARGS)", "export.ts");
+```
+
+Preserve imports and dependencies; moving source does not remove its dependence on instance state.
+`field("body")` selects the actual body even when defaults or comments contain braces.
+
+## Structural matching details
+
+Patterns must parse as one syntax node. Use a rule object to select a class method, as above,
+rather than a standalone method fragment. `$X` captures one node, `$$$X` a sequence, and `$_`
+matches without capturing. Capture text is available as `m.X` or `m.vars.X`.
+
+Callbacks are synchronous. They can return an array of native edits, or `null`/`undefined`/`false`
+to skip. `sg.rewrite` counts matches producing edits, not individual edits. Overlaps are rejected;
+an empty selection returns zero. Syntax fields and node kinds depend on the language.
+
+`sg.find` and `sg.rewrite` handle JS, TS, TSX, HTML and CSS. Scopes accept files, directories,
+globs or arrays. Paths may be relative or absolute within the editing workspace; results use
+repository-relative paths. String scopes use Git's tracked and non-ignored files. An explicit
+`sg.file()` target can also select an ignored JS/TS file; only files Git sees are applied afterward.
+
+## Inserting, moving and removing syntax
+
+For JS/TS, use matches from `sg.find` or `sg.one(pattern, files)`, which requires exactly one match.
+`sg.file(path)` selects a JS/TS file root for placement or for scoping `find`, `one` and `rewrite`.
+Pass paths or file targets individually or in mixed arrays. Missing targets are valid insertion destinations,
+but cannot be searched.
+
+```ts
+sg.insert("initialize();", { before: sg.one("run();", "src/app.ts") });
+sg.move(sg.one("function helper() { $$$BODY }", "src/old.ts"), {
+	endOf: sg.file("src/new.ts"),
+});
+sg.remove(sg.find("obsolete();", "src")); // single match or array; validates the batch before writing
+```
+
+Choose one destination: `before`/`after` a whole statement or declaration (`"run();"`), or
+`startOf`/`endOf` a file root or `statement_block`. For a function, select its body explicitly.
+Argument lists and class bodies aren't supported.
+
+To copy, use `sg.insert(source.text, destination)`. `sg.move(source, destination, transform?)`
+accepts an optional `(text) => string` returning non-empty replacement text.
+
+**Rematch placement targets after each edit**; use array removal for matches from one search. Adjacent comments stay in
+place, and interior whitespace is preserved. Imports and bindings aren't repaired. If placement
+rejects joined statement boundaries, add explicit semicolons.
+
+## Renaming a name
+
+A bare name as the pattern (`sg.rewrite("oldName", "newName")`) only matches plain identifiers, not
+property names (`obj.oldName`, `{ oldName: 1 }`, interface fields). To rename a name everywhere it
+appears in code (but not in strings), match it by kind:
+
+```ts
+const anyName = [
+	"identifier",
+	"property_identifier",
+	"shorthand_property_identifier",
+	"shorthand_property_identifier_pattern",
+	"type_identifier",
+];
+sg.rewrite({ rule: { regex: "^oldName$", any: anyName.map((kind) => ({ kind })) } }, "newName", "src");
+```
+
+## Rule objects
+
+When a pattern alone can't say it, pass a rule instead:
+
+```ts
+sg.find({ rule: { kind: "import_statement" } }, "src");
+sg.find({ rule: { pattern: "console.log($$$A)", inside: { kind: "function_declaration", stopBy: "end" } } }, "src");
+sg.find(
+	{ rule: { pattern: "console.log($$$A)", not: { inside: { kind: "function_declaration", stopBy: "end" } } } },
+	"src",
+);
+```
+
+`kind` names come from tree-sitter (`function_declaration`, `call_expression`, `import_statement`,
+…). `stopBy: "end"` searches all ancestors, not just the parent.
+
+## Native ast-grep API
+
+For transformations outside file-backed rewrites, ast-grep's JavaScript API is exposed on `sg`:
+
+```ts
+const root = sg.parse(sg.Lang.TypeScript, sourceText).root();
+const edits = root.findAll("oldApi($$$ARGS)").map((node) => node.replace("newApi()"));
+await Bun.write("src/app.ts", root.commitEdits(edits));
+```
+
+`import { parse, Lang } from "@ast-grep/napi"` also works. Native `replace` constructs edits;
+`commitEdits` returns updated source text. Neither writes files by itself.
+The bundled TypeScript 7 package does not expose the legacy compiler API (`createSourceFile`,
+`ScriptTarget`); changing import syntax won't make it available.
+
+## GritQL and other languages
+
+Code goes in backticks. `$x` captures a node, `=>` rewrites, and `where` adds conditions.
+
+```ts
+grit("`oldApi($args)`", "src", { dryRun: true }); // find: [{ file, matches }]
+grit("`console.log($m)` => `logger.info($m)`", "src"); // rewrite in place
+grit("`$f($x)` where { $f <: `oldApi` }", "src", { dryRun: true }); // conditions
+grit("`print($x)` => `log($x)`", "src", { lang: "python" }); // other languages
+```
+
+It defaults to JavaScript/TypeScript. Other languages include python, go, rust, java, ruby, css,
+json and yaml.
+
+Paths accept files, directories, globs, `sg.file()` targets or mixed arrays.
+
+Worth knowing:
+
+- Each `grit` call takes about a second to start, so pass a longer `timeout` to the code tool when
+  a program calls it.
+- A rewrite can drop a statement's trailing semicolon. Check the diff, or use `sg.rewrite` for
+  simple JS/TS rewrites.
+
+The bundled ast-grep CLI also supports other languages:
+
+```ts
+await $`ast-grep run -p 'print($A)' -r 'log($A)' -l python -U src`;
+```
+
+## File discovery and commands
+
+```ts
+glob("src/**/*.ts"); // sorted paths Git sees
+grep("oldApi(", "src"); // [{ file, line, text }]; accepts a RegExp too
+const files = await $`git ls-files`.text();
+```
+
+`glob`, `grep`, `sg` and `grit` are synchronous. Bun's `$` needs `await`; interpolated values are
+quoted as single arguments, and arrays become multiple arguments. These globals and bundled CLIs
+belong to `code`, not necessarily ordinary shell calls. `node:fs` and ordinary Bun APIs also work.
+
+## Execution options
+
+Programs run in an isolated repository workspace. Use relative paths: the live checkout's absolute
+path is inaccessible on macOS. On Linux, host paths outside the repository are read-only and
+`$TMPDIR` is private to the run. Writes to `.git` are blocked.
+
+The default timeout is two seconds; request more for longer transformations.
+By default a failed program applies nothing. `rollback: "file"` can retain closed files after a
+timeout if writer inspection succeeds; exceptions, crashes or inspection failures apply nothing.
+Use that mode only when each retained file stands on its own.

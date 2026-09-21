@@ -18,25 +18,16 @@ import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 // Runs typically take well under a second. Longer transformations can request more time.
 const DEFAULT_TIMEOUT_SECONDS = 2;
 
-const DESCRIPTION = `Make a repository change with one TypeScript program, run by Bun as a transaction: its writes are applied only if it exits successfully, and you get the diff. Keep the program focused on editing. Run tests, type-checks, builds and other verification separately afterward with the shell tool. File-backed helpers discover targets themselves; omit their file scope to search the working directory.
+const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
 
-Use it when a change takes several deterministic editing steps (reads, searches, multi-file edits, structural rewrites) and you already know what to do with each intermediate result. If seeing an intermediate result could change your plan, look first with a normal tool call.
+Common operations:
+- edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
+- await Bun.file(path).text(); await Bun.write(path, text)
+- sg.rewrite(pattern, replacement, files?) discovers and rewrites matching code; omit files for the working directory. $X captures one node; $$$X captures a sequence.
+- sg.one(pattern, files?) selects exactly one match; sg.find returns an array. sg.rewrite also accepts a selected match or array without a file scope.
+- A rewrite callback receives a match and returns text, a native node.replace(text) edit, or null to skip. Return native edits to apply them. Pass selected arrays together for independent edits; select again after changing their file.
 
-The program runs in an isolated copy of the working directory. Use relative paths for repository files. On Linux, host paths outside the repository are read-only and $TMPDIR is private to the run; on macOS the real checkout's absolute path is intentionally inaccessible. Top-level await works, and so do ordinary Bun and Node APIs. These globals are synchronous, and see the files git sees (not node_modules or ignored files):
-- glob(pattern, dir?) → string[]
-- grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
-- sg.find(pattern, files?) → {file, line, text, vars, node}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files accepts paths, directories, globs, sg.file() targets, or mixed arrays (JS/TS).
-- sg.rewrite(pattern, templateOrFunction, files = ".") → number of matches producing edits. Handles file discovery, parsing and writing; no glob or per-file loop is needed. A template can use $X and $$$X; a function gets the match (capture text: m.X; captured syntax node: m.node.getMatch("X")) and returns text to replace the whole match, a native node.replace(text) edit (or array of edits) to change nodes within it, or null/undefined/false to skip. Callbacks are synchronous. sg.rewrite(matchOrMatches, templateOrFunction) also accepts existing sg.one/sg.find selections without a file scope; select again after changing their files. Native node.replace() only constructs an edit; return it from the callback to apply it. An array still counts as one changed match. Example: sg.rewrite("store.save($KEY, $VALUE)", m => /^(true|false)$/.test(m.VALUE) ? m.node.getMatch("VALUE").replace("{ durable: " + m.VALUE + " }") : null). Use getMatch("NAME") for captures and field("body") for syntax fields; field names depend on the language and node.
-- sg.one(pattern, files?) requires exactly one match. sg.file(path) selects an explicit JS/TS file for search, rewrite or placement, including ignored files. Missing files work as insertion destinations; searching them is an error.
-- sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. JS/TS statements/declarations only; containers are file roots or matched statement blocks. Rematch after editing a file. move's optional function transforms its text; insert(match.text, destination) copies.
-- sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
-- grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[]. paths accepts paths, globs, sg.file() targets or mixed arrays, e.g. grit("\`a($x)\` => \`b($x)\`", "src")
-Bun's shell $ needs await: const files = await $\`git ls-files\`.text(). Inside code, you can also run the ast-grep, grit and git CLIs with it; don't assume bundled CLIs exist in ordinary shell tool calls. Read existing source at runtime and reuse text or captures rather than embedding unchanged bodies or whole expected files in the program. For how to write these programs, see the shorthand skill.
-
-Throw or exit non-zero to fail. rollback decides what a failure undoes:
-- "all" (default): nothing is applied; you get the error and the candidate diff.
-- "file": on timeout, files not open for writing are applied if writer inspection succeeds. If inspection fails, or on another failure, nothing is applied.
-The default timeout is 2 seconds; pass a longer timeout for longer transformations. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Changed files and the diff are reported automatically; console output is optional.`;
+See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs.`;
 
 export default function (pi: ExtensionAPI) {
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
@@ -51,10 +42,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Code",
 		description: DESCRIPTION,
 		promptSnippet: "Make a change with one transactional Bun editing program; run verification separately afterward",
-		promptGuidelines: [
-			"Use code when several related reads, searches or edits can be done without looking at intermediate results: put that transformation logic in one program. Run application verification afterward with the shell tool.",
-			"Don't use code to explore when you need to see results before deciding what to do.",
-		],
+
 		parameters: Type.Object({
 			title: Type.String({ description: "A few words describing the change, shown to the user" }),
 			program: Type.String({ description: "TypeScript program run with Bun (top-level await allowed)" }),

@@ -1,57 +1,92 @@
 ---
 name: shorthand
-description: How to write repository edits as a code program, with Bun's file APIs and ast-grep or GritQL rewrites. Use when a code program edits several files, extracts existing source, or rewrites code by its structure.
+description: Edit repository files with Bun programs using plain text edits or structural matching. Read the advanced guide for extraction and complex refactors.
 ---
 
 # Shorthand
 
-A `code` program is a transaction: Bun runs it against the repository, and its writes are applied only
-if it exits successfully. The tool reports changed files and their diff; console output is optional.
-Keep the program focused on editing. Run tests, type-checks, builds and other verification separately
-afterward with the shell tool.
+Use text replacement for known source; use structural matching when it saves enumerating
+occurrences or preserves varying syntax. Ordinary JavaScript strings, loops and Bun APIs work.
+Run tests, type-checks and builds separately with the shell tool after editing.
 
-Read existing source at runtime and reuse its text or captures. For extraction, select syntax rather
-than searching for braces or exact source layouts. This moves a state-independent `TableWriter.format`
-implementation into `renderTable`, keeps the method as a delegate, and updates its direct caller:
+## Replace known text
 
 ```ts
-const pattern = { rule: { kind: "method_definition", has: { field: "name", regex: "^format$" } } };
-const method = sg.one(pattern, "writer.ts");
-await Bun.write(
-	"table.ts",
-	'import type { Cell, FormatOptions } from "./types";\n' +
-		method.text.replace(/^format\b/, "export function renderTable"),
-);
-sg.rewrite(method, (m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"));
-await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + (await Bun.file("writer.ts").text()));
-sg.rewrite('import { TableWriter } from "./writer"', 'import { renderTable } from "./table"', "export.ts");
-sg.rewrite("new TableWriter().format($$$ARGS)", "renderTable($$$ARGS)", "export.ts");
+edit({ path: "src/config.ts", oldText: "timeoutMs: 1000", newText: "timeoutMs: 3000" });
 ```
 
-The declaration reuses the existing signature and body; the original method gets a new body through
-`field("body")`. Preserve the extracted code's imports and dependencies; moving text does not remove
-its dependence on instance state. New implementations still need new code.
+`edit` replaces exactly one literal occurrence, throwing if it is missing or ambiguous. Include
+surrounding text to distinguish repeated occurrences. Replacement text is literal, including `$`.
+Line-ending differences are accepted when matching.
+Calls are synchronous and can be combined in one program; later calls see earlier changes.
 
-Use `sg.rewrite` for structural replacements, including conditional ones: its callback has capture
-text (`m.X`) and syntax nodes (`m.node.getMatch("X")`). Return text to replace the match,
-node edits to preserve its surroundings, or `null` to skip. `node.replace()` constructs an edit;
-return it from `sg.rewrite` to apply it. Pass an existing match or match array to reuse a selection;
-select again after changing its file. Pattern-based rewrites handle discovery, parsing and writing;
-omit the file scope to search the working directory. Read the ast-grep guide
-when you need these operations; ordinary file transformations don't require every guide below.
+## Insert before or after a statement
 
-TypeScript 7.0 does not expose the legacy compiler API (`createSourceFile`, `ScriptTarget`) from
-`typescript`; changing import syntax won't fix that. Use the supplied `sg` or `grit` for structural edits.
+Validate an order immediately before saving it:
 
-The injected helpers and bundled CLIs belong to the `code` environment; don't assume they exist in
-an ordinary `bash` call.
+```ts
+const save = sg.one("await saveOrder(order);", "checkout.ts");
+sg.insert("validateOrder(order);", { before: save });
+```
 
-- [writing.md](writing.md): the everyday part. The environment, Bun's file and shell APIs, and the
-  shape of a program that transforms many files.
-- [ast-grep.md](ast-grep.md): when a text replace isn't safe. Structural search, rewrite and placement, rule
-  objects, and ast-grep's own API.
-- [gritql.md](gritql.md): GritQL rewrites, including other languages.
+Use `{ after: save }` to insert after it instead. `sg.one(pattern, files?)` requires exactly one
+match. Select the whole statement, including its semicolon, for before/after insertion in JS/TS.
 
-A failed program applies nothing by default; correct the edit and rerun it. `rollback: "file"` can
-retain closed files after a timeout, not after an exception or failed check. Inspect the resulting
-diff and run the relevant project checks separately to verify the completed change.
+## Replace calls while keeping their arguments
+
+Switch logging calls without reproducing their arguments:
+
+```ts
+sg.rewrite("console.log($$$ARGS)", "logger.info($$$ARGS)", "src");
+```
+
+`sg.rewrite(pattern, replacement, files?)` discovers, parses and writes matching files. Omit the
+scope for the working directory, or pass a file, directory or glob. `$X` captures one syntax node;
+`$$$X` captures a sequence. Captures can appear in the replacement text.
+
+## Change one argument and preserve the rest
+
+Migrate numeric retry limits to options objects, leaving existing options alone:
+
+```ts
+sg.rewrite("connect($URL, $RETRIES)", (m) => {
+	const retries = m.node.getMatch("RETRIES")!;
+	return retries.kind() === "number" ? retries.replace(`{ retries: ${retries.text()} }`) : null;
+});
+```
+
+A callback returns text to replace the whole match, a native edit for part of it, or `null` to skip.
+**`node.replace()` constructs an edit; return it from the callback so `sg.rewrite` applies it.**
+
+## Replace an implementation while keeping its signature
+
+Make `calculateTotal` sum its prices, preserving parameter and return types:
+
+```ts
+const fn = sg.one(
+	{ rule: { kind: "function_declaration", has: { field: "name", pattern: "calculateTotal" } } },
+	"prices.ts",
+);
+sg.rewrite(fn, (m) => m.node.field("body")!.replace("{ return prices.reduce((total, price) => total + price, 0); }"));
+```
+
+`sg.rewrite(match, "new source")` replaces the whole selected node instead. `sg.find` returns an
+array: pass it once to `sg.rewrite(matches, callback)` for independent edits. Each call writes
+immediately within the editing workspace; select again if a later edit depends on that write.
+
+## Write files or replace plain text
+
+```ts
+await Bun.write("src/defaults.ts", "export const retryLimit = 3;\n");
+const source = await Bun.file("src/config.ts").text();
+await Bun.write("src/config.ts", source.replace("timeoutMs: 1000", "timeoutMs: 3000"));
+```
+
+Use repository-relative paths. Changes apply on successful exit by default; the tool reports the
+diff, preserves existing UTF-8 BOMs and uniform line endings across write methods, then uses a
+detected project formatter. Counters and console summaries aren't required.
+
+**For extraction or more complex rewrites, read [advanced-refactors.md](advanced-refactors.md).**
+It covers reusing existing source, rule objects, moving/removing syntax, native APIs, GritQL and
+other languages. The bundled TypeScript 7 package has no legacy compiler API; use the supplied
+structural tools instead.
