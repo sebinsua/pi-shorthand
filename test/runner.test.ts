@@ -404,15 +404,19 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			expect(await Bun.file(victim).text()).toBe("original");
 		});
 
-		test("preserves a nested working directory inside the execution root", async () => {
-			const repo = await makeRepo(FILES);
-			const result = await run(repo, `await Bun.write("a.ts", "nested cwd\\n");`, {
-				cwd: path.join(repo, "src"),
-			});
+		test.each(["src", "src/deep"])(
+			"preserves a nested working directory inside the execution root: %s",
+			async (directory) => {
+				const repo = await makeRepo({ ...FILES, [`${directory}/a.ts`]: "original\n" });
+				const result = await run(repo, `await Bun.write("a.ts", "nested cwd\\n");`, {
+					cwd: path.join(repo, directory),
+				});
 
-			expect(result.applied).toEqual(["a.ts"]);
-			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("nested cwd\n");
-		});
+				expect(result.exitCode, result.output).toBe(0);
+				expect(result.applied).toEqual(["a.ts"]);
+				expect(await Bun.file(path.join(repo, directory, "a.ts")).text()).toBe("nested cwd\n");
+			},
+		);
 
 		test.skipIf(process.platform !== "darwin")(
 			"the macOS program cannot access the live checkout or runner state",

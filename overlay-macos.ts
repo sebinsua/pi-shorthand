@@ -203,7 +203,9 @@ async function serveAndMount(
 	try {
 		await onSpawn(server.pid);
 		await waitForPort(port);
-		const options = `locallocks,vers=3,tcp,port=${port},mountport=${port},soft,timeo=100,retrans=5`;
+		// AgentFS copy-up can change directory attributes. Stale NFS directory caches can make
+		// getcwd() fail in nested directories; keep file caching but revalidate directories immediately.
+		const options = `locallocks,vers=3,tcp,port=${port},mountport=${port},soft,timeo=100,retrans=5,acdirmin=0,acdirmax=0`;
 		await $`/sbin/mount_nfs -o ${options} 127.0.0.1:/ ${mount}`.quiet();
 		return server;
 	} catch (error) {
