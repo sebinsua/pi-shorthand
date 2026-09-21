@@ -34,7 +34,6 @@ for (const name of names) {
 		const program = await readFile(path.join(programs, name), "utf8");
 		await writeFile(path.join(output, name), program);
 		const run = await runWithBun({
-			runId: crypto.randomUUID(),
 			cwd: workspace,
 			program,
 			timeoutMs: 15_000,

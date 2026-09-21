@@ -159,7 +159,7 @@ belong to `code`, not necessarily ordinary shell calls. `node:fs` and ordinary B
 
 Programs run in an isolated repository workspace. Use relative paths: the live checkout's absolute
 path is inaccessible on macOS. On both platforms, host paths outside the workspace are read-only
-(including external symlink targets), apart from run-history logging. `$TMPDIR` is private to the run.
+(including external symlink targets). `$TMPDIR` is private to the run.
 Writes to `.git` are blocked.
 
 The default timeout is two seconds; request more for longer transformations.

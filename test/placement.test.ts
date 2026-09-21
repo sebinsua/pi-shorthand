@@ -282,7 +282,7 @@ test("prelude exposes exact matching and editing helpers together", () => {
 	`;
 	const result = Bun.spawnSync(["bun", "--preload", join(import.meta.dir, "../prelude.ts"), "-e", program], {
 		cwd,
-		env: { ...process.env, PI_SHORTHAND_LOG: "" },
+		env: process.env,
 	});
 	expect(result.exitCode, result.stderr.toString()).toBe(0);
 	expect(statements(path)).toEqual(["c();", "a();"]);
@@ -318,7 +318,7 @@ test("sg.file enforces the repository boundary but accepts missing and ignored d
 	`;
 	const result = Bun.spawnSync(["bun", "--preload", join(import.meta.dir, "../prelude.ts"), "-e", program], {
 		cwd,
-		env: { ...process.env, PI_SHORTHAND_LOG: "" },
+		env: process.env,
 	});
 	expect(result.exitCode, result.stderr.toString()).toBe(0);
 	expect(statements(join(cwd, "nested/new.ts"))).toEqual(["created();"]);

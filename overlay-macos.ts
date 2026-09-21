@@ -11,7 +11,6 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
-import { historyEnabled, RUN_HISTORY_FILE, RUN_HISTORY_LOCK_DIR } from "./history.ts";
 import { copyStableTree } from "./overlay-linux.ts";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
 
@@ -215,7 +214,7 @@ async function serveAndMount(
 	}
 }
 
-/** Restrict writes to the workspace, private scratch space, devices and optional run history. */
+/** Restrict writes to the workspace, private scratch space and devices. */
 export function sandboxProfile(
 	repo: string,
 	tempDir: string,
@@ -233,12 +232,6 @@ export function sandboxProfile(
 		`(allow file-write* (require-all (subpath ${JSON.stringify(mount)}) (require-not (subpath ${JSON.stringify(path.join(mount, ".git"))}))))`,
 		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
 		'(allow file-write-data (literal "/dev/null") (literal "/dev/tty"))',
-		...(historyEnabled()
-			? [
-					`(allow file-write-data (literal ${JSON.stringify(RUN_HISTORY_FILE)}))`,
-					`(allow file-write* (subpath ${JSON.stringify(RUN_HISTORY_LOCK_DIR)}))`,
-				]
-			: []),
 		`(deny file-read* (subpath ${JSON.stringify(repo)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(repo)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(tempDir)}))`,

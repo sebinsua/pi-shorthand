@@ -266,7 +266,6 @@ async function runPi(
 			...process.env,
 			PATH: [path.join(copy, "node_modules/.bin"), process.env.PATH].filter(Boolean).join(path.delimiter),
 			PI_CODING_AGENT_DIR: agentDir,
-			PI_SHORTHAND_HISTORY: "0",
 		},
 		detached: true,
 		stdin: "ignore",

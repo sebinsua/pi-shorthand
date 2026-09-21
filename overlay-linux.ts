@@ -9,7 +9,6 @@ import * as fs from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { historyEnabled, RUN_HISTORY_FILE, RUN_HISTORY_LOCK_DIR } from "./history.ts";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
 
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
@@ -24,8 +23,6 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	const cacheDir = path.join(homedir(), ".cache", "pi-shorthand");
 	const internalDir = path.join(cacheDir, "sandbox");
 	const sandboxExcludesFile = path.join(internalDir, `${path.basename(tempDir)}.exclude`);
-	const logFile = RUN_HISTORY_FILE;
-	const keepHistory = historyEnabled();
 	await copyStableTree(repo, lower);
 	const filesAtStart = await gitVisibleFiles(lower);
 	await fs.mkdir(upper);
@@ -41,8 +38,6 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 	}
 	if ((internalStats.mode & 0o077) !== 0) await fs.chmod(internalDir, 0o700);
 	await fs.writeFile(sandboxExcludesFile, "", { flag: "wx", mode: 0o600 });
-	if (keepHistory) await fs.appendFile(logFile, "", { mode: 0o600 });
-	if (keepHistory) await fs.mkdir(RUN_HISTORY_LOCK_DIR, { recursive: true, mode: 0o700 });
 
 	const wrap = (command: string[], cwd: string) => [
 		bwrap,
@@ -61,8 +56,6 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 		upper,
 		work,
 		repo,
-		...(keepHistory ? ["--bind", logFile, logFile] : []),
-		...(keepHistory ? ["--bind", RUN_HISTORY_LOCK_DIR, RUN_HISTORY_LOCK_DIR] : []),
 		"--tmpfs",
 		"/dev/shm",
 		"--chdir",

@@ -47,7 +47,7 @@ function startRunner(
 	options: Partial<RunOptions> = {},
 	environment: Record<string, string> = {},
 ) {
-	const input: RunOptions = { runId: randomUUID(), cwd: repo, program, timeoutMs: 5000, rollback: "all", ...options };
+	const input: RunOptions = { cwd: repo, program, timeoutMs: 5000, rollback: "all", ...options };
 	return Bun.spawn(["bun", RUNNER], {
 		stdin: new Response(JSON.stringify(input)),
 		stdout: "pipe",
@@ -708,7 +708,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			},
 		);
 
-		test('rollback "file" remembers a caught file error with history disabled and a nested cwd', async () => {
+		test('rollback "file" remembers a caught file error in a nested cwd', async () => {
 			const repo = await makeRepo({ ...FILES, "src/line\nbreak.ts": "original" });
 			const result = await run(
 				repo,
@@ -718,7 +718,6 @@ describe.skipIf(!hasOverlay)("runner", () => {
 				await Bun.write("a.ts", "finished");
 			`,
 				{ rollback: "file", cwd: path.join(repo, "src") },
-				{ PI_SHORTHAND_LOG: "" },
 			);
 			expect(result.exitCode, result.output).toBe(0);
 			expect(result.applied).toEqual(["a.ts"]);
@@ -1046,7 +1045,6 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			const abort = new AbortController();
 			const resultPromise = runWithBun(
 				{
-					runId: "test",
 					cwd: repo,
 					program: `await Bun.write("src/a.ts", "program a\\n");`,
 					timeoutMs: 5000,
@@ -1081,7 +1079,6 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			const abort = new AbortController();
 			const resultPromise = runWithBun(
 				{
-					runId: "test",
 					cwd: repo,
 					program: `await Bun.write("src/a.ts", "program a\\n");
 			await Bun.write("src/b.ts", "program b\\n");`,
@@ -1160,7 +1157,6 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			const abort = new AbortController();
 			const outcomePromise = runWithBun(
 				{
-					runId: "test",
 					cwd: repo,
 					program: `await Bun.write("src/a.ts", "program a\\n");
 			await Bun.write("src/api.ts", "program api\\n");
@@ -1587,6 +1583,24 @@ describe.skipIf(!hasOverlay)("runner", () => {
 	});
 
 	describe("diagnostics", () => {
+		test("streams live progress to the extension without persistent history", async () => {
+			const repo = await makeRepo(FILES);
+			const steps: string[] = [];
+			const result = await runWithBun(
+				{
+					cwd: repo,
+					program: `grep("oldApi", "src");`,
+					timeoutMs: 1000,
+					rollback: "file",
+				},
+				undefined,
+				(step) => steps.push(step),
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(steps).toContainEqual(expect.stringMatching(/^grep \(\d+ ms\)$/));
+		});
+
 		test("reports the program line an error came from, even a long one", async () => {
 			const repo = await makeRepo(FILES);
 			const long = `if (true) throw new Error("${"x".repeat(150)}");`;
@@ -1604,19 +1618,12 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			expect(result.lastStep).toMatch(/^grep \(\d+ ms\)$/);
 		});
 
-		test("a timeout still returns normally when history is disabled", async () => {
+		test("a direct runner call retains its last step in memory", async () => {
 			const repo = await makeRepo(FILES);
-			const result = await run(
-				repo,
-				`grep("oldApi", "src");\nwhile (true) {}`,
-				{ timeoutMs: 300 },
-				{
-					PI_SHORTHAND_HISTORY: "0",
-				},
-			);
+			const result = await run(repo, `grep("oldApi", "src");\nwhile (true) {}`, { timeoutMs: 300 });
 
 			expect(result.timedOut).toBe(true);
-			expect(result.lastStep).toBeUndefined();
+			expect(result.lastStep).toMatch(/^grep \(\d+ ms\)$/);
 		});
 
 		test("warns about $ commands that aren't awaited", async () => {
@@ -1827,7 +1834,7 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 				"-e",
 				`console.log(JSON.stringify(grep("needle")));`,
 			],
-			{ cwd: repo, env: { ...process.env, PI_SHORTHAND_LOG: "" } },
+			{ cwd: repo, env: process.env },
 		);
 
 		expect(result.exitCode, result.stderr.toString()).toBe(0);
@@ -2383,7 +2390,7 @@ sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
 		await Bun.write(path.join(config, "git", "ignore"), "*.local\n");
 		const program = `await Bun.write("notes.local", "x");\nconsole.log(JSON.stringify((await $\`git status --short\`.text()).trim()));`;
 		const runner = Bun.spawn(["bun", RUNNER], {
-			stdin: new Response(JSON.stringify({ runId: "test", cwd: repo, program, timeoutMs: 5000, rollback: "all" })),
+			stdin: new Response(JSON.stringify({ cwd: repo, program, timeoutMs: 5000, rollback: "all" })),
 			stdout: "pipe",
 			env: { ...process.env, XDG_CONFIG_HOME: config },
 		});

@@ -9,16 +9,14 @@
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
  * and build output are left out on every platform.
  *
- * Each $ command and helper call is logged to the runner's log (~/.cache/pi-shorthand/runs.jsonl) as it
- * happens, so `tail -f` shows what a program is doing, including which command it's stuck on.
+ * Each $ command and helper call is reported to the runner while the program is active.
  */
 
-import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import * as astGrep from "@ast-grep/napi";
 import { type Edit, Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
-import { appendRunHistory } from "./history.ts";
 import { editingFiles, installFileOutcomeTracking } from "./file-outcomes.ts";
 import {
 	file as selectFile,
@@ -33,10 +31,17 @@ import {
 
 installFileOutcomeTracking();
 
-function log(event: string, details: Record<string, unknown>) {
-	const { PI_SHORTHAND_LOG, PI_SHORTHAND_RUN } = process.env;
-	if (!PI_SHORTHAND_LOG) return;
-	appendRunHistory(event, { run: PI_SHORTHAND_RUN, ...details }, PI_SHORTHAND_LOG);
+const progressDescriptor = process.env.PI_SHORTHAND_PROGRESS_FD;
+// Subprocesses do not inherit this descriptor by default, so do not advertise it to them.
+delete process.env.PI_SHORTHAND_PROGRESS_FD;
+
+function report(event: Record<string, unknown>) {
+	if (!progressDescriptor) return;
+	try {
+		writeSync(Number(progressDescriptor), JSON.stringify(event) + "\n");
+	} catch {
+		// Progress is advisory and must never change the program's result.
+	}
 }
 
 /** Runs a helper, logging how long it took and how many results it returned. */
@@ -44,7 +49,8 @@ function logged<T>(helper: string, _args: unknown[], run: () => T): T {
 	const startedAt = performance.now();
 	const result = run();
 	const results = Array.isArray(result) ? result.length : typeof result === "number" ? result : undefined;
-	log("helper", {
+	report({
+		type: "helper",
 		helper,
 		ms: Math.round(performance.now() - startedAt),
 		results,
@@ -57,7 +63,7 @@ const $ = new Proxy(bunShell, {
 	apply(target, thisArg, args: Parameters<typeof bunShell>) {
 		const [strings] = args;
 		const words = strings.raw[0].trim().split(/\s+/);
-		log("command", { command: words.find((word) => !word.includes("=")) ?? "" });
+		report({ type: "command", command: words.find((word) => !word.includes("=")) ?? "" });
 		return Reflect.apply(target, thisArg, args);
 	},
 });

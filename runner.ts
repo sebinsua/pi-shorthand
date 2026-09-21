@@ -4,7 +4,7 @@
  *
  * Usage: echo '<RunOptions as JSON>' | bun runner.ts   → prints a RunResult as JSON
  * SIGTERM aborts: the program is killed, the overlay is closed and nothing is applied.
- * Each step is logged to ~/.cache/pi-shorthand/runs.jsonl, so `tail -f` shows what a run is doing.
+ * Command and helper progress is streamed to the parent process while the run is active.
  *
  * If the program fails:
  * - rollback "all": nothing is applied;
@@ -13,14 +13,13 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, type Stats, writeSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { Lang, parse } from "@ast-grep/napi";
 import { $ } from "bun";
 import { structuredPatch } from "diff";
-import { appendRunHistory, historyEnabled, RUN_HISTORY_FILE } from "./history.ts";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits } from "./program-lint.ts";
@@ -28,7 +27,6 @@ import { preserveTextFormat } from "./text-format.ts";
 import { type FileOutcomeEvent, parseOpenWriters } from "./file-outcomes.ts";
 
 export interface RunOptions {
-	runId: string; // identifies this run's events in the log
 	cwd: string;
 	program: string;
 	timeoutMs: number;
@@ -113,12 +111,6 @@ const PRELUDE = path.join(import.meta.dir, "prelude.ts");
 // (e.g. Pi's project installs), one further up. Like `npm run`, look in every one from here up.
 const NODE_MODULES = ancestors(import.meta.dir).map((dir) => path.join(dir, "node_modules"));
 const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much the model sees
-let RUN_ID = ""; // set from RunOptions when the runner starts
-
-/** Appends one event to the log, e.g. log("program exited", { exitCode: 0 }). */
-function log(event: string, details: Record<string, unknown> = {}) {
-	appendRunHistory(event, { run: RUN_ID, ...details });
-}
 
 async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> {
 	const startedAt = performance.now();
@@ -133,10 +125,8 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 
 	try {
 		tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
-		log("started", { timeoutMs: options.timeoutMs, rollback: options.rollback });
 		const open = process.platform === "darwin" ? openMacOverlay : openLinuxOverlay;
 		const overlay = await open(repo, tempDir);
-		log("overlay opened");
 		let program: ProgramRun;
 		let changes: Change[];
 		let executionError: unknown;
@@ -224,12 +214,6 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 				warnings: applicationWarnings,
 			} = await applyChanges(repo, requested, { abort, testHooks: options.testHooks?.apply }));
 		}
-		log("finished", {
-			changed: changes.length,
-			applied: applied.length,
-			conflicts: conflicts.length,
-		});
-
 		result = {
 			exitCode: program.exitCode,
 			timedOut: program.timedOut,
@@ -243,7 +227,7 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 			rolledBack: rolledBack.map((change) => shown(change.file)),
 			writerInspectionFailed: program.openForWriting === null,
 			stillRunning: program.stillRunning,
-			lastStep: program.timedOut ? await lastLoggedStep() : undefined,
+			lastStep: program.timedOut ? program.lastStep : undefined,
 			errorLine: program.exitCode !== 0 ? failingLine(options.program, program.output) : undefined,
 			timeoutMs: options.timeoutMs,
 			rollback: options.rollback,
@@ -282,7 +266,6 @@ async function closeOverlay(overlay: Overlay, injectFailure = false) {
 function cleanupWarning(resource: string, error: unknown): string {
 	const detail = error instanceof Error ? error.message : String(error);
 	const warning = `The run reached its reported outcome, but cleanup of its ${resource} failed: ${detail}`;
-	log("cleanup warning", { warning });
 	return warning;
 }
 
@@ -450,6 +433,7 @@ interface ProgramRun {
 	openForWriting: string[] | null; // on failure/timeout: open writers, or null when inspection was unavailable
 	failedFiles: string[];
 	stillRunning: string[]; // on timeout: the commands it was still running
+	lastStep?: string;
 }
 
 async function runProgram(
@@ -482,21 +466,22 @@ async function runProgram(
 		[process.execPath, "--preload", executionPrelude, executionProgramPath],
 		executionCwd,
 	);
-	log("program started", { timeoutMs: options.timeoutMs });
 	if (options.testHooks?.programStartMarker) await Bun.write(options.testHooks.programStartMarker, "started");
 	const child = spawn(command, args, {
 		cwd: executionCwd,
 		detached: true,
-		stdio: trackFiles ? ["ignore", output.fd, output.fd, outcomeFile.fd] : ["ignore", output.fd, output.fd],
+		stdio: ["ignore", output.fd, output.fd, trackFiles ? outcomeFile.fd : "ignore", "pipe"],
 		env: {
 			...process.env,
 			...overlay.environment,
 			...programEnvironment(excludesFile, repo, overlay),
 			PI_SHORTHAND_OUTCOMES_FD: trackFiles ? "3" : "",
+			PI_SHORTHAND_PROGRESS_FD: "4",
 			PI_SHORTHAND_EXECUTION_ROOT: overlay.executionDir,
 			PI_SHORTHAND_INSPECTION_FAILURE: options.testHooks?.writerInspectionFailure ? "1" : "",
 		},
 	});
+	const progress = trackProgress(child);
 	const killAll = () => killGroup(child);
 	abort.addEventListener("abort", killAll);
 	if (abort.aborted) killAll();
@@ -507,13 +492,13 @@ async function runProgram(
 		overlay.executionDir,
 		options.testHooks?.writerInspectionFailure,
 	);
-	log("program exited", { exitCode, timedOut, aborted: abort.aborted, stillRunning: stillRunning.length });
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
 	try {
 		await overlay.terminateProcesses?.();
 	} finally {
 		await Promise.all([output.close(), outcomeFile.close()]);
+		await progress.closed;
 		await fs.rm(programFile, { force: true });
 	}
 	const outcomes = fileOutcomes(await Bun.file(outcomePath).text());
@@ -532,7 +517,43 @@ async function runProgram(
 		openForWriting: trackFiles && exitCode !== 0 && !timedOut ? outcomes.writers : openForWriting,
 		stillRunning,
 		failedFiles: outcomes.failedFiles,
+		lastStep: progress.latest(),
 	};
+}
+
+/** Keep the latest command/helper in memory and relay it to index.ts over the runner's descriptor 3. */
+function trackProgress(child: ChildProcess) {
+	const stream = child.stdio[4];
+	let buffer = "";
+	let lastStep: string | undefined;
+	const closed = new Promise<void>((resolve) => {
+		if (!stream || !("setEncoding" in stream)) return resolve();
+		stream.setEncoding("utf8");
+		stream.on("data", (chunk) => {
+			buffer += chunk;
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				try {
+					const event = JSON.parse(line) as { type?: unknown; command?: unknown; helper?: unknown; ms?: unknown };
+					if (event.type === "command" && typeof event.command === "string") lastStep = `$ ${event.command}`;
+					else if (event.type === "helper" && typeof event.helper === "string" && typeof event.ms === "number")
+						lastStep = `${event.helper} (${event.ms} ms)`;
+					else continue;
+					try {
+						writeSync(3, JSON.stringify({ step: lastStep }) + "\n");
+					} catch {
+						// Direct runner callers do not provide a progress descriptor.
+					}
+				} catch {
+					// Progress is advisory; malformed events do not affect the run.
+				}
+			}
+		});
+		stream.once("end", resolve);
+		stream.once("error", resolve);
+	});
+	return { closed, latest: () => lastStep };
 }
 
 /** Replay helper outcomes after all program processes have stopped. */
@@ -622,28 +643,6 @@ function seconds(elapsed: string): number {
 	return Number(days) * 86400 + hours * 3600 + minutes * 60 + secs;
 }
 
-/** The last command or helper call this run's program logged, e.g. "$ find / -name x". */
-async function lastLoggedStep(): Promise<string | undefined> {
-	let lines: string[];
-	try {
-		lines = (await Bun.file(RUN_HISTORY_FILE).text()).trimEnd().split("\n").slice(-500);
-	} catch {
-		return undefined;
-	}
-	for (const line of lines.toReversed()) {
-		let event: Record<string, unknown>;
-		try {
-			event = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (event.run !== RUN_ID) continue;
-		if (event.event === "command") return `$ ${event.command}`;
-		if (event.event === "helper") return `${event.helper} (${event.ms} ms)`;
-	}
-	return undefined;
-}
-
 function killGroup(child: ChildProcess) {
 	try {
 		process.kill(-child.pid!, "SIGKILL");
@@ -665,8 +664,6 @@ function programEnvironment(excludesFile: string, repo: string, overlay: Overlay
 		// So programs can import the extension's own packages, e.g. "@ast-grep/napi". A repository's own
 		// node_modules still wins: NODE_PATH is only a fallback.
 		NODE_PATH: [...nodeModules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
-		...(historyEnabled() ? { PI_SHORTHAND_LOG: RUN_HISTORY_FILE, PI_SHORTHAND_HISTORY_SANDBOX: "1" } : {}),
-		PI_SHORTHAND_RUN: RUN_ID,
 		GIT_OPTIONAL_LOCKS: "0", // read-only git commands should not dirty copied or mounted metadata
 		GIT_CONFIG_COUNT: String(count + 1),
 		[`GIT_CONFIG_KEY_${count}`]: "core.excludesFile",
@@ -991,7 +988,6 @@ async function cleanupWarnings(items: PreparedChange[], failCleanup = false): Pr
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		const warning = `Changes reached their reported state, but transaction backup cleanup failed: ${detail}`;
-		log("cleanup warning", { warning });
 		return [warning];
 	}
 }
@@ -1113,11 +1109,5 @@ if (import.meta.main) {
 	const abort = new AbortController();
 	process.on("SIGTERM", () => abort.abort());
 	const options: RunOptions = await Bun.stdin.json();
-	RUN_ID = options.runId;
-	try {
-		console.log(JSON.stringify(await run(options, abort.signal)));
-	} catch (error) {
-		log("failed", { error: String(error) });
-		throw error;
-	}
+	console.log(JSON.stringify(await run(options, abort.signal)));
 }

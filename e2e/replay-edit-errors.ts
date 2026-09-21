@@ -24,7 +24,7 @@ for (const name of ["method-pattern", "file-target"]) {
 		const execute = async (phase: string) => {
 			const program = await readFile(path.join(dir, `${name}.${phase}.ts.txt`), "utf8");
 			await writeFile(path.join(output, `${name}.${phase}.ts.txt`), program);
-			return runWithBun({ runId: crypto.randomUUID(), cwd: root, program, timeoutMs: 15_000, rollback: "all" });
+			return runWithBun({ cwd: root, program, timeoutMs: 15_000, rollback: "all" });
 		};
 		const failed = await execute("failed");
 		const supported = name === "file-target";

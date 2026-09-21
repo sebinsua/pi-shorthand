@@ -4,15 +4,15 @@
  */
 
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import type { Readable } from "node:stream";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { callLine, countLines, fileMetadataSummary, resultLines, unstructuredResultText } from "./display.ts";
-import { RUN_HISTORY_FILE } from "./history.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
 // Runs typically take well under a second. Longer transformations can request more time.
@@ -61,12 +61,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			// While it runs, show how long it's been going and the latest step from the log.
-			const runId = Math.random().toString(36).slice(2, 10);
+			// While it runs, show how long it's been going and the latest reported step.
 			const startedAt = Date.now();
+			let latest: string | undefined;
 			const progress = setInterval(() => {
 				const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)} s`;
-				const latest = latestStep(runId);
 				onUpdate?.({
 					content: [{ type: "text", text: "running" }],
 					details: { progress: latest ? `${elapsed} · ${latest}` : elapsed },
@@ -75,13 +74,13 @@ export default function (pi: ExtensionAPI) {
 
 			const result = await runWithBun(
 				{
-					runId,
 					cwd: ctx.cwd,
 					program: params.program,
 					timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
 					rollback: params.rollback ?? "file",
 				},
 				signal,
+				(step) => (latest = step),
 			).finally(() => clearInterval(progress));
 			return {
 				content: [{ type: "text", text: textForModel(result, toolCallId) }],
@@ -118,10 +117,17 @@ export function renderCodeResult(
  * to stop (it then puts the repository back and applies nothing). It has its own process group,
  * which is killed afterwards so no subprocess the program started is left behind.
  */
-export function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<RunResult> {
+export function runWithBun(
+	options: RunOptions,
+	signal?: AbortSignal,
+	onProgress?: (step: string) => void,
+): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) return reject(new Error("Aborted"));
-		const runner = spawn("bun", [path.join(import.meta.dirname, "runner.ts")], { detached: true });
+		const runner = spawn("bun", [path.join(import.meta.dirname, "runner.ts")], {
+			detached: true,
+			stdio: ["pipe", "pipe", "pipe", "pipe"],
+		});
 		const stop = () => runner.kill("SIGTERM");
 		signal?.addEventListener("abort", stop);
 
@@ -131,6 +137,22 @@ export function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<R
 		runner.stderr.setEncoding("utf8");
 		runner.stdout.on("data", (chunk) => (stdout += chunk));
 		runner.stderr.on("data", (chunk) => (stderr += chunk));
+		let progressBuffer = "";
+		const progress = runner.stdio[3] as Readable;
+		progress.setEncoding("utf8");
+		progress.on("data", (chunk) => {
+			progressBuffer += chunk;
+			const lines = progressBuffer.split("\n");
+			progressBuffer = lines.pop() ?? "";
+			for (const line of lines) {
+				try {
+					const event = JSON.parse(line) as { step?: unknown };
+					if (typeof event.step === "string") onProgress?.(event.step);
+				} catch {
+					// Progress is advisory; malformed events do not affect the run.
+				}
+			}
+		});
 		runner.on("error", reject);
 		runner.on("close", (code) => {
 			signal?.removeEventListener("abort", stop);
@@ -148,33 +170,6 @@ export function runWithBun(options: RunOptions, signal?: AbortSignal): Promise<R
 
 		runner.stdin.end(JSON.stringify(options));
 	});
-}
-
-/**
- * The latest step logged for a run, e.g. "$ find / -name x" or "grep (18 ms)". Reads only the end of
- * the log, which is shared by every run.
- */
-function latestStep(runId: string): string | undefined {
-	let tail: string;
-	try {
-		const size = statSync(RUN_HISTORY_FILE).size;
-		const length = Math.min(size, 64 * 1024);
-		const buffer = Buffer.alloc(length);
-		const file = openSync(RUN_HISTORY_FILE, "r");
-		readSync(file, buffer, 0, length, size - length);
-		closeSync(file);
-		tail = buffer.toString("utf8");
-	} catch {
-		return undefined; // no log yet
-	}
-
-	const lines = tail.split("\n").filter((line) => line.includes(`"run":"${runId}"`));
-	const last = lines.at(-1);
-	if (!last) return undefined;
-	const event = JSON.parse(last);
-	if (event.event === "command") return `$ ${event.command}`;
-	if (event.event === "helper") return `${event.helper} (${event.ms} ms)`;
-	return event.event;
 }
 
 /** e.g. "✓ exit 0 · 326 ms · 6 files · +48 −17 · applied" */
