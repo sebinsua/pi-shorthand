@@ -62,16 +62,26 @@ export function file(filename: string): FileTarget {
 	);
 }
 
-function snapshot(match: Match): Snapshot {
+export function getMatchSnapshot(match: Match, sources = new Map<string, string | null>()): Snapshot {
 	const saved = snapshots.get(match);
 	if (!saved) throw new Error("Expected a file-backed match from sg.find, sg.one, or sg.file");
-	if (!languages[saved.file.split(".").pop()!]) throw new Error("Placement currently supports JS/TS only");
 	if (
-		existsSync(saved.file) !== saved.existed ||
-		(saved.existed && readFileSync(saved.file, "utf8") !== saved.source)
-	) {
+		match.node !== saved.node ||
+		(existsSync(match.file) ? realpathSync(match.file) : resolve(match.file)) !== saved.file
+	)
+		throw new Error("File-backed match identity was changed; select it again");
+	if (!sources.has(saved.file))
+		sources.set(saved.file, existsSync(saved.file) ? readFileSync(saved.file, "utf8") : null);
+	const source = sources.get(saved.file);
+	if ((source !== null) !== saved.existed || (saved.existed && source !== saved.source)) {
 		throw new Error(`Stale match in ${match.file}; match the file again after editing it`);
 	}
+	return saved;
+}
+
+function snapshot(match: Match): Snapshot {
+	const saved = getMatchSnapshot(match);
+	if (!languages[saved.file.split(".").pop()!]) throw new Error("Placement currently supports JS/TS only");
 	return saved;
 }
 

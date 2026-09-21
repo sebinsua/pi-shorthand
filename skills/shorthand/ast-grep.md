@@ -18,6 +18,11 @@ sg.rewrite("oldApi($A)", (m) => m.A !== "0" && `newApi(${m.A})`, "src"); // func
 A callback returns text to replace the whole match, a native `node.replace(text)` edit (or array
 of edits) to change nodes within it, or `null`/`undefined`/`false` to skip. Callbacks are synchronous.
 The result counts matches producing edits, not individual edits. Overlapping edits are rejected.
+`sg.rewrite(matchOrMatches, replacement)` reuses selections from `sg.one` or `sg.find`; omit the
+file scope because each match already identifies its file. Select again after changing a matched
+file; stale selections are rejected. An empty selection returns zero. Native `node.replace()` only
+constructs an edit: return it from the callback to apply it.
+
 Omit the file scope to search the working directory; the helper discovers, parses and writes files.
 
 Use `getMatch("NAME")` for a capture. Replacing just the captured argument preserves the surrounding

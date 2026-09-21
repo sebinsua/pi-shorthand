@@ -22,7 +22,7 @@ await Bun.write(
 	'import type { Cell, FormatOptions } from "./types";\n' +
 		method.text.replace(/^format\b/, "export function renderTable"),
 );
-sg.rewrite(pattern, (m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"), "writer.ts");
+sg.rewrite(method, (m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"));
 await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + (await Bun.file("writer.ts").text()));
 sg.rewrite('import { TableWriter } from "./writer"', 'import { renderTable } from "./table"', "export.ts");
 sg.rewrite("new TableWriter().format($$$ARGS)", "renderTable($$$ARGS)", "export.ts");
@@ -34,7 +34,9 @@ its dependence on instance state. New implementations still need new code.
 
 Use `sg.rewrite` for structural replacements, including conditional ones: its callback has capture
 text (`m.X`) and syntax nodes (`m.node.getMatch("X")`). Return text to replace the match,
-node edits to preserve its surroundings, or `null` to skip. It handles discovery, parsing and writing;
+node edits to preserve its surroundings, or `null` to skip. `node.replace()` constructs an edit;
+return it from `sg.rewrite` to apply it. Pass an existing match or match array to reuse a selection;
+select again after changing its file. Pattern-based rewrites handle discovery, parsing and writing;
 omit the file scope to search the working directory. Read the ast-grep guide
 when you need these operations; ordinary file transformations don't require every guide below.
 

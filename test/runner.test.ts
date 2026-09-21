@@ -1688,6 +1688,87 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(result.applied).toEqual([]);
 	});
 
+	test("sg.rewrite reuses selected matches across files and preserves captures", async () => {
+		const repo = await makeRepo({ "a.ts": "old(1); old(2);\n", "b.ts": "old(3);\n" });
+		const result = await run(
+			repo,
+			`const matches = sg.find("old($A)");
+console.log(sg.rewrite(matches, "next($A)"));
+console.log(sg.rewrite(sg.one("next(3)", "b.ts"), m => m.node.replace("done(3)")));
+console.log(sg.rewrite([], "unused()"));`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("3\n1\n0");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("next(1); next(2);\n");
+		expect(await Bun.file(path.join(repo, "b.ts")).text()).toBe("done(3);\n");
+	});
+
+	test("sg.rewrite selected matches support HTML", async () => {
+		const repo = await makeRepo({ "a.html": "<p>old</p>\n" });
+		const result = await run(repo, `sg.rewrite(sg.one("<p>old</p>", "a.html"), "<p>new</p>");`);
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.html")).text()).toBe("<p>new</p>\n");
+	});
+
+	test("sg.rewrite rejects stale, fabricated and conflicting selections before writing", async () => {
+		const repo = await makeRepo({ "a.ts": "old(1);\n", "b.ts": "old(2);\n" });
+		const result = await run(
+			repo,
+			`const matches = sg.find("old($A)");
+const a = matches.find(m => m.file.endsWith("a.ts"));
+const b = matches.find(m => m.file.endsWith("b.ts"));
+for (const edit of [
+  () => sg.rewrite({...a}, "next(1)"),
+  () => sg.rewrite([a, a], "next(1)"),
+  () => sg.rewrite(a, "next(1)", "a.ts"),
+]) { try { edit(); } catch (e) { console.log(e.message); } }
+await Bun.write("b.ts", "changed();\\n");
+try { sg.rewrite([a, b], "next($A)"); } catch(e) { console.log(e.message); }`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("Expected a file-backed match");
+		expect(result.output).toContain("overlapping edits");
+		expect(result.output).toContain("omit the file scope");
+		expect(result.output).toContain("Stale match");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("old(1);\n");
+		expect(await Bun.file(path.join(repo, "b.ts")).text()).toBe("changed();\n");
+	});
+
+	test("sg.rewrite does not overwrite writes performed by its callback", async () => {
+		const repo = await makeRepo({ "a.ts": "old(1);\n" });
+		const result = await run(
+			repo,
+			`const { writeFileSync } = await import("node:fs");
+try { sg.rewrite(sg.one("old($A)", "a.ts"), m => {
+  writeFileSync("a.ts", "changed();\\n"); return "next(1)";
+}); } catch(e) { console.log(e.message); }`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("Stale match");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("changed();\n");
+	});
+
+	test("discarded native edits warn without changing native replace behavior", async () => {
+		const repo = await makeRepo({ "a.ts": "class Writer { format(options = {}) { return 1; } }\n" });
+		const result = await run(
+			repo,
+			`const method = sg.one({rule: {kind: "method_definition"}}, "a.ts");
+const body = method.node.field("body");
+body.replace("{ return 2; }");`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.applied).toEqual([]);
+		expect(result.warnings.join("\n")).toContain("line 3: node.replace() returns an edit");
+		const fixed = await run(
+			repo,
+			`const method = sg.one({rule: {kind: "method_definition"}}, "a.ts");
+sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
+		);
+		expect(fixed.exitCode).toBe(0);
+		expect(fixed.warnings).toEqual([]);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toContain("return 2;");
+	});
+
 	test("sg.rewrite edits captures without losing comments or Unicode", async () => {
 		const source = 'const label = "é😀";\nstore.save("a", /* retain */ true);\nstore.save("b", flag);\n';
 		const repo = await makeRepo({ "a.ts": source });

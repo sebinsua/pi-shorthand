@@ -24,6 +24,7 @@ import { structuredPatch } from "diff";
 import { appendRunHistory, historyEnabled, RUN_HISTORY_FILE } from "./history.ts";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
+import { discardedEdits } from "./program-lint.ts";
 
 export interface RunOptions {
 	runId: string; // identifies this run's events in the log
@@ -401,10 +402,13 @@ const UNAWAITED_SHELL = {
 /** Likely mistakes in the program, found without running it. */
 function lint(program: string): string[] {
 	const root = parse(Lang.TypeScript, program).root();
-	return root.findAll(UNAWAITED_SHELL).map((node) => {
-		const line = node.range().start.line + 1;
-		return `line ${line}: ${node.text().split("\n")[0]} isn't awaited, so the command may not have run`;
-	});
+	return [
+		...discardedEdits(root),
+		...root.findAll(UNAWAITED_SHELL).map((node) => {
+			const line = node.range().start.line + 1;
+			return `line ${line}: ${node.text().split("\n")[0]} isn't awaited, so the command may not have run`;
+		}),
+	];
 }
 
 async function findRepository(cwd: string): Promise<string> {
