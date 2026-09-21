@@ -33,7 +33,7 @@
 		"lint": "oxlint --deny-warnings",
 		"format": "oxfmt",
 		"check": "tsc -p . && oxlint --deny-warnings && oxfmt --check",
-		"postinstall": "grit init --global",
+		"setup:grit": "grit init --global",
 		"prepare": "git config core.hooksPath .githooks 2>/dev/null || true"
 	},
 	"dependencies": {

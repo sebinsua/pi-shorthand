@@ -33,6 +33,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run setup:grit
       - name: Install AgentFS
         run: |
           curl -fsSL https://agentfs.ai/install | AGENTFS_UNMANAGED_INSTALL="$HOME/agentfs" sh

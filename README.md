@@ -23,6 +23,10 @@ You also need Bun, git, and either [bubblewrap](https://github.com/containers/bu
 (Linux) or [AgentFS](https://github.com/tursodatabase/agentfs) and `clang` (macOS:
 `curl -fsSL https://agentfs.ai/install | bash`).
 
+The optional `grit()` helper needs Grit’s modules initialized before sandboxed use. Run
+`npm run setup:grit` from this package’s directory if you want to use it. This explicitly runs
+`grit init --global` and changes your user-level Grit state; package installation does not run it.
+
 ## What a program can use
 
 Anything in Bun or Node, plus these globals (no imports):
