@@ -10,9 +10,27 @@ if it exits successfully. The tool reports changed files and their diff; console
 Keep the program focused on editing. Run tests, type-checks, builds and other verification separately
 afterward with the shell tool.
 
-Treat existing source as input to the program: read it at runtime and reuse its text or captures.
-For an extraction, derive the new declaration from the existing body; emit the new glue rather than
-copying the body or a whole expected file into a string literal. New implementations still need new code.
+Read existing source at runtime and reuse its text or captures. For extraction, select syntax rather
+than searching for braces or exact source layouts. This moves a state-independent `TableWriter.format`
+implementation into `renderTable`, keeps the method as a delegate, and updates its direct caller:
+
+```ts
+const pattern = { rule: { kind: "method_definition", has: { field: "name", regex: "^format$" } } };
+const method = sg.one(pattern, "writer.ts");
+await Bun.write(
+	"table.ts",
+	'import type { Cell, FormatOptions } from "./types";\n' +
+		method.text.replace(/^format\b/, "export function renderTable"),
+);
+sg.rewrite(pattern, (m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"), "writer.ts");
+await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + (await Bun.file("writer.ts").text()));
+sg.rewrite('import { TableWriter } from "./writer"', 'import { renderTable } from "./table"', "export.ts");
+sg.rewrite("new TableWriter().format($$$ARGS)", "renderTable($$$ARGS)", "export.ts");
+```
+
+The declaration reuses the existing signature and body; the original method gets a new body through
+`field("body")`. Preserve the extracted code's imports and dependencies; moving text does not remove
+its dependence on instance state. New implementations still need new code.
 
 Use `sg.rewrite` for structural replacements, including conditional ones: its callback has capture
 text (`m.X`) and syntax nodes (`m.node.getMatch("X")`). Return text to replace the match,

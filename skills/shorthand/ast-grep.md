@@ -30,15 +30,8 @@ sg.rewrite("store.save($KEY, $VALUE)", (m) => {
 });
 ```
 
-Use `field("body")` for a syntax field; available fields depend on the language and node kind:
-
-```ts
-sg.rewrite(
-	{ rule: { kind: "method_definition", has: { field: "name", regex: "^format$" } } },
-	(m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"),
-	"writer.ts",
-);
-```
+Syntax fields such as `field("body")` depend on the language and node kind.
+See [SKILL.md](SKILL.md) for a complete method extraction using a body-field edit.
 
 ## Inserting, moving and removing syntax
 

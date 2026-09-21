@@ -21,19 +21,7 @@ await Bun.file("src/old.ts").delete();
 
 `node:fs` works too, including its sync API (`readFileSync`, `writeFileSync`, `renameSync`, `rmSync`).
 
-Reuse existing source for moves and extractions. For example, this converts a matched function into
-an exported function in a new file without repeating its body in the program:
-
-```ts
-const helper = sg.one("function normalize($$$PARAMS) { $$$BODY }", "src/service.ts");
-sg.move(helper, { endOf: sg.file("src/normalize.ts") }, (text) => `export ${text}`);
-// Update imports and callers as required by the surrounding module.
-```
-
-For class methods, select the method structurally and derive the new declaration from its text.
-Write the destination with Bun; replace the original body through `node.field("body")`, as shown in
-[ast-grep.md](ast-grep.md). Placement cannot move a method into a file root, but structural selection
-still works. Preserve bindings and dependencies; moving text alone does not make code pure.
+For a complete extraction example, see [SKILL.md](SKILL.md).
 
 ## Finding what to change
 
