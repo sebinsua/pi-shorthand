@@ -21,7 +21,7 @@ const LISTED_FILES = 8; // …showing this many, then "and N more files"
 const EXPANDED_DIFF_LINES = 2000; // even expanded, a diff of hundreds of files stops here
 
 export function callLine(args: { title?: string; timeout?: number; rollback?: string }, theme: Theme): string {
-	const settings = [args.rollback === "file" && "rollback per file", args.timeout && `timeout ${args.timeout}s`];
+	const settings = [args.rollback === "all" && "rollback all", args.timeout && `timeout ${args.timeout}s`];
 	const suffix = settings.filter(Boolean).join(", ");
 	return `${theme.fg("toolTitle", theme.bold("code"))} ${args.title ?? ""}${suffix ? theme.fg("muted", ` (${suffix})`) : ""}`;
 }
@@ -69,17 +69,16 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 	}
 	for (const file of run.rolledBack) {
 		const reason = run.writerInspectionFailed
-			? "open writers could not be inspected at the timeout"
-			: run.timedOut
-				? "half-written when the program was killed"
-				: "finished writes unknown after the program exited";
+			? "open writers could not be inspected"
+			: "file edit failed or was interrupted";
 		lines.push(indent(theme.fg("warning", `rolled back ${file}: ${reason}`)));
 	}
 	for (const warning of [...run.warnings, ...printedWarnings]) lines.push(indent(theme.fg("warning", `⚠ ${warning}`)));
 
 	// The sections, each after a blank line.
 	const sections: string[][] = [];
-	const background: ToolBackground = run.exitCode === 0 && run.conflicts.length === 0 ? "toolSuccessBg" : "toolErrorBg";
+	const background: ToolBackground =
+		run.exitCode === 0 && run.conflicts.length === 0 && run.rolledBack.length === 0 ? "toolSuccessBg" : "toolErrorBg";
 	if (applied.length > 0) sections.push(diffLines(applied, expanded, theme, background));
 	if (output && (expanded || !error)) sections.push(outputLines(output, expanded, run.changes.length > 0, theme));
 	if (notApplied.length > 0) sections.push(notAppliedLines(notApplied, expanded, theme, background));
@@ -104,7 +103,7 @@ function verdict(run: RunResult, applied: FileChange[], theme: Theme): string {
 		return theme.fg("error", `✕ Conflict · ${application}${program}`) + took;
 	}
 	if (run.exitCode === 0 && run.changes.length === 0) return theme.fg("success", "✓ No changes") + took;
-	if (run.exitCode === 0) {
+	if (run.exitCode === 0 && run.rolledBack.length === 0) {
 		return theme.fg("success", `✓ Applied ${fileCount(applied)}`) + ` · ${stats(applied, theme)}` + took;
 	}
 	if (applied.length > 0) {

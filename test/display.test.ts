@@ -93,7 +93,7 @@ describe("the verdict", () => {
 		});
 		const lines = show(run);
 		expect(lines[0]).toBe("⚠ Timed out after 1s · kept 1 file, rolled back 1 · +1 −1 · 0.6s");
-		expect(lines[1]).toBe("  rolled back b.ts: half-written when the program was killed");
+		expect(lines[1]).toBe("  rolled back b.ts: file edit failed or was interrupted");
 	});
 
 	test('a failure with rollback "file" explains why every changed file was rolled back', () => {
@@ -105,7 +105,7 @@ describe("the verdict", () => {
 		});
 		const lines = show(run);
 		expect(lines[0]).toBe("✕ Failed · nothing to keep · exit 1 · 0.6s");
-		expect(lines[1]).toBe("  rolled back a.ts: finished writes unknown after the program exited");
+		expect(lines[1]).toBe("  rolled back a.ts: file edit failed or was interrupted");
 	});
 
 	test("a timeout explains when writer inspection failed closed", () => {
@@ -118,7 +118,19 @@ describe("the verdict", () => {
 			writerInspectionFailed: true,
 		});
 		const lines = show(run);
-		expect(lines[1]).toBe("  rolled back a.ts: open writers could not be inspected at the timeout");
+		expect(lines[1]).toBe("  rolled back a.ts: open writers could not be inspected");
+	});
+
+	test("caught file errors still show partial application as a warning", () => {
+		const run = result({
+			rollback: "file",
+			changes: [change("a.ts"), change("b.ts")],
+			applied: ["a.ts"],
+			rolledBack: ["b.ts"],
+		});
+		const lines = show(run);
+		expect(lines[0]).toStartWith("⚠ Failed · kept 1 file, rolled back 1");
+		expect(lines[1]).toBe("  rolled back b.ts: file edit failed or was interrupted");
 	});
 
 	test("a conflict says nothing was applied and names the changed destination", () => {
@@ -139,8 +151,8 @@ describe("the verdict", () => {
 	});
 
 	test("the call line names a non-default rollback mode and the timeout", () => {
-		expect(callLine({ title: "Rename", rollback: "file", timeout: 5 }, theme)).toBe(
-			"code Rename (rollback per file, timeout 5s)",
+		expect(callLine({ title: "Rename", rollback: "all", timeout: 5 }, theme)).toBe(
+			"code Rename (rollback all, timeout 5s)",
 		);
 		expect(callLine({ title: "Rename" }, theme)).toBe("code Rename");
 	});

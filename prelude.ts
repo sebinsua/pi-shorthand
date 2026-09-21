@@ -19,6 +19,7 @@ import * as astGrep from "@ast-grep/napi";
 import { type Edit, Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
 import { appendRunHistory } from "./history.ts";
+import { editingFiles, installFileOutcomeTracking } from "./file-outcomes.ts";
 import {
 	file as selectFile,
 	getMatchSnapshot,
@@ -29,6 +30,8 @@ import {
 	remove,
 	type FileTarget,
 } from "./placement.ts";
+
+installFileOutcomeTracking();
 
 function log(event: string, details: Record<string, unknown>) {
 	const { PI_SHORTHAND_LOG, PI_SHORTHAND_RUN } = process.env;
@@ -354,7 +357,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		const groups = new Map<string, SgMatch[]>();
 		const sources = new Map<string, string | null>();
 		for (const match of (Array.isArray(target) ? target : [target]) as SgMatch[]) {
-			const saved = getMatchSnapshot(match, sources, rewriteStaleAdvice);
+			const saved = editingFiles([match.file], () => getMatchSnapshot(match, sources, rewriteStaleAdvice));
 			if (!match.vars || typeof match.line !== "number")
 				throw new Error("sg.rewrite expects matches from sg.one or sg.find");
 			const file = explicitPath(match.file);
@@ -365,9 +368,11 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		}
 		let count = 0;
 		for (const [file, matches] of groups) {
-			const currentSources = new Map<string, string | null>();
-			for (const match of matches) getMatchSnapshot(match, currentSources, rewriteStaleAdvice);
-			count += applyRewrites(matches, replacement, file);
+			count += editingFiles([file], () => {
+				const currentSources = new Map<string, string | null>();
+				for (const match of matches) getMatchSnapshot(match, currentSources, rewriteStaleAdvice);
+				return applyRewrites(matches, replacement, file);
+			});
 		}
 		return count;
 	}
@@ -376,13 +381,15 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	let count = 0,
 		matched = 0;
 	for (const file of sourceFiles("sg.rewrite", scope)) {
-		const parsed = parseFile(file);
-		if (!parsed) continue;
-		const matches = findNodes("sg.rewrite", parsed.root, pattern).map((node) =>
-			toMatch(file, node, parsed.source, pattern),
-		);
-		matched += matches.length;
-		count += applyRewrites(matches, replacement, file);
+		count += editingFiles([file], () => {
+			const parsed = parseFile(file);
+			if (!parsed) return 0;
+			const matches = findNodes("sg.rewrite", parsed.root, pattern).map((node) =>
+				toMatch(file, node, parsed.source, pattern),
+			);
+			matched += matches.length;
+			return applyRewrites(matches, replacement, file);
+		});
 	}
 	if (matched === 0) {
 		const paths = (Array.isArray(scope) ? scope : [scope]).map((entry) =>
@@ -438,6 +445,15 @@ function grit(pattern: string, paths: FileScope = ".", options: { lang?: string;
 	if (options.lang) flags.push("--language", options.lang);
 
 	const targets = selected.map((file) => resolve(repositoryRoot, file));
+
+	if (options.dryRun) return applyGrit(pattern, flags, targets);
+	const affected = targets.flatMap((file) =>
+		statSync(file).isDirectory() ? selectFiles(file).map((entry) => resolve(repositoryRoot, entry)) : [file],
+	);
+	return editingFiles(affected, () => applyGrit(pattern, flags, targets));
+}
+
+function applyGrit(pattern: string, flags: string[], targets: string[]) {
 	const result = Bun.spawnSync(["grit", "apply", ...flags, pattern, ...targets], { env: process.env });
 	if (result.exitCode !== 0) {
 		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
@@ -504,7 +520,10 @@ function editText({ path, oldText, newText }: { path: string; oldText: string; n
 
 const globals = {
 	$,
-	edit: (...args: Parameters<typeof editText>) => logged("edit", args, () => editText(...args)),
+	edit: (...args: Parameters<typeof editText>) =>
+		logged("edit", args, () =>
+			editingFiles(typeof args[0]?.path === "string" ? [args[0].path] : [], () => editText(...args)),
+		),
 	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
 	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
 	sg: {

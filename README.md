@@ -57,10 +57,18 @@ globals. Bun execution does not automatically type-check programs or run applica
 ## Options
 
 - `title`: a short description shown with the call (required).
-- `rollback`: `"all"` (default) applies nothing if the program fails. After a timeout, `"file"`
-  keeps changed files that were no longer open for writing if writer inspection succeeds. Other
-  failures apply nothing because open writers cannot be identified after the process exits.
+- `rollback`: `"file"` (default) rolls back files involved in failed or interrupted edits and
+  applies the others. A failure with no identifiable file, such as a failed check, reports the
+  failure and retains completed edits. `"all"` applies nothing if the program fails.
 - `timeout`: seconds before the program is killed. Default 2.
+
+File rollback tracks `edit`, structural rewrites and placement operations, and Grit targets.
+An operation spanning several files (such as a move or one Grit invocation) treats those files
+as a group. A file that fails rolls back to its pre-run contents, including any earlier edits to
+that file, even if the program catches the error. Ordinary filesystem errors can identify paths;
+arbitrary shell failures cannot reliably identify which closed files failed. Open writers are
+inspected before an error exits or a timeout kills the program. If inspection fails or a crash
+bypasses exit handling, no changes are retained. Cancellation always discards all changes.
 
 ## Good to know
 

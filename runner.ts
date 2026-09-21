@@ -8,8 +8,7 @@
  *
  * If the program fails:
  * - rollback "all": nothing is applied;
- * - rollback "file": on timeout, files that weren't open for writing are applied. On any other
- *   failure, nothing is applied because the process has exited and its open files can't be inspected.
+ * - rollback "file": failed or interrupted file edits are discarded; other files are applied.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -26,6 +25,7 @@ import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits } from "./program-lint.ts";
 import { preserveTextFormat } from "./text-format.ts";
+import { type FileOutcomeEvent, parseOpenWriters } from "./file-outcomes.ts";
 
 export interface RunOptions {
 	runId: string; // identifies this run's events in the log
@@ -64,7 +64,7 @@ export interface RunResult {
 	applied: string[]; // the changed files that were applied
 	conflicts: string[]; // destinations changed after the run's baseline was captured
 	rolledBack: string[]; // rollback "file": changed files not retained because completion was not established
-	writerInspectionFailed: boolean; // timeout: inspection failed, so no changed file was retained
+	writerInspectionFailed: boolean; // inspection unavailable: no changed file was retained on failure
 	stillRunning: string[]; // on timeout: commands the program was still running, e.g. "find / -name x (for 58s)"
 	lastStep?: string; // on timeout: the last step the program logged, e.g. "$ find / -name x" or "grep (18 ms)"
 	errorLine?: string; // on failure: the program's line the error came from, e.g. "line 3: throw new Error(…)"
@@ -155,7 +155,13 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 				changes = changes.filter((change) => !entriesEqual(change.before, change.after));
 			}
 			const files = changes.filter((change) => change.after?.type === "file").map((change) => change.file);
-			if (program.exitCode === 0 && !abort.aborted && files.length && process.env.PI_SHORTHAND_FORMAT !== "0") {
+			if (
+				program.exitCode === 0 &&
+				program.failedFiles.length === 0 &&
+				!abort.aborted &&
+				files.length &&
+				process.env.PI_SHORTHAND_FORMAT !== "0"
+			) {
 				try {
 					const module = executionPath(path.join(import.meta.dir, "format.ts"), repo, overlay);
 					const formatting = await runProgram(
@@ -390,17 +396,17 @@ async function safeParentChain(repo: string, target: string, allowMissing = fals
 	return true;
 }
 
-/** Preserve provably closed files only when a timeout lets us inspect the still-running process. */
+/** Retain independent file edits, excluding failed operations and interrupted writers. */
 function whatToApply(changes: Change[], program: ProgramRun, rollback: RunOptions["rollback"], aborted: boolean) {
 	if (aborted) return { applied: [], rolledBack: [] };
-	if (program.exitCode === 0) return { applied: changes, rolledBack: [] };
-	if (rollback === "all") return { applied: [], rolledBack: [] };
-	if (!program.timedOut) return { applied: [], rolledBack: changes };
+	if (rollback === "all") return { applied: program.exitCode === 0 ? changes : [], rolledBack: [] };
 	if (program.openForWriting === null) return { applied: [], rolledBack: changes };
 
-	const openForWriting = program.openForWriting;
-	const halfWritten = (change: Change) => openForWriting.includes(change.file);
-	return { applied: changes.filter((change) => !halfWritten(change)), rolledBack: changes.filter(halfWritten) };
+	const failed = new Set([...program.failedFiles, ...program.openForWriting]);
+	return {
+		applied: changes.filter((change) => !failed.has(change.file)),
+		rolledBack: changes.filter((change) => failed.has(change.file)),
+	};
 }
 
 /** A `$` command that isn't awaited never runs: Bun's shell starts a command when it's awaited. */
@@ -441,7 +447,8 @@ interface ProgramRun {
 	exitCode: number | null;
 	timedOut: boolean;
 	output: string;
-	openForWriting: string[] | null; // on timeout: open writers, or null when inspection failed
+	openForWriting: string[] | null; // on failure/timeout: open writers, or null when inspection was unavailable
+	failedFiles: string[];
 	stillRunning: string[]; // on timeout: the commands it was still running
 }
 
@@ -468,6 +475,9 @@ async function runProgram(
 	// detached: the program gets its own process group, so killing the group kills anything it started too.
 	const outputFile = path.join(tempDir, "output");
 	const output = await fs.open(outputFile, "w");
+	const trackFiles = options.rollback === "file";
+	const outcomePath = path.join(tempDir, "file-outcomes");
+	const outcomeFile = await fs.open(outcomePath, "w");
 	const [command, ...args] = overlay.wrap(
 		[process.execPath, "--preload", executionPrelude, executionProgramPath],
 		executionCwd,
@@ -477,11 +487,14 @@ async function runProgram(
 	const child = spawn(command, args, {
 		cwd: executionCwd,
 		detached: true,
-		stdio: ["ignore", output.fd, output.fd],
+		stdio: trackFiles ? ["ignore", output.fd, output.fd, outcomeFile.fd] : ["ignore", output.fd, output.fd],
 		env: {
 			...process.env,
 			...overlay.environment,
 			...programEnvironment(excludesFile, repo, overlay),
+			PI_SHORTHAND_OUTCOMES_FD: trackFiles ? "3" : "",
+			PI_SHORTHAND_EXECUTION_ROOT: overlay.executionDir,
+			PI_SHORTHAND_INSPECTION_FAILURE: options.testHooks?.writerInspectionFailure ? "1" : "",
 		},
 	});
 	const killAll = () => killGroup(child);
@@ -500,9 +513,10 @@ async function runProgram(
 	try {
 		await overlay.terminateProcesses?.();
 	} finally {
-		await output.close();
+		await Promise.all([output.close(), outcomeFile.close()]);
 		await fs.rm(programFile, { force: true });
 	}
+	const outcomes = fileOutcomes(await Bun.file(outcomePath).text());
 
 	// Keep the tail, where errors are. Show stack traces as "program.ts:3:11", and drop Bun's version footer.
 	let text = await Bun.file(outputFile).text();
@@ -511,7 +525,33 @@ async function runProgram(
 	}
 	text = text.replaceAll(executionProgramPath, "program.ts").replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
 
-	return { exitCode, timedOut, output: text, openForWriting, stillRunning };
+	return {
+		exitCode,
+		timedOut,
+		output: text,
+		openForWriting: trackFiles && exitCode !== 0 && !timedOut ? outcomes.writers : openForWriting,
+		stillRunning,
+		failedFiles: outcomes.failedFiles,
+	};
+}
+
+/** Replay helper outcomes after all program processes have stopped. */
+function fileOutcomes(text: string) {
+	const active = new Map<number, string[]>();
+	const failed = new Set<string>();
+	let writers: string[] | null = null;
+	for (const line of text.split("\n").slice(0, -1).filter(Boolean)) {
+		const event = JSON.parse(line) as FileOutcomeEvent;
+		if (event.type === "begin") active.set(event.id, event.files);
+		else if (event.type === "end") active.delete(event.id);
+		else if (event.type === "fail") {
+			for (const file of active.get(event.id) ?? []) failed.add(file);
+			active.delete(event.id);
+		} else if (event.type === "error") {
+			for (const file of event.files) failed.add(file);
+		} else if (event.type === "writers") writers = event.files;
+	}
+	return { writers, failedFiles: [...new Set([...failed, ...[...active.values()].flat()])] };
 }
 
 /**
@@ -535,7 +575,12 @@ async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: str
 	]);
 	killGroup(child);
 	await exited;
-	return { exitCode: null, timedOut: true, openForWriting, stillRunning };
+	return {
+		exitCode: null,
+		timedOut: true,
+		openForWriting,
+		stillRunning,
+	};
 }
 
 /**
@@ -651,18 +696,7 @@ async function filesOpenForWriting(dir: string, forceFailure: boolean): Promise<
 	// detached or were reparented; unlike lsof +D, it doesn't walk every file in a large repository.
 	const result = await $`lsof -n -P -F an`.nothrow().quiet();
 	if (result.exitCode !== 0 || result.stderr.length > 0) return null;
-	const output = result.stdout.toString();
-
-	const files = new Set<string>();
-	let access = "";
-	for (const line of output.split("\n")) {
-		if (line.startsWith("f")) access = "";
-		if (line.startsWith("a")) access = line.slice(1);
-		if (line.startsWith(`n${dir}/`) && (access === "w" || access === "u")) {
-			files.add(path.relative(dir, line.slice(1)));
-		}
-	}
-	return [...files];
+	return parseOpenWriters(result.stdout.toString(), dir);
 }
 
 // ── Finding, describing and applying changes ──────────────────────────────────────

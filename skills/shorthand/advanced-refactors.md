@@ -163,6 +163,11 @@ path is inaccessible on macOS. On both platforms, host paths outside the workspa
 Writes to `.git` are blocked.
 
 The default timeout is two seconds; request more for longer transformations.
-By default a failed program applies nothing. `rollback: "file"` can retain closed files after a
-timeout if writer inspection succeeds; exceptions, crashes or inspection failures apply nothing.
-Use that mode only when each retained file stands on its own.
+By default, rollback happens per file: files involved in failed or interrupted edits are discarded,
+while the others are retained, including after exceptions. Unattributed failures
+(such as failed checks) preserve completed edits and report the failure. A failed file loses all
+its edits from this run, even if the error is caught. Multi-file operations such as moves and a
+single Grit invocation share one outcome. Arbitrary shell failures cannot identify failed closed
+files. Open writers are inspected before failure exits and timeout termination; inspection failures
+or crashes that bypass exit handling retain nothing. Cancellation still discards everything.
+Use `rollback: "all"` when the whole change must be atomic.

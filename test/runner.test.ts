@@ -598,7 +598,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			expect(await gitStatus(repo)).toBe("");
 		});
 
-		test('rollback "file" applies nothing after an exception with an unclosed writer', async () => {
+		test('rollback "file" keeps successful files after an exception with an unclosed writer', async () => {
 			const repo = await makeRepo(FILES);
 			const result = await run(
 				repo,
@@ -611,9 +611,182 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			);
 
 			expect(result.exitCode).toBe(1);
+			expect(result.applied).toEqual(["src/a.ts"]);
+			expect(result.rolledBack).toEqual(["src/b.ts"]);
+			expect(await gitStatus(repo)).toBe("M src/a.ts");
+		});
+
+		test('rollback "file" rolls back earlier writes to the failed helper target only', async () => {
+			const repo = await makeRepo(FILES);
+			const result = await run(
+				repo,
+				`
+				await Bun.write("src/a.ts", "finished");
+				await Bun.write("src/b.ts", "intermediate");
+				edit({ path: "src/b.ts", oldText: "absent", newText: "replacement" });
+			`,
+				{ rollback: "file" },
+			);
+			expect(result.exitCode, result.output).toBe(1);
+			expect(result.applied).toEqual(["src/a.ts"]);
+			expect(result.rolledBack).toEqual(["src/b.ts"]);
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("finished");
+			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(FILES["src/b.ts"]);
+		});
+
+		test.each(["throw new Error('verification failed')", "throw null", "await $`false`"])(
+			'rollback "file" keeps edits after an unattributed failure: %s',
+			async (failure) => {
+				const repo = await makeRepo(FILES);
+				const result = await run(repo, `await Bun.write("src/a.ts", "finished"); ${failure};`, { rollback: "file" });
+				expect(result.exitCode).not.toBe(0);
+				expect(result.timedOut).toBe(false);
+				expect(result.applied).toEqual(["src/a.ts"]);
+				expect(result.rolledBack).toEqual([]);
+				expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("finished");
+			},
+		);
+
+		test('rollback "file" identifies a native filesystem error target', async () => {
+			const repo = await makeRepo(FILES);
+			const result = await run(
+				repo,
+				`
+				await Bun.write("src/a.ts", "finished");
+				await Bun.write("src/b.ts", "intermediate");
+				require("node:fs").renameSync("src/b.ts", "missing/b.ts");
+			`,
+				{ rollback: "file" },
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.applied).toEqual(["src/a.ts"]);
+			expect(result.rolledBack).toEqual(["src/b.ts"]);
+		});
+
+		test.each(["throw new Error('failed')", "process.exit(7)"])(
+			'rollback "file" inspects native open writers before exit: %s',
+			async (failure) => {
+				const repo = await makeRepo(FILES);
+				const result = await run(
+					repo,
+					`
+					await Bun.write("src/a.ts", "finished");
+					const fs = await import("node:fs/promises");
+					const writer = await fs.open("src/b.ts", "w");
+					await writer.write("partial");
+					${failure};
+				`,
+					{ rollback: "file" },
+				);
+				expect(result.exitCode).toBe(failure.includes("exit") ? 7 : 1);
+				expect(result.applied).toEqual(["src/a.ts"]);
+				expect(result.rolledBack).toEqual(["src/b.ts"]);
+			},
+		);
+
+		test.each(["throw new Error('callback failed')", "while (true) {}"])(
+			'rollback "file" tracks a rewrite callback after its writes have closed: %s',
+			async (failure) => {
+				const repo = await makeRepo({ "a.ts": "const a = 1;", "b.ts": "const b = 1;" });
+				const result = await run(
+					repo,
+					`
+					sg.rewrite("const $NAME = 1", (match) => {
+						if (match.file === "b.ts") {
+							require("node:fs").writeFileSync("b.ts", "partial");
+							${failure};
+						}
+						return "const a = 2;";
+					});
+				`,
+					{ rollback: "file", timeoutMs: 1000 },
+				);
+				expect(result.timedOut).toBe(failure.includes("while"));
+				expect(result.applied).toEqual(["a.ts"]);
+				expect(result.rolledBack).toEqual(["b.ts"]);
+				expect(await Bun.file(path.join(repo, "b.ts")).text()).toBe("const b = 1;");
+			},
+		);
+
+		test('rollback "file" remembers a caught file error with history disabled and a nested cwd', async () => {
+			const repo = await makeRepo({ ...FILES, "src/line\nbreak.ts": "original" });
+			const result = await run(
+				repo,
+				`
+				await Bun.write("line\\nbreak.ts", "intermediate");
+				try { edit({ path: "line\\nbreak.ts", oldText: "absent", newText: "replacement" }); } catch {}
+				await Bun.write("a.ts", "finished");
+			`,
+				{ rollback: "file", cwd: path.join(repo, "src") },
+				{ PI_SHORTHAND_LOG: "" },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(result.applied).toEqual(["a.ts"]);
+			expect(result.rolledBack).toEqual(["line\nbreak.ts"]);
+			expect(await Bun.file(path.join(repo, "src/line\nbreak.ts")).text()).toBe("original");
+		});
+
+		test('rollback "file" keeps subprocess imports independent of its tracking descriptor', async () => {
+			const repo = await makeRepo(FILES);
+			const prelude = path.join(import.meta.dir, "..", "prelude.ts");
+			const result = await run(
+				repo,
+				`
+				const child = Bun.spawn([process.execPath, "--preload", ${JSON.stringify(prelude)}, "-e", 'await Bun.write("src/a.ts", "child edit")'], { stdout: "inherit", stderr: "inherit" });
+				if (await child.exited !== 0) throw new Error("child failed");
+				throw new Error("unrelated failure");
+			`,
+				{ rollback: "file" },
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain("unrelated failure");
+			expect(result.applied).toEqual(["src/a.ts"]);
+		});
+
+		test('rollback "file" rolls back both files in a failed move but retains unrelated edits', async () => {
+			const repo = await makeRepo({ "a.ts": "const a = 1;", "b.ts": "const b = 1;", "c.ts": "const c = 1;" });
+			const result = await run(
+				repo,
+				`
+				await Bun.write("a.ts", "const a = 2;");
+				await Bun.write("b.ts", "const b = 2;");
+				await Bun.write("c.ts", "const c = 2;");
+				sg.move(sg.one("const a = 2", "a.ts"), { endOf: sg.file("b.ts") }, () => { throw new Error("move failed"); });
+			`,
+				{ rollback: "file" },
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.applied).toEqual(["c.ts"]);
+			expect(result.rolledBack).toEqual(["a.ts", "b.ts"]);
+		});
+
+		test('rollback "file" retains nothing when inspection fails during exception exit', async () => {
+			const repo = await makeRepo(FILES);
+			const result = await run(repo, `await Bun.write("src/a.ts", "finished"); throw new Error("failed");`, {
+				rollback: "file",
+				testHooks: { writerInspectionFailure: true },
+			});
+			expect(result.exitCode).toBe(1);
+			expect(result.writerInspectionFailed).toBe(true);
 			expect(result.applied).toEqual([]);
-			expect(result.rolledBack).toEqual(["src/a.ts", "src/b.ts"]);
-			expect(await gitStatus(repo)).toBe("");
+			expect(result.rolledBack).toEqual(["src/a.ts"]);
+		});
+
+		test('rollback "file" attributes failed edits through an internal symlink to their target', async () => {
+			const repo = await makeRepo(FILES);
+			await symlink("src/b.ts", path.join(repo, "alias.ts"));
+			const result = await run(
+				repo,
+				`
+				await Bun.write("src/a.ts", "finished");
+				await Bun.write("src/b.ts", "intermediate");
+				edit({ path: "alias.ts", oldText: "absent", newText: "replacement" });
+			`,
+				{ rollback: "file" },
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.applied).toEqual(["src/a.ts"]);
+			expect(result.rolledBack).toEqual(["src/b.ts"]);
 		});
 
 		test("reports the commands still running when it times out, and kills them", async () => {
@@ -1687,6 +1860,29 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 			);
 		}
 	});
+
+	test.each(["exit 2", "printf 'not-json\\n'"])(
+		'rollback "file" isolates a failed Grit invocation: %s',
+		async (failure) => {
+			const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
+			const command = `#!/bin/sh\necho partial > src/b.ts\n${failure}\n`;
+			const result = await run(
+				repo,
+				`
+				await Bun.write("src/a.ts", "finished");
+				await Bun.write("fake/grit", ${JSON.stringify(command)});
+				await (await import("node:fs/promises")).chmod("fake/grit", 0o755);
+				process.env.PATH = process.cwd() + "/fake:" + process.env.PATH;
+				grit("pattern", "src/b.ts");
+			`,
+				{ rollback: "file" },
+			);
+			expect(result.exitCode, result.output).toBe(1);
+			expect(result.applied).toEqual(["src/a.ts"]);
+			expect(result.rolledBack).toEqual(["src/b.ts"]);
+			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(FILES["src/b.ts"]);
+		},
+	);
 
 	test("sg validates every scope before any file is edited", async () => {
 		const repo = await makeRepo(FILES);

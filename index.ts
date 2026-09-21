@@ -34,14 +34,19 @@ export default function (pi: ExtensionAPI) {
 	// rather than throwing, since a thrown error loses them.)
 	pi.on("tool_result", async (event) => {
 		const run = event.details as RunResult | undefined;
-		if (event.toolName === "code" && run && (run.exitCode !== 0 || run.conflicts.length > 0)) return { isError: true };
+		if (
+			event.toolName === "code" &&
+			run &&
+			(run.exitCode !== 0 || run.conflicts.length > 0 || run.rolledBack.length > 0)
+		)
+			return { isError: true };
 	});
 
 	pi.registerTool({
 		name: "code",
 		label: "Code",
 		description: DESCRIPTION,
-		promptSnippet: "Make a change with one transactional Bun editing program; run verification separately afterward",
+		promptSnippet: "Make a change with one Bun editing program; run verification separately afterward",
 
 		parameters: Type.Object({
 			title: Type.String({ description: "A few words describing the change, shown to the user" }),
@@ -49,7 +54,7 @@ export default function (pi: ExtensionAPI) {
 			rollback: Type.Optional(
 				StringEnum(["all", "file"] as const, {
 					description:
-						'On failure: "all" (default) applies nothing; "file" retains files closed before a timeout when writer inspection succeeds',
+						'On failure: "file" (default) rolls back failed or interrupted file edits and retains the others; "all" applies nothing',
 				}),
 			),
 			timeout: Type.Optional(Type.Number({ description: "Seconds before the program is killed (default 2)" })),
@@ -74,7 +79,7 @@ export default function (pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					program: params.program,
 					timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
-					rollback: params.rollback ?? "all",
+					rollback: params.rollback ?? "file",
 				},
 				signal,
 			).finally(() => clearInterval(progress));

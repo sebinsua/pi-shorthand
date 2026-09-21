@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
+import { editingFiles } from "./file-outcomes.ts";
 
 export interface Match {
 	file: string;
@@ -291,11 +292,23 @@ function apply(plans: { saved: Snapshot; edits: Edit[] }[]) {
 }
 
 export function insert(text: string, destination: Destination): void {
+	return editingFiles(destinationFiles(destination), () => insertNodes(text, destination));
+}
+
+function destinationFiles(destination: Destination): string[] {
+	return Object.values(destination).flatMap((match) => (typeof match?.file === "string" ? [match.file] : []));
+}
+
+function insertNodes(text: string, destination: Destination): void {
 	const { saved, edit } = placement(text, destination);
 	apply([{ saved, edits: [edit] }]);
 }
 
 export function move(match: Match, destination: Destination, transform?: (text: string) => string): void {
+	return editingFiles([match.file, ...destinationFiles(destination)], () => moveNodes(match, destination, transform));
+}
+
+function moveNodes(match: Match, destination: Destination, transform?: (text: string) => string): void {
 	const source = snapshot(match);
 	const deletion = removal(source);
 	const text = transform ? transform(source.node.text()) : source.node.text();
@@ -322,6 +335,14 @@ export function move(match: Match, destination: Destination, transform?: (text: 
 }
 
 export function remove(matches: Match | readonly Match[]): void {
+	const selected = Array.isArray(matches) ? matches : [matches as Match];
+	return editingFiles(
+		selected.map((match) => match.file),
+		() => removeNodes(matches),
+	);
+}
+
+function removeNodes(matches: Match | readonly Match[]): void {
 	const plans = new Map<string, { saved: Snapshot; edits: Edit[] }>();
 	for (const match of Array.isArray(matches) ? matches : [matches as Match]) {
 		const saved = snapshot(match);
