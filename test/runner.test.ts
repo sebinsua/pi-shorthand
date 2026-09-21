@@ -1688,6 +1688,104 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(result.applied).toEqual([]);
 	});
 
+	test("sg.rewrite edits captures without losing comments or Unicode", async () => {
+		const source = 'const label = "é😀";\nstore.save("a", /* retain */ true);\nstore.save("b", flag);\n';
+		const repo = await makeRepo({ "a.ts": source });
+		const result = await run(
+			repo,
+			`console.log(sg.rewrite("store.save($KEY, $VALUE)", m => {
+			const value = m.node.getMatch("VALUE");
+			return ["true", "false"].includes(value.kind()) ? value.replace("{ durable: " + value.text() + " }") : null;
+		}));`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			source.replace("/* retain */ true", "/* retain */ { durable: true }"),
+		);
+	});
+
+	test("sg.rewrite replaces a body field despite braces in defaults and comments", async () => {
+		const source = 'class Writer { format(options = {}) { /* } */ return "{"; } }\n';
+		const repo = await makeRepo({ "a.ts": source });
+		const result = await run(
+			repo,
+			`sg.rewrite({ rule: { kind: "method_definition" } }, m =>
+			m.node.field("body").replace("{ return render(options); }"));`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			"class Writer { format(options = {}) { return render(options); } }\n",
+		);
+	});
+
+	test("sg.rewrite counts matches rather than edits and accepts readonly edit arrays", async () => {
+		const repo = await makeRepo({ "a.ts": "pair(1, /* keep */ 2); pair(3, 4);\n" });
+		const result = await run(
+			repo,
+			`console.log(sg.rewrite("pair($A, $B)", m => [
+			m.node.getMatch("A").replace("10"), m.node.getMatch("B").replace("20")
+		] as const));`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("2");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("pair(10, /* keep */ 20); pair(10, 20);\n");
+	});
+
+	test("sg.rewrite deliberate skips do not report missing matches", async () => {
+		const repo = await makeRepo({ "a.ts": "foo(1);\n" });
+		const result = await run(
+			repo,
+			`for (const skip of [null, undefined, false, []]) {
+			console.log(sg.rewrite("foo($A)", () => skip));
+		}`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("0\n0\n0\n0");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("foo(1);\n");
+	});
+
+	test("sg.rewrite rejects unsupported results with actionable diagnostics", async () => {
+		const repo = await makeRepo({ "a.ts": "foo(1);\n" });
+		const result = await run(
+			repo,
+			`for (const value of [true, 42, {}, [null], ["text"], Array(1), Promise.resolve("x")]) {
+			try { sg.rewrite("foo($A)", () => value); } catch (e) { console.log(e.message); }
+		}`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.match(/sg.rewrite at "a.ts":1/g)).toHaveLength(7);
+		expect(result.output).toContain("callbacks are synchronous");
+		expect(result.output).toContain("Return text, a node.replace(...) edit");
+		expect(result.output).not.toContain("matched nothing");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("foo(1);\n");
+	});
+
+	test("sg.rewrite validates ranges and conflicts before writing a file", async () => {
+		const repo = await makeRepo({ "a.ts": "foo(1); foo(2);\n" });
+		const result = await run(
+			repo,
+			`const invalid = [
+			m => ({ startPos: -1, endPos: 1, insertedText: "x" }),
+			m => ({ startPos: 0, endPos: 100, insertedText: "x" }),
+			m => ({ startPos: 5, endPos: 4, insertedText: "x" }),
+			m => ({ startPos: 0.5, endPos: 1, insertedText: "x" }),
+			m => [m.node.replace("x"), m.node.getMatch("A").replace("3")],
+			m => [{startPos: 0, endPos: 0, insertedText: "a"}, {startPos: 0, endPos: 0, insertedText: "b"}],
+		];
+		for (const callback of invalid) {
+			try { sg.rewrite("foo($A)", callback); } catch (e) { console.log(e.message); }
+		}
+		try { sg.rewrite("foo($A)", m => m.A === "1" ? m.node.replace("ok()") : 42); }
+		catch (e) { console.log(e.message); }`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("outside match");
+		expect(result.output).toContain("Unsupported callback result");
+		expect(result.output).toContain('overlapping edits in "a.ts": [');
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("foo(1); foo(2);\n");
+	});
+
 	test("sg.rewrite fills an empty $$$ with nothing, not the literal text", async () => {
 		const repo = await makeRepo({ "src/x.ts": "foo();\nfoo(1, 2);\n" });
 		await run(repo, `sg.rewrite("foo($$$ARGS)", "bar($$$ARGS)", "src");`);
@@ -1781,11 +1879,31 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(result.output).toContain('warning: sg.find found no supported files in ["docs"]');
 	});
 
-	test("sg.rewrite warns when it matches nothing", async () => {
+	test("sg.rewrite names the searched scope when it matches nothing", async () => {
 		const repo = await makeRepo(FILES);
-		const result = await run(repo, `sg.rewrite("doesNotExist($$$A)", "x", "src");`);
+		const result = await run(
+			repo,
+			`
+			sg.rewrite("doesNotExist($$$A)", "x", "src");
+			sg.rewrite("doesNotExist($$$A)", "x");
+			sg.rewrite("doesNotExist($$$A)", "x", ["src/a.ts", sg.file("src/b.ts")]);
+		`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain('matched nothing for "doesNotExist($$$A)" in ["src"]');
+		expect(result.output).toContain('matched nothing for "doesNotExist($$$A)" in ["."]');
+		expect(result.output).toContain('matched nothing for "doesNotExist($$$A)" in ["src/a.ts","src/b.ts"]');
+	});
 
-		expect(result.output).toContain('warning: sg.rewrite matched nothing for "doesNotExist($$$A)"');
+	test("sg.rewrite allows nested matches whose returned edits are disjoint", async () => {
+		const repo = await makeRepo({ "a.ts": "foo(foo(1), 2);\n" });
+		const result = await run(
+			repo,
+			`console.log(sg.rewrite("foo($$$ARGS)", m => m.node.field("function").replace("bar")));`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("2");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("bar(bar(1), 2);\n");
 	});
 
 	test("glob and grep only see files git sees", async () => {

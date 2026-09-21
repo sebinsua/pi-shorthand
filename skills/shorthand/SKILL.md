@@ -6,7 +6,7 @@ description: How to write repository edits as a code program, with Bun's file AP
 # Shorthand
 
 A `code` program is a transaction: Bun runs it against the repository, and its writes are applied only
-if it exits successfully. Find the edit targets, transform the source, and print a short summary.
+if it exits successfully. The tool reports changed files and their diff; console output is optional.
 Keep the program focused on editing. Run tests, type-checks, builds and other verification separately
 afterward with the shell tool.
 
@@ -15,7 +15,9 @@ For an extraction, derive the new declaration from the existing body; emit the n
 copying the body or a whole expected file into a string literal. New implementations still need new code.
 
 Use `sg.rewrite` for structural replacements, including conditional ones: its callback has capture
-text (`m.X`) and the matched node (`m.node.getMatch("X")`) for syntax checks. Read the ast-grep guide
+text (`m.X`) and syntax nodes (`m.node.getMatch("X")`). Return text to replace the match,
+node edits to preserve its surroundings, or `null` to skip. It handles discovery, parsing and writing;
+omit the file scope to search the working directory. Read the ast-grep guide
 when you need these operations; ordinary file transformations don't require every guide below.
 
 TypeScript 7.0 does not expose the legacy compiler API (`createSourceFile`, `ScriptTarget`) from

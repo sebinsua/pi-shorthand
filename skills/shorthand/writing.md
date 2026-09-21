@@ -30,9 +30,10 @@ sg.move(helper, { endOf: sg.file("src/normalize.ts") }, (text) => `export ${text
 // Update imports and callers as required by the surrounding module.
 ```
 
-For shapes that placement doesn't support (such as class methods), derive the declaration from
-captured text or source slices and write it with Bun. Preserve bindings and dependencies;
-moving text alone doesn't make state-dependent code pure.
+For class methods, select the method structurally and derive the new declaration from its text.
+Write the destination with Bun; replace the original body through `node.field("body")`, as shown in
+[ast-grep.md](ast-grep.md). Placement cannot move a method into a file root, but structural selection
+still works. Preserve bindings and dependencies; moving text alone does not make code pure.
 
 ## Finding what to change
 
@@ -42,8 +43,8 @@ grep("oldApi(", "src"); // [{ file, line, text }]; pass a RegExp for a pattern
 sg.find("oldApi($$$ARGS)", "src"); // by syntax, when matching text isn't enough
 ```
 
-Work out the files to change here, in the program, rather than copying a list from earlier output:
-then it can't miss one.
+`sg.rewrite` handles file discovery itself: omit its scope to search the working directory, or pass
+a path, directory or glob to narrow it. Use `glob` or `grep` when your own transformation needs a file list.
 
 ## Commands
 
@@ -53,21 +54,14 @@ const files = await $`git ls-files`.text(); // shell commands run inside the cod
 
 Interpolated values become single, safely quoted arguments; an array becomes several.
 
-## The shape of a program
-
-1. Find what to change.
-2. Change it: read, transform in memory, write.
-3. Print a short summary, not whole files. The diff comes back anyway.
+## A complete structural edit
 
 ```ts
-const files = [...new Set(grep("oldApi", "src").map((match) => match.file))];
-for (const file of files) {
-	const source = await Bun.file(file).text();
-	await Bun.write(file, source.replaceAll("oldApi", "newApi"));
-}
-
-console.log(`updated ${files.length} files`);
+sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)");
 ```
+
+No file loop, counter or summary is required. The tool reports the changed files and diff.
+Use `console.log` for additional information that helps interpret the result.
 
 After the edit, inspect the diff and run the repository's configured verification (for example,
 `npm run check` or a relevant test command) separately with the shell tool, using the project's

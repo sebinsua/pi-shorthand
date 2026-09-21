@@ -15,19 +15,30 @@ sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src"); // template
 sg.rewrite("oldApi($A)", (m) => m.A !== "0" && `newApi(${m.A})`, "src"); // function
 ```
 
-A function returns the new text; returning anything else (`undefined`, `null`, `false`) leaves that
-match alone. If nested matches would produce overlapping edits, `sg.rewrite` throws instead of
-silently dropping a replacement or returning an inaccurate count.
+A callback returns text to replace the whole match, a native `node.replace(text)` edit (or array
+of edits) to change nodes within it, or `null`/`undefined`/`false` to skip. Callbacks are synchronous.
+The result counts matches producing edits, not individual edits. Overlapping edits are rejected.
+Omit the file scope to search the working directory; the helper discovers, parses and writes files.
 
-The callback also receives `m.node`, the matched ast-grep node. Inspect a capture's syntax without
-leaving `sg.rewrite`:
+Use `getMatch("NAME")` for a capture. Replacing just the captured argument preserves the surrounding
+call, including comments between arguments:
 
 ```ts
-sg.rewrite("pause($DELAY)", (m) => (m.node.getMatch("DELAY")?.kind() === "number" ? `sleep(${m.DELAY})` : null), "src");
+sg.rewrite("store.save($KEY, $VALUE)", (m) => {
+	const value = m.node.getMatch("VALUE")!;
+	return ["true", "false"].includes(value.kind()) ? value.replace(`{ durable: ${value.text()} }`) : null;
+});
 ```
 
-This keeps dynamic expressions unchanged. The helper handles file discovery, parsing and writing;
-you don't need a `sg.parse`/`commitEdits` loop just to filter by a captured node's kind.
+Use `field("body")` for a syntax field; available fields depend on the language and node kind:
+
+```ts
+sg.rewrite(
+	{ rule: { kind: "method_definition", has: { field: "name", regex: "^format$" } } },
+	(m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"),
+	"writer.ts",
+);
+```
 
 ## Inserting, moving and removing syntax
 
@@ -90,17 +101,12 @@ sg.find(
 
 ## ast-grep's own API
 
-When patterns, rule objects and rewrite callbacks cannot express the edit, use ast-grep's JavaScript API directly.
+For transformations outside file-backed rewrites, use ast-grep's JavaScript API directly.
 It's on `sg` under its usual names, and `import { parse, Lang } from "@ast-grep/napi"` works too:
 
 ```ts
-const file = "src/app.ts";
-const root = sg.parse(sg.Lang.TypeScript, await Bun.file(file).text()).root();
-const edits = root.findAll("app.get($PATH, $$$HANDLERS)").map((node) => {
-	const path = node.getMatch("PATH")!; // edit just the captured node
-	return path.replace(path.text().toLowerCase());
-});
-await Bun.write(file, root.commitEdits(edits));
+const root = sg.parse(sg.Lang.TypeScript, sourceText).root();
+const calls = root.findAll("app.get($PATH, $$$HANDLERS)");
 ```
 
 ## Other languages

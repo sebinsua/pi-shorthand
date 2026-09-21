@@ -16,7 +16,7 @@
 import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import * as astGrep from "@ast-grep/napi";
-import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
+import { type Edit, Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
 import { appendRunHistory } from "./history.ts";
 import { file as selectFile, insert, isFileTarget, move, remember, remove, type FileTarget } from "./placement.ts";
@@ -260,44 +260,87 @@ function explicitPath(path: string): string {
 	return target;
 }
 
-/**
- * Rewrite matches in place. `replacement` is either a template using the same $X / $$$X
- * metavariables, or a function returning the new text. A function returning anything other than a
- * string (undefined, null, false) leaves that match alone, so `(m) => cond && \`…\`` works.
- * Returns the number of matches rewritten.
- */
+/** Text replaces the whole match; native edits replace nodes within it. Other listed values skip. */
+export type RewriteResult = string | Edit | readonly Edit[] | null | undefined | false;
+
+function replacementEdits(result: unknown, node: SgNode, file: string): Edit[] {
+	if (result === null || result === undefined || result === false) return [];
+	if (typeof result === "string") return [node.replace(result)];
+	const location = `${JSON.stringify(file)}:${node.range().start.line + 1}`;
+	const invalid = (detail: string): never => {
+		throw new Error(
+			`sg.rewrite at ${location}: ${detail}. Return text, a node.replace(...) edit, an array of edits, or null/undefined/false to skip.`,
+		);
+	};
+	if (typeof result === "object" && result !== null && "then" in result && typeof result.then === "function") {
+		return invalid("Received a Promise/thenable; rewrite callbacks are synchronous");
+	}
+	const edits = Array.isArray(result) ? result : [result];
+	const bounds = node.replace("");
+	return Array.from(edits, (edit): Edit => {
+		if (
+			typeof edit !== "object" ||
+			edit === null ||
+			!Number.isSafeInteger(edit.startPos) ||
+			!Number.isSafeInteger(edit.endPos) ||
+			typeof edit.insertedText !== "string"
+		) {
+			return invalid(`Unsupported callback result (${edit === null ? "null in edit array" : typeof edit})`);
+		}
+		if (edit.startPos < bounds.startPos || edit.endPos > bounds.endPos || edit.endPos < edit.startPos) {
+			return invalid(
+				`Edit range [${edit.startPos}, ${edit.endPos}) is outside match [${bounds.startPos}, ${bounds.endPos}) or reversed`,
+			);
+		}
+		return { startPos: edit.startPos, endPos: edit.endPos, insertedText: edit.insertedText };
+	});
+}
+
+/** Returns the number of matches producing edits, even when a match returns multiple edits. */
 function rewrite(
 	pattern: string | NapiConfig,
-	replacement: string | ((match: SgMatch) => unknown),
+	replacement: string | ((match: SgMatch) => RewriteResult),
 	files: FileScope = ".",
 ): number {
 	let count = 0;
+	let matched = 0;
 	for (const file of sourceFiles("sg.rewrite", files)) {
 		const parsed = parseFile(file);
 		if (!parsed) continue;
 
-		const edits = [];
+		const edits: Edit[] = [];
 		for (const node of findNodes("sg.rewrite", parsed.root, pattern)) {
+			matched++;
 			const match = toMatch(file, node, parsed.source, pattern);
-			const newText =
+			const result =
 				typeof replacement === "function"
 					? replacement(match)
 					: replacement.replace(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g, (text, _, name) => match.vars[name] ?? text);
-			if (typeof newText === "string") edits.push(node.replace(newText)); // anything else (undefined, null, false) leaves it
+			const changes = replacementEdits(result, node, file);
+			if (changes.length > 0) {
+				edits.push(...changes);
+				count++;
+			}
 		}
 		if (edits.length === 0) continue;
 		const ordered = edits.toSorted((left, right) => left.startPos - right.startPos || right.endPos - left.endPos);
 		for (let index = 1; index < ordered.length; index++) {
-			if (ordered[index].startPos < ordered[index - 1].endPos) {
-				throw new Error(`sg.rewrite produced overlapping edits in ${JSON.stringify(file)}`);
+			const previous = ordered[index - 1];
+			const current = ordered[index];
+			if (current.startPos < previous.endPos || current.startPos === previous.startPos) {
+				throw new Error(
+					`sg.rewrite produced overlapping edits in ${JSON.stringify(file)}: [${previous.startPos}, ${previous.endPos}) and [${current.startPos}, ${current.endPos})`,
+				);
 			}
 		}
 
 		writeFileSync(file, parsed.root.commitEdits(edits));
-		count += edits.length;
 	}
-	// Almost always a mistake, e.g. a bare name as the pattern only matches plain identifiers, not properties.
-	if (count === 0) console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)}`);
+	if (matched === 0) {
+		const scope = Array.isArray(files) ? files : [files];
+		const paths = scope.map((entry) => (typeof entry === "string" ? entry : gitPath(entry.file)));
+		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${JSON.stringify(paths)}`);
+	}
 	return count;
 }
 

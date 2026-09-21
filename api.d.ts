@@ -9,4 +9,5 @@ declare global {
 	const grit: ShorthandGlobals["grit"];
 }
 
+export type { RewriteResult } from "./prelude.ts";
 export type { ShorthandGlobals };

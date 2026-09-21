@@ -18,7 +18,7 @@ import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 // Runs typically take well under a second. Longer transformations can request more time.
 const DEFAULT_TIMEOUT_SECONDS = 2;
 
-const DESCRIPTION = `Make a repository change with one TypeScript program, run by Bun as a transaction: its writes are applied only if it exits successfully, and you get the diff. Keep the program focused on editing. Run tests, type-checks, builds and other verification separately afterward with the shell tool. Work out what to change inside the program (e.g. with grep) rather than copying lists from earlier output.
+const DESCRIPTION = `Make a repository change with one TypeScript program, run by Bun as a transaction: its writes are applied only if it exits successfully, and you get the diff. Keep the program focused on editing. Run tests, type-checks, builds and other verification separately afterward with the shell tool. File-backed helpers discover targets themselves; omit their file scope to search the working directory.
 
 Use it when a change takes several deterministic editing steps (reads, searches, multi-file edits, structural rewrites) and you already know what to do with each intermediate result. If seeing an intermediate result could change your plan, look first with a normal tool call.
 
@@ -26,7 +26,7 @@ The program runs in an isolated copy of the working directory. Use relative path
 - glob(pattern, dir?) → string[]
 - grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
 - sg.find(pattern, files?) → {file, line, text, vars, node}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files accepts paths, directories, globs, sg.file() targets, or mixed arrays (JS/TS).
-- sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (capture text: m.X; captured syntax node: m.node.getMatch("X")) and returns the new text, or null to leave it. Conditional node-kind checks can stay inside this helper.
+- sg.rewrite(pattern, templateOrFunction, files = ".") → number of matches producing edits. Handles file discovery, parsing and writing; no glob or per-file loop is needed. A template can use $X and $$$X; a function gets the match (capture text: m.X; captured syntax node: m.node.getMatch("X")) and returns text to replace the whole match, a native node.replace(text) edit (or array of edits) to change nodes within it, or null/undefined/false to skip. Callbacks are synchronous. An array still counts as one changed match. Example: sg.rewrite("store.save($KEY, $VALUE)", m => /^(true|false)$/.test(m.VALUE) ? m.node.getMatch("VALUE").replace("{ durable: " + m.VALUE + " }") : null). Use getMatch("NAME") for captures and field("body") for syntax fields; field names depend on the language and node.
 - sg.one(pattern, files?) requires exactly one match. sg.file(path) selects an explicit JS/TS file for search, rewrite or placement, including ignored files. Missing files work as insertion destinations; searching them is an error.
 - sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. JS/TS statements/declarations only; containers are file roots or matched statement blocks. Rematch after editing a file. move's optional function transforms its text; insert(match.text, destination) copies.
 - sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
@@ -36,7 +36,7 @@ Bun's shell $ needs await: const files = await $\`git ls-files\`.text(). Inside 
 Throw or exit non-zero to fail. rollback decides what a failure undoes:
 - "all" (default): nothing is applied; you get the error and the candidate diff.
 - "file": on timeout, files not open for writing are applied if writer inspection succeeds. If inspection fails, or on another failure, nothing is applied.
-The default timeout is 2 seconds; pass a longer timeout for longer transformations. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Print a short summary, not whole files.`;
+The default timeout is 2 seconds; pass a longer timeout for longer transformations. Only files git sees (tracked, or untracked and not ignored) are diffed and applied; writes to .git are blocked. Changed files and the diff are reported automatically; console output is optional.`;
 
 export default function (pi: ExtensionAPI) {
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
