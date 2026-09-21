@@ -1,108 +1,29 @@
 # pi-shorthand
 
-![A code call in Pi: the verdict, then the diff it applied, then the program's output](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2)
+![A code call in Pi](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2)
 
 A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with Bun programs.
-The model can combine ordinary JavaScript, text edits and structural transformations in one call.
-
-The program sees your repo as normal, but its writes are held back. By default, they're applied only
-if the program succeeds and destination files are unchanged, and the model gets the diff.
-The program performs the edit; tests, type-checks and other verification run separately afterward.
 
 ## Install
 
+Install pi-shorthand and initialize Grit:
+
 ```sh
 pi install npm:pi-shorthand
+npx @getgrit/cli init --global
 ```
 
-Or from GitHub (`pi install git:github.com/sebinsua/pi-shorthand`), or a local clone: `npm install`, then `pi install /path/to/pi-shorthand`.
+On macOS, install clang and AgentFS:
 
-A project install (`pi install -l`) only loads once you trust the project: Pi asks, or run `pi --approve`.
-
-You also need Bun, git, and either [bubblewrap](https://github.com/containers/bubblewrap) 0.9+
-(Linux) or [AgentFS](https://github.com/tursodatabase/agentfs) and `clang` (macOS:
-`curl -fsSL https://agentfs.ai/install | bash`).
-
-The optional `grit()` helper needs Grit’s modules initialized before sandboxed use. Run
-`npm run setup:grit` from this package’s directory if you want to use it. This explicitly runs
-`grit init --global` and changes your user-level Grit state; package installation does not run it.
-
-## What a program can use
-
-Anything in Bun or Node, plus these globals (no imports):
-
-```ts
-await $`git ls-files`.text(); // Bun's shell (the only async one)
-glob("src/**/*.ts"); // → ["src/a.ts", …]
-grep("oldApi(", "src"); // → [{ file, line, text }, …]
-sg.find("oldApi($$$ARGS)", "src"); // ast-grep search
-sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src");
-sg.insert("initialize();", { before: sg.one("run();", "src/app.ts") });
-sg.move(sg.one("function helper() { $$$BODY }", "src/old.ts"), { endOf: sg.file("src/new.ts") });
-sg.remove(sg.one("obsolete();", "src/app.ts"));
-sg.parse(sg.Lang.TypeScript, source); // ast-grep's own API (or import from "@ast-grep/napi")
-grit("`console.log($x)` => `logger.info($x)`", "src");
+```sh
+xcode-select --install
+curl -fsSL https://agentfs.ai/install | bash
 ```
 
-`sg.find`, `sg.one`, `sg.rewrite` and `grit` also accept `sg.file("src/app.ts")` directly, including
-in arrays mixed with paths. Search reads the file's current contents. Missing targets are valid insertion
-destinations but cannot be searched. An explicit target can select an ignored file inside the workspace;
-the tool still only applies Git-visible changes.
+On Linux, install bubblewrap 0.9 or later. For Debian and Ubuntu:
 
-[api.d.ts](api.d.ts) exposes the actual injected helper types for editor completion and external TypeScript
-checking of editing programs. Include it in the program's TypeScript project (or reference
-`pi-shorthand/api` via `compilerOptions.types` when installed as a package). This supplies types, not runtime
-globals. Bun execution does not automatically type-check programs or run application verification.
+```sh
+sudo apt install bubblewrap
+```
 
-## Options
-
-- `title`: a short description shown with the call (required).
-- `rollback`: `"file"` (default) rolls back files involved in failed or interrupted edits and
-  applies the others. A failure with no identifiable file, such as a failed check, reports the
-  failure and retains completed edits. `"all"` applies nothing if the program fails.
-- `timeout`: seconds before the program is killed. Default 2.
-
-File rollback tracks `edit`, structural rewrites and placement operations, and Grit targets.
-An operation spanning several files (such as a move or one Grit invocation) treats those files
-as a group. A file that fails rolls back to its pre-run contents, including any earlier edits to
-that file, even if the program catches the error. Ordinary filesystem errors can identify paths;
-arbitrary shell failures cannot reliably identify which closed files failed. Open writers are
-inspected before an error exits or a timeout kills the program. If inspection fails or a crash
-bypasses exit handling, no changes are retained. Cancellation always discards all changes.
-
-## Good to know
-
-- Only files git tracks, or would track, are applied.
-- Successful edits are formatted with detected installed project tools (Prettier, oxfmt, Biome, Ruff,
-  Black, gofmt or rustfmt) before the final diff. Ambiguous setups are skipped; formatter failures warn
-  without discarding completed edits. Set `PI_SHORTHAND_FORMAT=0` to disable. No project config is required.
-- Each run snapshots the checkout first; reflinks make that cheap where supported, while other
-  filesystems copy its contents and use corresponding temporary space. On macOS the program runs at
-  a private AgentFS mount, so use paths relative to its working directory for repository files.
-- Generated programs can write to the private workspace and run-specific temporary space; host files
-  outside those roots are read-only, including targets reached through repository symlinks. Run-history
-  logging has a narrow write exception. On macOS, the live checkout is also unreadable.
-- Runs against the same checkout are serialized. If another process edits a destination while a run
-  is in progress, shorthand checks it again immediately before replacing it and reports a conflict.
-  A non-cooperating writer can still race the final filesystem rename or removal itself.
-- To try it with only `read` and `code`: `pi --tools read,code`.
-- Run history is stored in `~/.cache/pi-shorthand/runs.jsonl` with directory mode `0700` and file
-  mode `0600`. It records timestamps, opaque run IDs, lifecycle events, exit status, durations,
-  counts, helper names, and shell executable names. It does not record programs, output, errors,
-  arguments, repository paths, file paths, or diffs. The log rotates at 1 MiB and expires after
-  seven days. Set `PI_SHORTHAND_HISTORY=0` to disable it. To watch enabled history:
-  `tail -f ~/.cache/pi-shorthand/runs.jsonl`.
-
-## Developing
-
-`npm run check` type-checks (TypeScript 7), lints (oxlint) and checks formatting (oxfmt). A pre-commit
-hook runs it; `npm run format` fixes formatting.
-
-`npm test` runs the tests against real overlays (it needs AgentFS on macOS, bubblewrap on Linux).
-`test/linux.sh` runs them on Linux in Docker.
-
-`bun e2e/suite.ts` previews the local benchmark suite without calling a model. Add `--execute` to run it.
-The [comparison harness](e2e/README.md) supports stock, optional and replacement editing tools, controlled
-documentation/skills, independent task checks, saved final changes and session reports.
-`bun e2e/run.ts --repo <path or git URL> --task "…" --setups baseline,replace,code --check "…"` runs Pi
-with a real model on fresh copies of your own repository.
+Editing programs run in an isolated workspace with host files outside the repository kept read-only.
