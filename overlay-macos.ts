@@ -11,6 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
+import { historyEnabled, RUN_HISTORY_FILE, RUN_HISTORY_LOCK_DIR } from "./history.ts";
 import { copyStableTree } from "./overlay-linux.ts";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
 
@@ -31,7 +32,9 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 	const base = path.join(tempDir, "base");
 	const mountContainer = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-workspace-"));
 	const mount = path.join(mountContainer, "repo");
+	const scratch = path.join(mountContainer, "tmp");
 	await fs.mkdir(mount);
+	await fs.mkdir(scratch);
 	const state: RecoveryState = { runnerPid: process.pid, tempDir, mountContainer, mount };
 	await writeRecoveryState(stateFile, state);
 
@@ -48,11 +51,12 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 			originalDir: base,
 			writableDir: mount,
 			executionDir: mount,
+			environment: { TMPDIR: scratch, TMP: scratch, TEMP: scratch },
 			gitExcludes: ["._*"],
 			wrap: (command) => [
 				"/usr/bin/sandbox-exec",
 				"-p",
-				sandboxProfile(repo, tempDir, mount, stateFile, gitMetadata, processDeniedCanary, cleanupHelper),
+				sandboxProfile(repo, tempDir, mount, stateFile, gitMetadata, processDeniedCanary, cleanupHelper, scratch),
 				...command,
 			],
 			terminateProcesses: async () => {
@@ -209,8 +213,8 @@ async function serveAndMount(
 	}
 }
 
-/** The program may write only to its private mount, excluding the real checkout and Git metadata. */
-function sandboxProfile(
+/** Restrict writes to the workspace, private scratch space, devices and optional run history. */
+export function sandboxProfile(
 	repo: string,
 	tempDir: string,
 	mount: string,
@@ -218,10 +222,21 @@ function sandboxProfile(
 	gitMetadata: string[],
 	processDeniedCanary: string,
 	cleanupHelper: string,
+	scratch: string,
 ): string {
 	return [
 		"(version 1)",
 		"(allow default)",
+		"(deny file-write*)",
+		`(allow file-write* (require-all (subpath ${JSON.stringify(mount)}) (require-not (subpath ${JSON.stringify(path.join(mount, ".git"))}))))`,
+		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
+		'(allow file-write-data (literal "/dev/null") (literal "/dev/tty"))',
+		...(historyEnabled()
+			? [
+					`(allow file-write-data (literal ${JSON.stringify(RUN_HISTORY_FILE)}))`,
+					`(allow file-write* (subpath ${JSON.stringify(RUN_HISTORY_LOCK_DIR)}))`,
+				]
+			: []),
 		`(deny file-read* (subpath ${JSON.stringify(repo)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(repo)}))`,
 		`(deny file-write* (subpath ${JSON.stringify(tempDir)}))`,

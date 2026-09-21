@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { agentFsChangeRecords } from "../overlay-macos.ts";
+import { agentFsChangeRecords, sandboxProfile } from "../overlay-macos.ts";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -38,4 +38,70 @@ test("AgentFS change records preserve newline, tab, and Unicode paths", async ()
 	expect(records).toContainEqual({ file: "src/雪.ts", type: "f", deleted: false });
 	expect(records).toContainEqual({ file: "src/link\nname", type: "l", deleted: false });
 	expect(records).toContainEqual({ file: "deleted\nname.ts", deleted: true });
+});
+
+// Exercise the actual kernel policy without requiring an AgentFS installation.
+test.skipIf(process.platform !== "darwin")("macOS restricts direct and symlink writes to private roots", async () => {
+	const root = await realpath(await mkdtemp(path.join(tmpdir(), "shorthand-seatbelt-")));
+	temporary.push(root);
+	const [repo, internal, mount, scratch, outside, recovery, helper] = [
+		"live",
+		"internal",
+		"mount",
+		"scratch",
+		"outside",
+		"recovery",
+		"helper",
+	].map((name) => path.join(root, name));
+	for (const directory of [repo!, internal!, mount!, scratch!, outside!, recovery!, helper!]) await mkdir(directory);
+	await mkdir(path.join(mount!, ".git"));
+	const victim = path.join(outside!, "victim");
+	await Bun.write(victim, "original");
+	await symlink(outside!, path.join(mount!, "external"));
+	await symlink(victim, path.join(mount!, "external-file"));
+	await symlink(scratch!, path.join(mount!, "scratch-link"));
+	const profile = sandboxProfile(
+		repo!,
+		internal!,
+		mount!,
+		path.join(recovery!, "state"),
+		[],
+		path.join(internal!, "canary"),
+		path.join(helper!, "cleanup"),
+		scratch!,
+	);
+	const blocked = [
+		victim,
+		path.join(outside!, "new"),
+		path.join(mount!, "external/victim"),
+		path.join(mount!, "external-file"),
+		path.join(mount!, ".git/config"),
+		path.join(repo!, "file"),
+		path.join(internal!, "file"),
+		path.join(recovery!, "file"),
+		path.join(helper!, "file"),
+	];
+	const program = `
+		const fs = require("node:fs");
+		for (const target of ${JSON.stringify(blocked)}) {
+			let denied = false;
+			try { fs.writeFileSync(target, "modified"); } catch (error) {
+				if (!["EPERM", "EACCES"].includes(error.code)) throw error;
+				denied = true;
+			}
+			if (!denied) throw new Error("write allowed: " + target);
+		}
+		fs.writeFileSync(${JSON.stringify(path.join(mount!, "allowed"))}, "workspace");
+		fs.writeFileSync(${JSON.stringify(path.join(mount!, "scratch-link/allowed"))}, "scratch");
+		fs.writeFileSync("/dev/null", "discard");
+	`;
+	const child = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, process.execPath, "-e", program], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const stderr = await new Response(child.stderr).text();
+	expect({ code: await child.exited, stderr }).toEqual({ code: 0, stderr: "" });
+	expect(await Bun.file(victim).text()).toBe("original");
+	expect(await Bun.file(path.join(mount!, "allowed")).text()).toBe("workspace");
+	expect(await Bun.file(path.join(scratch!, "allowed")).text()).toBe("scratch");
 });

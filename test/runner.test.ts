@@ -371,6 +371,39 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			},
 		);
 
+		test("applies files inside newly created nested directories", async () => {
+			const repo = await makeRepo(FILES);
+			const result = await run(
+				repo,
+				`await Bun.write("new/deep/first.txt", "first"); await Bun.write("new/deep/second.txt", "second");`,
+			);
+			expect(result.conflicts).toEqual([]);
+			expect(result.applied).toEqual(["new/deep/first.txt", "new/deep/second.txt"]);
+			expect(await Bun.file(path.join(repo, "new/deep/first.txt")).text()).toBe("first");
+		});
+
+		test("external symlinks cannot redirect generated writes outside the workspace", async () => {
+			const repo = await makeRepo(FILES);
+			const victim = path.join(path.dirname(repo), "victim");
+			await Bun.write(victim, "original");
+			await symlink(victim, path.join(repo, "external"));
+			const result = await run(
+				repo,
+				`
+				const fs = await import("node:fs/promises");
+				await fs.symlink(${JSON.stringify(victim)}, "new-link");
+				for (const target of [${JSON.stringify(victim)}, "external", "new-link"]) {
+					let blocked = false;
+					try { await fs.writeFile(target, "modified"); } catch { blocked = true; }
+					if (!blocked) throw new Error("external write allowed: " + target);
+				}
+				await Bun.write(process.env.TMPDIR! + "/scratch", "private");
+			`,
+			);
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(victim).text()).toBe("original");
+		});
+
 		test("preserves a nested working directory inside the execution root", async () => {
 			const repo = await makeRepo(FILES);
 			const result = await run(repo, `await Bun.write("a.ts", "nested cwd\\n");`, {
@@ -1355,16 +1388,16 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		test.skipIf(process.platform !== "darwin")("a crashed isolated run leaves the checkout usable", async () => {
 			const repo = await makeRepo(FILES);
 			const cwdFile = path.join(path.dirname(repo), "isolated-cwd");
-			const runner = startRunner(
-				repo,
-				`await Bun.write(${JSON.stringify(cwdFile)}, process.cwd());\nawait Bun.write("src/a.ts", "half way");\nawait Bun.sleep(30_000);`,
-				{
-					timeoutMs: 60_000,
-				},
-			);
+			const runner = startRunner(repo, `await Bun.write("src/a.ts", "half way");\nawait Bun.sleep(30_000);`, {
+				timeoutMs: 60_000,
+				testHooks: { programStartMarker: cwdFile },
+			});
 			await waitForFile(cwdFile);
-			expect(await Bun.file(cwdFile).exists()).toBe(true);
-			const isolatedCwd = await Bun.file(cwdFile).text();
+			const { mount: isolatedCwd } = await Bun.file(macRecoveryFile(repo)).json();
+			await waitUntil(
+				"isolated write",
+				async () => (await Bun.file(path.join(isolatedCwd, "src/a.ts")).text()) === "half way",
+			);
 			runner.kill("SIGKILL");
 			await runner.exited;
 			expect(await gitStatus(repo)).toBe("");

@@ -363,10 +363,10 @@ async function conflictingFiles(repo: string, changes: Change[]): Promise<string
 /** Compares the complete no-follow filesystem entry and rechecks the path leading to it. */
 async function destinationMatches(repo: string, change: Change): Promise<boolean> {
 	const target = path.join(repo, change.file);
-	if (!(await safeParentChain(repo, target))) return false;
+	if (!(await safeParentChain(repo, target, change.before === null))) return false;
 	try {
 		const current = await snapshotEntry(target);
-		return entriesEqual(current, change.before) && (await safeParentChain(repo, target));
+		return entriesEqual(current, change.before) && (await safeParentChain(repo, target, change.before === null));
 	} catch (error) {
 		if (error instanceof UnsupportedEntryError) return false;
 		throw error;
@@ -374,13 +374,17 @@ async function destinationMatches(repo: string, change: Change): Promise<boolean
 }
 
 /** Every existing ancestor must remain a real directory inside the checkout, never a symlink. */
-async function safeParentChain(repo: string, target: string): Promise<boolean> {
+async function safeParentChain(repo: string, target: string, allowMissing = false): Promise<boolean> {
 	const relative = path.relative(repo, target);
 	if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
 	let parent = path.dirname(target);
 	while (parent !== repo) {
-		const stats = await fs.lstat(parent).catch(() => null);
-		if (!stats?.isDirectory() || stats.isSymbolicLink()) return false;
+		try {
+			const stats = await fs.lstat(parent);
+			if (!stats.isDirectory() || stats.isSymbolicLink()) return false;
+		} catch (error) {
+			if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+		}
 		parent = path.dirname(parent);
 	}
 	return true;
@@ -707,11 +711,59 @@ interface PreparedChange {
 	installed?: { dev: number; ino: number; mode: number };
 }
 
-/** Prepares every resource first, then rolls the complete commit back on any failure or conflict. */
-async function applyChanges(
+interface CreatedDirectory {
+	path: string;
+	dev: number;
+	ino: number;
+}
+
+/** Create missing parents individually, checking existing ancestors without following symlinks. */
+async function createParents(repo: string, target: string, created: CreatedDirectory[]): Promise<boolean> {
+	if (!(await safeParentChain(repo, target, true))) return false;
+	const parts = path.relative(repo, path.dirname(target)).split(path.sep).filter(Boolean);
+	let directory = repo;
+	for (const part of parts) {
+		directory = path.join(directory, part);
+		if (!(await safeParentChain(repo, directory))) return false;
+		try {
+			await fs.mkdir(directory);
+			const stats = await fs.lstat(directory);
+			created.push({ path: directory, dev: stats.dev, ino: stats.ino });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		const stats = await fs.lstat(directory);
+		if (!stats.isDirectory() || stats.isSymbolicLink()) return false;
+	}
+	return true;
+}
+
+/** Remove only empty, unchanged directories created by this transaction. */
+export async function applyChanges(
 	repo: string,
 	changes: Change[],
 	options: { abort: AbortSignal; testHooks?: ApplicationTestHooks },
+): Promise<{ applied: Change[]; conflicts: string[]; warnings: string[] }> {
+	const created: CreatedDirectory[] = [];
+	try {
+		return await applyPreparedChanges(repo, changes, options, created);
+	} finally {
+		for (const directory of created.toReversed()) {
+			if (!(await safeParentChain(repo, directory.path))) continue;
+			const stats = await fs.lstat(directory.path).catch(() => null);
+			if (stats?.isDirectory() && stats.dev === directory.dev && stats.ino === directory.ino) {
+				await fs.rmdir(directory.path).catch(() => {});
+			}
+		}
+	}
+}
+
+/** Prepares every resource first, then rolls the complete commit back on any failure or conflict. */
+async function applyPreparedChanges(
+	repo: string,
+	changes: Change[],
+	options: { abort: AbortSignal; testHooks?: ApplicationTestHooks },
+	created: CreatedDirectory[],
 ): Promise<{ applied: Change[]; conflicts: string[]; warnings: string[] }> {
 	const { abort, testHooks = {} } = options;
 	const {
@@ -727,7 +779,10 @@ async function applyChanges(
 	try {
 		for (const change of changes) {
 			const target = path.join(repo, change.file);
-			if (!(await safeParentChain(repo, target))) {
+			if (
+				!(await destinationMatches(repo, change)) ||
+				(change.after && !(await createParents(repo, target, created)))
+			) {
 				await cleanupPrepared(prepared);
 				return { applied: [], conflicts: await conflictingFiles(repo, changes), warnings: [] };
 			}

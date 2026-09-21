@@ -67,6 +67,9 @@ globals. Bun execution does not automatically type-check programs or run applica
 - Each run snapshots the checkout first; reflinks make that cheap where supported, while other
   filesystems copy its contents and use corresponding temporary space. On macOS the program runs at
   a private AgentFS mount, so use paths relative to its working directory for repository files.
+- Generated programs can write to the private workspace and run-specific temporary space; host files
+  outside those roots are read-only, including targets reached through repository symlinks. Run-history
+  logging has a narrow write exception. On macOS, the live checkout is also unreadable.
 - Runs against the same checkout are serialized. If another process edits a destination while a run
   is in progress, shorthand checks it again immediately before replacing it and reports a conflict.
   A non-cooperating writer can still race the final filesystem rename or removal itself.
