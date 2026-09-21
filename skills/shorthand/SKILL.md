@@ -18,6 +18,9 @@ Use `sg.rewrite` for structural replacements, including conditional ones: its ca
 text (`m.X`) and the matched node (`m.node.getMatch("X")`) for syntax checks. Read the ast-grep guide
 when you need these operations; ordinary file transformations don't require every guide below.
 
+TypeScript 7.0 does not expose the legacy compiler API (`createSourceFile`, `ScriptTarget`) from
+`typescript`; changing import syntax won't fix that. Use the supplied `sg` or `grit` for structural edits.
+
 The injected helpers and bundled CLIs belong to the `code` environment; don't assume they exist in
 an ordinary `bash` call.
 
