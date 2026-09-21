@@ -155,6 +155,7 @@ results directory; do not combine them blindly with new experiments. Use a fresh
 
 [reference-edits.md](reference-edits.md) compares verified ast-grep, GritQL and source-text programs with the
 recorded agent programs. Run `bun e2e/reference-edits.ts` to execute the references, or
-`bun e2e/replay-edit-errors.ts` to reproduce two observed API failures and verify minimal corrections. These
+`bun e2e/replay-edit-errors.ts` to replay two observed API failures. The original file-target program now
+passes unchanged; the method-pattern case still verifies a minimal contextual-pattern correction. These
 commands use temporary repositories and the real overlay backend, with independent evaluation after editing.
 They do not call a model. The restored shorthand skill remains fixed during this investigation.

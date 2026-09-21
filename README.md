@@ -41,6 +41,16 @@ sg.parse(sg.Lang.TypeScript, source); // ast-grep's own API (or import from "@as
 grit("`console.log($x)` => `logger.info($x)`", "src");
 ```
 
+`sg.find`, `sg.one`, `sg.rewrite` and `grit` also accept `sg.file("src/app.ts")` directly, including
+in arrays mixed with paths. Search reads the file's current contents. Missing targets are valid insertion
+destinations but cannot be searched. An explicit target can select an ignored file inside the workspace;
+the tool still only applies Git-visible changes.
+
+[api.d.ts](api.d.ts) exposes the actual injected helper types for editor completion and external TypeScript
+checking of editing programs. Include it in the program's TypeScript project (or reference
+`pi-shorthand/api` via `compilerOptions.types` when installed as a package). This supplies types, not runtime
+globals. Bun execution does not automatically type-check programs or run application verification.
+
 ## Options
 
 - `title`: a short description shown with the call (required).
@@ -52,6 +62,9 @@ grit("`console.log($x)` => `logger.info($x)`", "src");
 ## Good to know
 
 - Only files git tracks, or would track, are applied.
+- Successful edits are formatted with detected installed project tools (Prettier, oxfmt, Biome, Ruff,
+  Black, gofmt or rustfmt) before the final diff. Ambiguous setups are skipped; formatter failures warn
+  without discarding completed edits. Set `PI_SHORTHAND_FORMAT=0` to disable. No project config is required.
 - Each run snapshots the checkout first; reflinks make that cheap where supported, while other
   filesystems copy its contents and use corresponding temporary space. On macOS the program runs at
   a private AgentFS mount, so use paths relative to its working directory for repository files.

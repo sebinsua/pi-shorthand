@@ -12,6 +12,8 @@ grit("`print($x)` => `log($x)`", "src", { lang: "python" }); // other languages
 It defaults to JavaScript/TypeScript. Other languages include python, go, rust, java, ruby, css,
 json and yaml.
 
+Paths accept files, directories, globs, `sg.file()` targets or mixed arrays.
+
 Worth knowing:
 
 - Each `grit` call takes about a second to start, so pass a longer `timeout` to the code tool when

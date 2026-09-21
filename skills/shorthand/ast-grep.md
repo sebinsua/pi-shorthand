@@ -10,6 +10,7 @@ expression or statement (`oldApi($$$A)`, `const $X = $Y`), not a fragment.
 
 ```ts
 sg.find("oldApi($$$ARGS)", "src"); // [{ file, line, text, vars, node }]
+sg.find("oldApi($$$ARGS)", sg.file("src/app.ts")); // explicit file; also accepted by one/rewrite
 sg.rewrite("oldApi($$$ARGS)", "newApi($$$ARGS)", "src"); // template
 sg.rewrite("oldApi($A)", (m) => m.A !== "0" && `newApi(${m.A})`, "src"); // function
 ```
@@ -31,8 +32,9 @@ you don't need a `sg.parse`/`commitEdits` loop just to filter by a captured node
 ## Inserting, moving and removing syntax
 
 For JS/TS, use matches from `sg.find` or `sg.one(pattern, files)`, which requires exactly one match.
-`sg.file(path)` selects a root inside the repository, including ignored files; missing files and
-directories are created only on insertion.
+`sg.file(path)` selects a JS/TS file root for placement or for scoping `find`, `one` and `rewrite`.
+Pass paths or file targets individually or in mixed arrays. Missing targets are valid insertion destinations,
+but cannot be searched.
 
 ```ts
 sg.insert("initialize();", { before: sg.one("run();", "src/app.ts") });
@@ -49,7 +51,7 @@ Argument lists and class bodies aren't supported.
 To copy, use `sg.insert(source.text, destination)`. `sg.move(source, destination, transform?)`
 accepts an optional `(text) => string` returning non-empty replacement text.
 
-**Rematch after each edit to a file**; use array removal for matches from one search. Adjacent comments stay in
+**Rematch placement targets after each edit**; use array removal for matches from one search. Adjacent comments stay in
 place, and interior whitespace is preserved. Imports and bindings aren't repaired. If placement
 rejects joined statement boundaries, add explicit semicolons.
 
@@ -105,8 +107,8 @@ await Bun.write(file, root.commitEdits(edits));
 
 `sg.find` and `sg.rewrite` handle JS, TS, TSX, HTML and CSS. For anything else, use the CLI:
 File, directory and glob inputs may be relative or absolute; results are always repository-relative.
-All input forms use Git's tracked and non-ignored file set, so explicitly naming an ignored file does
-not include it.
+String inputs use Git's tracked and non-ignored file set. An explicit `sg.file()` target can select an
+ignored JS/TS file inside the editing workspace.
 
 ```ts
 const matches = await $`ast-grep run -p 'print($A)' -l python --json=compact src`.json();

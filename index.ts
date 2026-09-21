@@ -25,12 +25,12 @@ Use it when a change takes several deterministic editing steps (reads, searches,
 The program runs in an isolated copy of the working directory. Use relative paths for repository files. On Linux, host paths outside the repository are read-only and $TMPDIR is private to the run; on macOS the real checkout's absolute path is intentionally inaccessible. Top-level await works, and so do ordinary Bun and Node APIs. These globals are synchronous, and see the files git sees (not node_modules or ignored files):
 - glob(pattern, dir?) → string[]
 - grep(stringOrRegExp, paths?) → {file, line, text}[]. A string matches literally.
-- sg.find(pattern, files?) → {file, line, text, vars, node}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files is a file, directory, glob or a list of them (JS/TS).
+- sg.find(pattern, files?) → {file, line, text, vars, node}[]. ast-grep pattern: $X is one node, $$$X is zero or more. files accepts paths, directories, globs, sg.file() targets, or mixed arrays (JS/TS).
 - sg.rewrite(pattern, templateOrFunction, files?) → number rewritten. A template can use $X and $$$X; a function gets the match (capture text: m.X; captured syntax node: m.node.getMatch("X")) and returns the new text, or null to leave it. Conditional node-kind checks can stay inside this helper.
-- sg.one(pattern, files?) requires exactly one match. sg.file(path) selects a JS/TS file root (also works for new files).
+- sg.one(pattern, files?) requires exactly one match. sg.file(path) selects an explicit JS/TS file for search, rewrite or placement, including ignored files. Missing files work as insertion destinations; searching them is an error.
 - sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. JS/TS statements/declarations only; containers are file roots or matched statement blocks. Rematch after editing a file. move's optional function transforms its text; insert(match.text, destination) copies.
 - sg also has ast-grep's own API (sg.parse, sg.Lang, sg.findInFiles, …), and import "@ast-grep/napi" works too.
-- grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[], e.g. grit("\`a($x)\` => \`b($x)\`", "src")
+- grit(gritqlPattern, paths?, {lang?, dryRun?}) → {file, matches}[]. paths accepts paths, globs, sg.file() targets or mixed arrays, e.g. grit("\`a($x)\` => \`b($x)\`", "src")
 Bun's shell $ needs await: const files = await $\`git ls-files\`.text(). Inside code, you can also run the ast-grep, grit and git CLIs with it; don't assume bundled CLIs exist in ordinary shell tool calls. Read existing source at runtime and reuse text or captures rather than embedding unchanged bodies or whole expected files in the program. For how to write these programs, see the shorthand skill.
 
 Throw or exit non-zero to fail. rollback decides what a failure undoes:

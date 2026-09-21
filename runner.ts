@@ -127,6 +127,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	let result: RunResult | undefined;
 	let primaryError: unknown;
 	const runCleanupWarnings: string[] = [];
+	const formatWarnings: string[] = [];
 
 	try {
 		tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
@@ -140,6 +141,43 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 		try {
 			program = await runProgram({ ...options, cwd }, abort, overlay, repo, tempDir);
 			changes = await findChanges(overlay);
+			const files = changes.filter((change) => change.after?.type === "file").map((change) => change.file);
+			if (program.exitCode === 0 && !abort.aborted && files.length && process.env.PI_SHORTHAND_FORMAT !== "0") {
+				try {
+					const module = executionPath(path.join(import.meta.dir, "format.ts"), repo, overlay);
+					const formatting = await runProgram(
+						{
+							...options,
+							cwd: repo,
+							timeoutMs: 10_000,
+							testHooks: undefined,
+							program: `import { formatChanged } from ${JSON.stringify(module)}; console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process.cwd())));`,
+						},
+						abort,
+						overlay,
+						repo,
+						tempDir,
+					);
+					if (formatting.exitCode !== 0)
+						formatWarnings.push(
+							`Automatic formatting ${formatting.timedOut ? "timed out" : "failed"}; completed edits are retained. ${formatting.output.trim().slice(-2000)}`,
+						);
+					else {
+						const formatted = JSON.parse(formatting.output);
+						formatWarnings.push(...formatted.warnings);
+						if (formatted.warnings.length === 0) {
+							// Keep the already captured candidate unless the entire formatting pass succeeds.
+							// These snapshots also exclude additional writes/deletions from failed formatters.
+							changes = await findChanges(overlay);
+							if (formatted.messages.length) program.output += "\n" + formatted.messages.join("\n") + "\n";
+						} else {
+							formatWarnings.push("Formatting changes discarded; completed edits are retained.");
+						}
+					}
+				} catch (error) {
+					formatWarnings.push(`Automatic formatting failed; completed edits are retained: ${String(error)}`);
+				}
+			}
 		} catch (error) {
 			executionError = error;
 			throw error;
@@ -176,7 +214,7 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			timedOut: program.timedOut,
 			durationMs: Math.round(performance.now() - startedAt),
 			output: program.output,
-			warnings: [...lint(options.program), ...applicationWarnings, ...runCleanupWarnings],
+			warnings: [...lint(options.program), ...formatWarnings, ...applicationWarnings, ...runCleanupWarnings],
 			cleanupWarnings: [...applicationWarnings, ...runCleanupWarnings],
 			changes: changes.map((change) => describe(shown(change.file), change)),
 			applied: applied.map((change) => shown(change.file)),

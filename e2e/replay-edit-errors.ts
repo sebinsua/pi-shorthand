@@ -27,9 +27,10 @@ for (const name of ["method-pattern", "file-target"]) {
 			return runWithBun({ runId: crypto.randomUUID(), cwd: root, program, timeoutMs: 15_000, rollback: "all" });
 		};
 		const failed = await execute("failed");
-		if (failed.exitCode === 0 || failed.applied.length)
+		const supported = name === "file-target";
+		if (!supported && (failed.exitCode === 0 || failed.applied.length))
 			throw new Error(`Expected ${name} to fail without applying changes`);
-		const corrected = await execute("corrected");
+		const corrected = supported ? null : await execute("corrected");
 		const command = ["bun", path.join(import.meta.dir, "guidance-tasks.ts"), task.id, root].map(quote).join(" ");
 		const verification = await runVerification(command, root, 30_000);
 		const result = {
@@ -38,11 +39,13 @@ for (const name of ["method-pattern", "file-target"]) {
 			failed,
 			corrected,
 			verification,
-			verified: corrected.exitCode === 0 && verification.passed,
+			verified: (corrected ?? failed).exitCode === 0 && verification.passed,
 		};
 		results.push(result);
-		console.log(`${name}: failure reproduced; correction ${result.verified ? "PASS" : "FAIL"}`);
-		if (!result.verified) console.log(corrected.output || verification.stderr);
+		console.log(
+			`${name}: ${supported ? "original program" : "minimal correction"} ${result.verified ? "PASS" : "FAIL"}`,
+		);
+		if (!result.verified) console.log((corrected ?? failed).output || verification.stderr);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

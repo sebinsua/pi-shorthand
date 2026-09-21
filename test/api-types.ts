@@ -1,0 +1,21 @@
+import type { ShorthandGlobals } from "../api.d.ts";
+
+// Checked by npm run check, never executed. These exercise the public program types.
+export function supportedProgram() {
+	const api: ShorthandGlobals["sg"] = sg;
+	const target = api.file("src/app.ts");
+	sg.find("run($A)", target);
+	sg.one("run($A)", [target, "src/other.ts"]);
+	sg.rewrite("run($A)", (match) => match.A.toUpperCase(), target);
+	sg.insert("initialize();", { endOf: target });
+	grit("`run($a)` => `go($a)`", [target, "src/**/*.ts"]);
+
+	// @ts-expect-error A plain object is not an sg.file target.
+	sg.find("run($A)", { file: "src/app.ts" });
+	// @ts-expect-error A match is not a file scope.
+	sg.find("run($A)", sg.one("run($A)", target));
+	// @ts-expect-error No invented helper.
+	sg.replaceAll("run($A)", "go($A)");
+	// @ts-expect-error Placement needs one destination.
+	sg.insert("initialize();", { before: target, after: target });
+}

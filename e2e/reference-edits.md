@@ -62,6 +62,10 @@ construction and separate verification. No model was told to prefer GritQL in th
 
 ## Exact failure replays and interface changes
 
+Update (2026-09-21): search/rewrite now accept `sg.file()` targets directly. The replay runner verifies the
+original file-target program unchanged; it still verifies the minimal contextual-pattern correction for
+the method case. The before/after diagnostics described below record the earlier implementation.
+
 [Replay programs](recovery-programs/) retain the first failed code programs from the concise-skill extraction
 and header sessions. Their JSON metadata identifies the source session; corrected variants preserve the
 program except for the changes below.

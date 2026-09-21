@@ -9,6 +9,15 @@ export interface Match {
 	node: SgNode;
 }
 
+const fileTarget = Symbol("shorthand.file");
+export interface FileTarget extends Match {
+	readonly [fileTarget]: true;
+}
+
+export function isFileTarget(value: unknown): value is FileTarget {
+	return typeof value === "object" && value !== null && fileTarget in value && snapshots.has(value as unknown as Match);
+}
+
 export type Destination =
 	| { before: Match; after?: never; startOf?: never; endOf?: never }
 	| { after: Match; before?: never; startOf?: never; endOf?: never }
@@ -41,12 +50,16 @@ export function remember<T extends Match>(match: T, source: string, existed = tr
 }
 
 /** A file root, including a not-yet-created file. Merely selecting it performs no writes. */
-export function file(filename: string): Match {
+export function file(filename: string): FileTarget {
 	const lang = languages[filename.split(".").pop()!];
 	if (!lang) throw new Error("sg.file requires a JS/TS filename");
 	const existed = existsSync(filename);
 	const source = existed ? readFileSync(filename, "utf8") : "";
-	return remember({ file: filename, text: source, node: parse(lang, source).root() }, source, existed);
+	return remember(
+		{ file: filename, text: source, node: parse(lang, source).root(), [fileTarget]: true as const },
+		source,
+		existed,
+	);
 }
 
 function snapshot(match: Match): Snapshot {

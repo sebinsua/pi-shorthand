@@ -1366,6 +1366,91 @@ describe.skipIf(!hasOverlay)("runner", () => {
 	});
 });
 
+describe.skipIf(!hasOverlay)("automatic formatting", () => {
+	for (const timeout of [false, true])
+		test(`retains the pre-format candidate after formatter ${timeout ? "timeout" : "failure"} with partial writes`, async () => {
+			const repo = await makeRepo({
+				"a.ts": "before\n",
+				"untouched.ts": "unchanged\n",
+				"remove.ts": "remove me\n",
+				".gitignore": "node_modules/\n",
+				"package.json": '{"scripts":{"format":"oxfmt"}}',
+			});
+			await Bun.write(
+				path.join(repo, "node_modules/.bin/oxfmt"),
+				`#!${process.execPath}
+import { openSync, writeSync, unlinkSync } from "node:fs";
+const fd = openSync("a.ts", "w"); writeSync(fd, "truncated");
+await Bun.write("new.ts", "damaged");
+await Bun.write("formatter-only.ts", "extra");
+await Bun.write(".gitignore", "node_modules/\\na.ts\\nnew.ts\\n");
+unlinkSync("untouched.ts");
+${timeout ? "await Bun.sleep(30_000);" : "process.exit(2);"}
+`,
+			);
+			await chmod(path.join(repo, "node_modules/.bin/oxfmt"), 0o755);
+			const result = await run(
+				repo,
+				`
+				await Bun.write("a.ts", "completed edit\\n");
+				await Bun.write("new.ts", "completed addition\\n");
+				await Bun.file("remove.ts").delete();
+			`,
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.warnings.join("\n")).toContain(timeout ? "formatting timed out" : "formatting failed");
+			expect(result.applied).toEqual(["a.ts", "new.ts", "remove.ts"]);
+			expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("completed edit\n");
+			expect(await Bun.file(path.join(repo, "new.ts")).text()).toBe("completed addition\n");
+			expect(await Bun.file(path.join(repo, "untouched.ts")).text()).toBe("unchanged\n");
+			expect(await Bun.file(path.join(repo, ".gitignore")).text()).toBe("node_modules/\n");
+			expect(await Bun.file(path.join(repo, "remove.ts")).exists()).toBe(false);
+			expect(await Bun.file(path.join(repo, "formatter-only.ts")).exists()).toBe(false);
+			expect(result.changes.find((change) => change.path === "a.ts")?.patch).toContain("+completed edit");
+		});
+
+	test("formats before diffing, includes additional formatter writes and preserves edits on formatter failure", async () => {
+		const repo = await makeRepo({
+			"a.ts": "before\n",
+			"untouched.ts": "unchanged\n",
+			".gitignore": "node_modules/\n",
+			"package.json": '{"scripts":{"format":"oxfmt"}}',
+		});
+		await Bun.write(
+			path.join(repo, "node_modules/.bin/oxfmt"),
+			`#!${process.execPath}\nfor (const file of process.argv.slice(2)) await Bun.write(file, "formatted\\n"); await Bun.write("extra.ts", "extra\\n");`,
+		);
+		await chmod(path.join(repo, "node_modules/.bin/oxfmt"), 0o755);
+		const result = await run(repo, 'await Bun.write("a.ts", "candidate\\n");');
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("Formatted 1 file(s) with oxfmt");
+		expect(result.applied).toEqual(["a.ts", "extra.ts"]);
+		expect(result.changes.find((change) => change.path === "a.ts")?.patch).toContain("+formatted");
+		expect(await Bun.file(path.join(repo, "untouched.ts")).text()).toBe("unchanged\n");
+		await Bun.write(path.join(repo, "node_modules/.bin/oxfmt"), "#!/bin/sh\necho format-error >&2\nexit 1\n");
+		const failure = await run(repo, 'await Bun.write("a.ts", "retained\\n");');
+		expect(failure.exitCode).toBe(0);
+		expect(failure.warnings.join("\n")).toContain("format-error");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("retained\n");
+	});
+
+	test("skips formatting failed programs and when disabled", async () => {
+		const repo = await makeRepo({
+			"a.ts": "before\n",
+			".gitignore": "node_modules/\n",
+			"package.json": '{"scripts":{"format":"oxfmt"}}',
+		});
+		await Bun.write(path.join(repo, "node_modules/.bin/oxfmt"), "#!/bin/sh\necho should-not-run >&2\nexit 1\n");
+		await chmod(path.join(repo, "node_modules/.bin/oxfmt"), 0o755);
+		const failed = await run(repo, 'await Bun.write("a.ts", "candidate"); throw Error("edit failed");');
+		expect(failed.exitCode).toBe(1);
+		expect(failed.warnings.join("\n")).not.toContain("should-not-run");
+		const disabled = await run(repo, 'await Bun.write("a.ts", "candidate");', {}, { PI_SHORTHAND_FORMAT: "0" });
+		expect(disabled.warnings.join("\n")).not.toContain("should-not-run");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("candidate");
+	});
+});
+
 describe.skipIf(!hasOverlay)("prelude", () => {
 	test("glob and grep throw with Git diagnostics while grep no-match remains empty", async () => {
 		const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
@@ -1453,24 +1538,124 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		}
 	});
 
-	test("sg explains path-versus-placement arguments before any file is edited", async () => {
+	test("sg validates every scope before any file is edited", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(
 			repo,
 			`
 			for (const helper of ["find", "one", "rewrite"]) {
 				try {
-					const files = ["src/a.ts", sg.file("src/b.ts")];
+					const files = ["src/a.ts", { file: "src/b.ts" }];
 					if (helper === "rewrite") sg.rewrite("oldApi($A)", "newApi($A)", files);
 					else sg[helper]("oldApi($A)", files);
 				} catch (error) { console.log(error.message); }
 			}`,
 		);
 		for (const helper of ["find", "one", "rewrite"])
-			expect(result.output).toContain(`sg.${helper}: files must be a path string or an array of path strings`);
-		expect(result.output).toContain('Pass the object\'s .file path instead (repository-relative: "src/b.ts")');
+			expect(result.output).toContain(`sg.${helper}: files must be paths, sg.file() targets, or an array of either`);
 		expect(result.exitCode).toBe(0);
 		expect(result.changes).toEqual([]);
+	});
+
+	test("sg accepts file targets, deduplicates mixed scopes and reads fresh source", async () => {
+		const repo = await makeRepo({ "a.ts": "oldApi(1);\n", "b.ts": "oldApi(2);\n" });
+		const result = await run(
+			repo,
+			`
+			const a = sg.file("a.ts");
+			console.log(sg.one("oldApi($A)", a).A);
+			console.log(sg.find("oldApi($A)", [a, "a.ts", sg.file("b.ts")]).length);
+			console.log(sg.rewrite("oldApi($A)", "newApi($A)", [a, "a.ts", sg.file("b.ts")]));
+			console.log(sg.one("newApi($A)", a).A);
+		`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual(["1", "2", "2", "1"]);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("newApi(1);\n");
+		expect(await Bun.file(path.join(repo, "b.ts")).text()).toBe("newApi(2);\n");
+	});
+
+	test("sg file targets explicitly select ignored files without changing apply eligibility", async () => {
+		const repo = await makeRepo({ ".gitignore": "ignored.ts\n", "a.ts": "oldApi(1);\n", "ignored.ts": "oldApi(2);\n" });
+		const result = await run(
+			repo,
+			`
+			const target = sg.file("ignored.ts");
+			console.log(sg.find("oldApi($A)", ".").length);
+			console.log(sg.one("oldApi($A)", target).A);
+			console.log(sg.rewrite("oldApi($A)", "newApi($A)", target));
+			console.log(await Bun.file("ignored.ts").text());
+		`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual(["1", "2", "1", "newApi(2);"]);
+		expect(result.applied).toEqual([]);
+		expect(await Bun.file(path.join(repo, "ignored.ts")).text()).toBe("oldApi(2);\n");
+	});
+
+	test("sg rejects missing or escaped targets before rewriting any file", async () => {
+		const repo = await makeRepo({ "a.ts": "oldApi(1);\n" });
+		const result = await run(
+			repo,
+			`
+			const missing = sg.file("new.ts");
+			try { sg.rewrite("oldApi($A)", "newApi($A)", ["a.ts", missing]); }
+			catch (error) { console.log(error.message); }
+			const escaped = sg.file("a.ts");
+			escaped.file = "../escape.ts";
+			try { sg.find("oldApi($A)", escaped); }
+			catch (error) { console.log(error.message); }
+			console.log(await Bun.file("new.ts").exists());
+		`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain('sg.rewrite: file target does not exist or is not a file: "new.ts"');
+		expect(result.output).toContain("path is outside the repository");
+		expect(result.output.trim()).toEndWith("false");
+		expect(result.changes).toEqual([]);
+	});
+
+	test("grit resolves scopes from a subdirectory without doubling the directory", async () => {
+		const repo = await makeRepo({
+			"src/a.ts": "oldApi(1);\n",
+			"src/b.ts": "oldApi(2);\n",
+			"src/src/a.ts": "oldApi(99);\n",
+			"outside.ts": "oldApi(3);\n",
+		});
+		const result = await run(
+			repo,
+			`
+			process.chdir("src");
+			grit("\`oldApi($x)\` => \`explicit($x)\`", "a.ts");
+			grit("\`oldApi($x)\` => \`globbed($x)\`", "*.ts");
+			grit("\`explicit($x)\` => \`targeted($x)\`", sg.file("a.ts"));
+			grit("\`globbed($x)\` => \`directory($x)\`", ".");
+		`,
+			{ timeoutMs: 15_000 },
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toContain("targeted(1)");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("directory(2)");
+		expect(await Bun.file(path.join(repo, "src/src/a.ts")).text()).toBe("oldApi(99);\n");
+		expect(await Bun.file(path.join(repo, "outside.ts")).text()).toBe("oldApi(3);\n");
+	});
+
+	test("grit expands globs, accepts file targets and never falls back to all files on an empty scope", async () => {
+		const repo = await makeRepo({ "a.ts": "oldApi(1);\n", "b.ts": "oldApi(2);\n", "other.js": "oldApi(3);\n" });
+		const result = await run(
+			repo,
+			`
+			grit("\`oldApi($x)\` => \`newApi($x)\`", "*.ts");
+			grit("\`newApi($x)\` => \`done($x)\`", sg.file("a.ts"));
+			console.log(JSON.stringify(grit("\`oldApi($x)\` => \`wrong($x)\`", "missing-*.ts")));
+		`,
+			{ timeoutMs: 15_000 },
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output).toContain("warning: grit found no files");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toContain("done(1)");
+		expect(await Bun.file(path.join(repo, "b.ts")).text()).toContain("newApi(2)");
+		expect(await Bun.file(path.join(repo, "other.js")).text()).toBe("oldApi(3);\n");
 	});
 
 	test("sg suggests an executable contextual pattern for a standalone class method", async () => {

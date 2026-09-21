@@ -19,7 +19,7 @@ import * as astGrep from "@ast-grep/napi";
 import { Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
 import { appendRunHistory } from "./history.ts";
-import { file as selectFile, insert, move, remember, remove } from "./placement.ts";
+import { file as selectFile, insert, isFileTarget, move, remember, remove, type FileTarget } from "./placement.ts";
 
 function log(event: string, details: Record<string, unknown>) {
 	const { PI_SHORTHAND_LOG, PI_SHORTHAND_RUN } = process.env;
@@ -150,30 +150,42 @@ const LANGUAGES: Record<string, Lang> = {
  * A match. Its captures are in `vars` and also directly on it (capture names are uppercase, so they
  * can't clash with the other fields): both `m.vars.ARGS` and `m.ARGS` work.
  */
-type SgMatch = {
+export type SgMatch = {
 	file: string;
 	line: number;
 	text: string;
 	vars: Record<string, string>; // captured metavariables, e.g. vars.ARGS for $$$ARGS
 	node: SgNode;
-} & Record<string, unknown>;
+} & Record<Uppercase<string>, string>;
+
+export type FileScope = string | FileTarget | (string | FileTarget)[];
+
+/** File targets opt into explicit files; strings retain the helper's existing selection semantics. */
+function scopeFiles(helper: string, files: FileScope, select: (input: string) => string[]): string[] {
+	const inputs = Array.isArray(files) ? files : [files];
+	return [
+		...new Set(
+			inputs.flatMap((input) => {
+				if (typeof input === "string") return select(input);
+				if (!isFileTarget(input))
+					throw new TypeError(`${helper}: files must be paths, sg.file() targets, or an array of either`);
+				const absolute = explicitPath(input.file);
+				if (!statSync(absolute, { throwIfNoEntry: false })?.isFile())
+					throw new Error(
+						`${helper}: file target does not exist or is not a file: ${JSON.stringify(gitPath(absolute))}`,
+					);
+				return [gitPath(absolute)];
+			}),
+		),
+	];
+}
 
 /**
  * The supported syntax files to search. `files` is a Git-visible file, directory, glob, or a list
  * of any of those. Warns if there are none, since that's almost always a mistake.
  */
-function sourceFiles(helper: string, files: string | string[]): string[] {
-	const inputs = Array.isArray(files) ? files : [files];
-	for (const input of inputs) {
-		if (typeof input === "string") continue;
-		const target = input as unknown as { file?: unknown } | null;
-		const hint =
-			target && typeof target.file === "string"
-				? ` Pass the object's .file path instead (repository-relative: ${JSON.stringify(relative(repositoryRoot, resolve(target.file)).replaceAll("\\", "/"))}). sg.file() returns a placement target, not a path.`
-				: "";
-		throw new TypeError(`${helper}: files must be a path string or an array of path strings.${hint}`);
-	}
-	const found = [...new Set(inputs.flatMap(selectFiles))];
+function sourceFiles(helper: string, files: FileScope): string[] {
+	const found = scopeFiles(helper, files, selectFiles);
 	const parseable = found.filter(
 		(file) =>
 			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
@@ -182,11 +194,11 @@ function sourceFiles(helper: string, files: string | string[]): string[] {
 	return parseable;
 }
 
-function find(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch[] {
+function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
 	return findMatches("sg.find", pattern, files);
 }
 
-function findMatches(helper: string, pattern: string | NapiConfig, files: string | string[]): SgMatch[] {
+function findMatches(helper: string, pattern: string | NapiConfig, files: FileScope): SgMatch[] {
 	const matches: SgMatch[] = [];
 	for (const file of sourceFiles(helper, files)) {
 		const parsed = parseFile(file);
@@ -197,7 +209,7 @@ function findMatches(helper: string, pattern: string | NapiConfig, files: string
 	return matches;
 }
 
-function one(pattern: string | NapiConfig, files: string | string[] = "."): SgMatch {
+function one(pattern: string | NapiConfig, files: FileScope = "."): SgMatch {
 	const matches = findMatches("sg.one", pattern, files);
 	if (matches.length !== 1)
 		throw new Error(`sg.one expected exactly one match, found ${matches.length} for ${JSON.stringify(pattern)}`);
@@ -230,6 +242,10 @@ function findNodes(helper: string, root: SgNode, pattern: string | NapiConfig): 
 
 /** Explicit destinations may be ignored or missing, but cannot resolve outside the repository. */
 function placementFile(path: string) {
+	return selectFile(explicitPath(path));
+}
+
+function explicitPath(path: string): string {
 	let ancestor = resolve(repositoryRoot, gitPath(path));
 	const missing: string[] = [];
 	while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
@@ -241,7 +257,7 @@ function placementFile(path: string) {
 	if (relativeTarget === ".." || relativeTarget.startsWith(`..${sep}`) || isAbsolute(relativeTarget)) {
 		throw new Error(`path is outside the repository: ${JSON.stringify(path)}`);
 	}
-	return selectFile(target);
+	return target;
 }
 
 /**
@@ -253,7 +269,7 @@ function placementFile(path: string) {
 function rewrite(
 	pattern: string | NapiConfig,
 	replacement: string | ((match: SgMatch) => unknown),
-	files: string | string[] = ".",
+	files: FileScope = ".",
 ): number {
 	let count = 0;
 	for (const file of sourceFiles("sg.rewrite", files)) {
@@ -316,12 +332,21 @@ function toMatch(file: string, node: SgNode, source: string, pattern: string | N
  * Apply a GritQL pattern in place (or only match it, with dryRun). Returns the files it matched.
  * e.g. grit("`console.log($x)` => `logger.info($x)`", "src")
  */
-function grit(pattern: string, paths: string | string[] = ".", options: { lang?: string; dryRun?: boolean } = {}) {
+function grit(pattern: string, paths: FileScope = ".", options: { lang?: string; dryRun?: boolean } = {}) {
+	const selected = scopeFiles("grit", paths, (input) => {
+		const normalized = gitPath(input);
+		return statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false }) ? [normalized] : selectFiles(input);
+	});
+	if (selected.length === 0) {
+		console.error(`warning: grit found no files in ${JSON.stringify(paths)}`);
+		return [];
+	}
 	const flags = ["--force", "--jsonl"];
 	if (options.dryRun) flags.push("--dry-run");
 	if (options.lang) flags.push("--language", options.lang);
 
-	const result = Bun.spawnSync(["grit", "apply", ...flags, pattern, ...[paths].flat()], { env: process.env });
+	const targets = selected.map((file) => resolve(repositoryRoot, file));
+	const result = Bun.spawnSync(["grit", "apply", ...flags, pattern, ...targets], { env: process.env });
 	if (result.exitCode !== 0) {
 		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
 		throw new Error(`grit failed (exit ${result.exitCode}): ${diagnostic || "no diagnostics"}`);
@@ -354,7 +379,7 @@ function grit(pattern: string, paths: string | string[] = ".", options: { lang?:
 	return files;
 }
 
-Object.assign(globalThis, {
+const globals = {
 	$,
 	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
 	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
@@ -369,4 +394,7 @@ Object.assign(globalThis, {
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
-});
+};
+
+export type ShorthandGlobals = typeof globals;
+Object.assign(globalThis, globals);
