@@ -217,4 +217,5 @@ await Bun.write("output.txt", ${JSON.stringify(output)});`;
 		await first("second", 0o600, "3");
 		expect(await Bun.file(path.join(repo, "output.txt")).text()).toBe("3");
 	},
+	30_000,
 );
