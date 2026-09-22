@@ -8,6 +8,7 @@ declare global {
 	const grep: ShorthandGlobals["grep"];
 	const sg: ShorthandGlobals["sg"];
 	const grit: ShorthandGlobals["grit"];
+	const ts: ShorthandGlobals["ts"];
 }
 
 export type { RewriteResult } from "./prelude.ts";

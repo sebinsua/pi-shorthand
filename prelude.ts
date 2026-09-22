@@ -5,7 +5,7 @@
  * sg is ast-grep's own JavaScript API plus file-backed search, rewrite and placement helpers.
  * Programs can also import "@ast-grep/napi" directly.
  *
- * Everything except $ is synchronous: models often call helpers like these without await.
+ * Most helpers are synchronous; semantic TypeScript refactors return promises.
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
  * and build output are left out on every platform.
  *
@@ -28,6 +28,7 @@ import {
 	remove,
 	type FileTarget,
 } from "./placement.ts";
+import { rename as renameTypeScriptSymbol, type RenameOptions } from "./typescript-refactors.ts";
 
 installFileOutcomeTracking();
 
@@ -48,13 +49,21 @@ function report(event: Record<string, unknown>) {
 function logged<T>(helper: string, _args: unknown[], run: () => T): T {
 	const startedAt = performance.now();
 	const result = run();
-	const results = Array.isArray(result) ? result.length : typeof result === "number" ? result : undefined;
-	report({
-		type: "helper",
-		helper,
-		ms: Math.round(performance.now() - startedAt),
-		results,
-	});
+	const done = (value: unknown) => {
+		const results = Array.isArray(value) ? value.length : typeof value === "number" ? value : undefined;
+		report({
+			type: "helper",
+			helper,
+			ms: Math.round(performance.now() - startedAt),
+			results,
+		});
+	};
+	if (result instanceof Promise)
+		return result.then((value) => {
+			done(value);
+			return value;
+		}) as T;
+	done(result);
 	return result;
 }
 
@@ -210,6 +219,14 @@ function sourceFiles(helper: string, files: FileScope): string[] {
 	);
 	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${JSON.stringify(files)}`);
 	return parseable;
+}
+
+type TypeScriptFile = string | FileTarget;
+
+function typeScriptFile(helper: string, file: TypeScriptFile): string {
+	if (typeof file === "string") return file;
+	if (!isFileTarget(file)) throw new TypeError(`${helper}: file must be a path or sg.file() target`);
+	return getMatchSnapshot(file).file;
 }
 
 function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
@@ -543,6 +560,15 @@ const globals = {
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
+	ts: {
+		rename: (options: RenameOptions<TypeScriptFile>) =>
+			logged("ts.rename", [options], () =>
+				renameTypeScriptSymbol(repositoryRoot, {
+					...options,
+					file: typeScriptFile("ts.rename", options.file),
+				}),
+			),
+	},
 };
 
 export type ShorthandGlobals = typeof globals;

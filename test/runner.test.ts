@@ -232,6 +232,50 @@ describe.skipIf(!hasOverlay)("runner", () => {
 		}
 	});
 
+	describe("TypeScript refactors", () => {
+		test("renames one resolved symbol across files without changing unrelated names or strings", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
+				"src/parse.ts": "export function parseUser(value: string) { return value; }\n",
+				"src/use.ts":
+					'import { parseUser } from "./parse";\nexport const api = { parseUser };\nexport const result = parseUser("Ada");\n',
+				"src/other.ts":
+					'function parseUser() { return "unrelated"; }\nexport const text = "parseUser";\nexport { parseUser };\n',
+			});
+
+			const result = await run(
+				repo,
+				`const file = sg.file("src/parse.ts");
+await ts.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/parse.ts")).text()).toBe(
+				"export function decodeUser(value: string) { return value; }\n",
+			);
+			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toBe(
+				'import { decodeUser } from "./parse";\nexport const api = { parseUser: decodeUser };\nexport const result = decodeUser("Ada");\n',
+			);
+			expect(await Bun.file(path.join(repo, "src/other.ts")).text()).toContain("function parseUser()");
+			expect(await Bun.file(path.join(repo, "src/other.ts")).text()).toContain('"parseUser"');
+		});
+
+		test("rejects a missing or ambiguous declaration without writing", async () => {
+			const source = "export const value = 1;\nexport function outer() { const value = 2; return value; }\n";
+			for (const symbol of ["missing", "value"]) {
+				const repo = await makeRepo({ "tsconfig.json": "{}", "src/app.ts": source });
+				const result = await run(
+					repo,
+					`await ts.rename({ file: "src/app.ts", symbol: ${JSON.stringify(symbol)}, to: "next" });`,
+					{ timeoutMs: 15_000 },
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.output).toMatch(/found (no declaration|more than one declaration)/);
+				expect(await Bun.file(path.join(repo, "src/app.ts")).text()).toBe(source);
+			}
+		});
+	});
+
 	describe("transaction application", () => {
 		test("applies a successful program's changes and reports them", async () => {
 			const repo = await makeRepo(FILES);

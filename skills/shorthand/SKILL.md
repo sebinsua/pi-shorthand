@@ -18,7 +18,20 @@ edit({ path: "src/config.ts", oldText: "timeoutMs: 1000", newText: "timeoutMs: 3
 `edit` replaces exactly one literal occurrence, throwing if it is missing or ambiguous. Include
 surrounding text to distinguish repeated occurrences. Replacement text is literal, including `$`.
 Line-ending differences are accepted when matching.
-Calls are synchronous and can be combined in one program; later calls see earlier changes.
+`edit` calls are synchronous and can be combined in one program; later calls see earlier changes.
+
+## Rename a TypeScript symbol
+
+Use the TypeScript language server to rename one resolved symbol and its references across the project:
+
+```ts
+await ts.rename({ file: "src/users.ts", symbol: "parseUser", to: "decodeUser" });
+```
+
+`file` accepts a path or an `sg.file()` target and identifies the declaration's file. The declaration
+name must be unique in that file; missing or repeated names are errors. Unlike a structural
+identifier rewrite, unrelated symbols with the same spelling in other scopes or files are not
+changed.
 
 ## Insert before or after a statement
 

@@ -66,23 +66,6 @@ accepts an optional `(text) => string` returning non-empty replacement text.
 place, and interior whitespace is preserved. Imports and bindings aren't repaired. If placement
 rejects joined statement boundaries, add explicit semicolons.
 
-## Renaming a name
-
-A bare name as the pattern (`sg.rewrite("oldName", "newName")`) only matches plain identifiers, not
-property names (`obj.oldName`, `{ oldName: 1 }`, interface fields). To rename a name everywhere it
-appears in code (but not in strings), match it by kind:
-
-```ts
-const anyName = [
-	"identifier",
-	"property_identifier",
-	"shorthand_property_identifier",
-	"shorthand_property_identifier_pattern",
-	"type_identifier",
-];
-sg.rewrite({ rule: { regex: "^oldName$", any: anyName.map((kind) => ({ kind })) } }, "newName", "src");
-```
-
 ## Rule objects
 
 When a pattern alone can't say it, pass a rule instead:

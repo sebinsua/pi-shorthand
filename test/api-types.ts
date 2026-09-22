@@ -1,7 +1,7 @@
 import type { ShorthandGlobals } from "../api.d.ts";
 
 // Checked by npm run check, never executed. These exercise the public program types.
-export function supportedProgram() {
+export async function supportedProgram() {
 	edit({ path: "src/config.ts", oldText: "timeoutMs: 1000", newText: "timeoutMs: 3000" });
 	// @ts-expect-error A replacement requires newText.
 	edit({ path: "src/config.ts", oldText: "timeoutMs: 1000" });
@@ -12,6 +12,9 @@ export function supportedProgram() {
 	sg.rewrite("run($A)", (match) => match.A.toUpperCase(), target);
 	sg.insert("initialize();", { endOf: target });
 	grit("`run($a)` => `go($a)`", [target, "src/**/*.ts"]);
+	await ts.rename({ file: target, symbol: "run", to: "start" });
+	// @ts-expect-error A semantic rename requires the new name.
+	await ts.rename({ file: "src/app.ts", symbol: "run" });
 
 	// @ts-expect-error A plain object is not an sg.file target.
 	sg.find("run($A)", { file: "src/app.ts" });
