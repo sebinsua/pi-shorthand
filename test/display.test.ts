@@ -184,6 +184,46 @@ describe("the verdict", () => {
 });
 
 describe("unstructured completed results", () => {
+	test("infrastructure diagnostics appear once in muted text", () => {
+		const calls: Array<{ color: string; text: string }> = [];
+		const recordingTheme = {
+			...theme,
+			fg: (color: string, text: string) => {
+				calls.push({ color, text });
+				return text;
+			},
+		} as unknown as Theme;
+		renderCodeResult(
+			{
+				content: [],
+				details: {
+					infrastructureError: "snapshot failed",
+					diagnostics: {
+						spans: [{ name: "snapshot copy", startMs: 0, durationMs: 23, failed: true }],
+						counters: {},
+						failurePhase: "creating workspace",
+					},
+				},
+			},
+			{ expanded: false, isPartial: false },
+			recordingTheme,
+		);
+		expect(calls.filter((call) => call.color === "error").map((call) => call.text)).toEqual(["snapshot failed"]);
+		expect(calls.filter((call) => call.text.includes("snapshot copy"))).toEqual([
+			{ color: "muted", text: "  snapshot copy: 23ms (failed)" },
+		]);
+	});
+
+	test("slow startup prints diagnostics even when the runner itself was quick", () => {
+		const lines = show(
+			result({
+				durationMs: 10,
+				diagnostics: { spans: [], counters: {}, wallMs: 3010, startupMs: 3000, runnerMs: 10, responseMs: 0 },
+			}),
+		);
+		expect(lines.at(-1)).toContain("runner startup/IPC 3000ms");
+	});
+
 	test("show the final infrastructure error instead of pending progress", () => {
 		expect(unstructuredResultText([{ type: "text", text: "runner failed: EACCES" }])).toBe("runner failed: EACCES");
 

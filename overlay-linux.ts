@@ -10,6 +10,7 @@ import { availableParallelism, homedir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
+import { diagnosticCounter, measure } from "./diagnostics.ts";
 
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const bwrap = Bun.which("bwrap");
@@ -104,33 +105,36 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 /** Copies a coherent tree, retrying if anything in the source changes during the copy. */
 export async function copyStableTree(source: string, destination: string) {
 	for (let attempt = 0; attempt < 3; attempt++) {
+		diagnosticCounter("snapshot attempts", attempt + 1);
 		let before: string;
 		try {
-			before = await treeIdentity(source);
+			before = await measure("snapshot inventory", () => treeIdentity(source));
 		} catch (error) {
 			if (isMissing(error)) continue;
 			throw new Error(`Could not inspect the repository before snapshotting: ${errorMessage(error)}`, {
 				cause: error,
 			});
 		}
-		await fs.rm(destination, { recursive: true, force: true });
+		await measure("snapshot reset", () => fs.rm(destination, { recursive: true, force: true }));
 		try {
-			if (process.platform === "linux") {
-				// Keep traversal and copying in one native process rather than crossing the JS/fs
-				// boundary for every entry. --reflink=auto also works on ordinary ext4.
-				await $`cp --recursive --no-dereference --preserve=mode,timestamps --reflink=auto -- ${source} ${destination}`.quiet();
-			} else {
-				await fs.cp(source, destination, {
-					recursive: true,
-					preserveTimestamps: true,
-					verbatimSymlinks: true,
-					mode: constants.COPYFILE_FICLONE,
-				});
-			}
+			await measure("snapshot copy", async () => {
+				if (process.platform === "linux") {
+					// Keep traversal and copying in one native process rather than crossing the JS/fs
+					// boundary for every entry. --reflink=auto also works on ordinary ext4.
+					await $`cp --recursive --no-dereference --preserve=mode,timestamps --reflink=auto -- ${source} ${destination}`.quiet();
+				} else {
+					await fs.cp(source, destination, {
+						recursive: true,
+						preserveTimestamps: true,
+						verbatimSymlinks: true,
+						mode: constants.COPYFILE_FICLONE,
+					});
+				}
+			});
 		} catch (error) {
 			let after: string;
 			try {
-				after = await treeIdentity(source);
+				after = await measure("snapshot verification after copy error", () => treeIdentity(source));
 			} catch (inspectionError) {
 				if (isMissing(inspectionError)) continue;
 				throw new Error(`Could not verify the repository after a snapshot error: ${errorMessage(inspectionError)}`, {
@@ -142,7 +146,7 @@ export async function copyStableTree(source: string, destination: string) {
 		}
 		let after: string;
 		try {
-			after = await treeIdentity(source);
+			after = await measure("snapshot verification", () => treeIdentity(source));
 		} catch (error) {
 			if (isMissing(error)) continue;
 			throw new Error(`Could not verify the repository snapshot: ${errorMessage(error)}`, { cause: error });
@@ -156,6 +160,8 @@ export async function copyStableTree(source: string, destination: string) {
 async function treeIdentity(root: string): Promise<string> {
 	const records = [identityRecord(".", await fs.lstat(root, { bigint: true }))];
 	const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
+	diagnosticCounter("snapshot entries", entries.length + 1);
+	let bytes = 0;
 	let next = 0;
 	const workers = await Promise.allSettled(
 		Array.from({ length: Math.min(availableParallelism(), entries.length) }, async () => {
@@ -166,11 +172,13 @@ async function treeIdentity(root: string): Promise<string> {
 					throw new Error(`Unsupported repository entry type at ${JSON.stringify(path.relative(root, file))}`);
 				}
 				const stats = await fs.lstat(file, { bigint: true });
+				if (entry.isFile()) bytes += Number(stats.size);
 				records.push(identityRecord(path.relative(root, file), stats));
 			}
 		}),
 	);
 	for (const worker of workers) if (worker.status === "rejected") throw worker.reason;
+	diagnosticCounter("snapshot logical bytes", bytes);
 	return records.toSorted().join("\0");
 }
 

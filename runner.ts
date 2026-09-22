@@ -24,6 +24,14 @@ import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits } from "./program-lint.ts";
 import { supportsFormatting } from "./format.ts";
+import {
+	type Diagnostics,
+	diagnosticFailure,
+	diagnosticPhase,
+	diagnosticLines,
+	measure,
+	withDiagnostics,
+} from "./diagnostics.ts";
 import { preserveTextFormat } from "./text-format.ts";
 import { type FileOutcomeEvent, parseOpenWriters } from "./file-outcomes.ts";
 
@@ -58,6 +66,7 @@ export interface RunResult {
 	timedOut: boolean;
 	durationMs: number;
 	timings?: RunTimings;
+	diagnostics?: Diagnostics;
 	output: string; // stdout and stderr
 	warnings: string[]; // likely mistakes spotted in the program before it ran
 	cleanupWarnings: string[]; // application/cleanup completed with a non-fatal infrastructure warning
@@ -229,6 +238,7 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 				finishPhase("formatMs");
 			}
 		} catch (error) {
+			diagnosticFailure();
 			executionError = error;
 			throw error;
 		} finally {
@@ -298,6 +308,7 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 		};
 		return result;
 	} catch (error) {
+		diagnosticFailure();
 		primaryError = error;
 		for (const warning of runCleanupWarnings) attachCleanupWarning(error, warning);
 		throw error;
@@ -561,19 +572,19 @@ async function runProgram(
 	abort.addEventListener("abort", killAll);
 	if (abort.aborted) killAll();
 
-	const { exitCode, timedOut, openForWriting, stillRunning } = await waitWithTimeout(
-		child,
-		options.timeoutMs,
-		overlay.executionDir,
-		options.testHooks?.writerInspectionFailure,
+	const { exitCode, timedOut, openForWriting, stillRunning } = await measure(
+		"sandbox wait (includes preloads and program)",
+		() => waitWithTimeout(child, options.timeoutMs, overlay.executionDir, options.testHooks?.writerInspectionFailure),
 	);
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
 	try {
-		await overlay.terminateProcesses?.();
+		await measure("descendant cleanup", async () => {
+			await overlay.terminateProcesses?.();
+		});
 	} finally {
 		await Promise.all([output.close(), outcomeFile.close()]);
-		await progress.closed;
+		await measure("progress pipe close", () => progress.closed);
 		await fs.rm(programFile, { force: true });
 	}
 	const outcomes = fileOutcomes(await Bun.file(outcomePath).text());
@@ -597,7 +608,8 @@ async function runProgram(
 }
 
 /** Report infrastructure phases as well as commands, so a slow call says what it is waiting on. */
-function reportProgress(step: string) {
+function reportProgress(step: string, phase = true) {
+	if (phase) diagnosticPhase(step);
 	try {
 		writeSync(3, JSON.stringify({ step }) + "\n");
 	} catch {
@@ -624,7 +636,7 @@ function trackProgress(child: ChildProcess) {
 					else if (event.type === "helper" && typeof event.helper === "string" && typeof event.ms === "number")
 						lastStep = `${event.helper} (${event.ms} ms)`;
 					else continue;
-					reportProgress(lastStep);
+					reportProgress(lastStep, false);
 				} catch {
 					// Progress is advisory; malformed events do not affect the run.
 				}
@@ -1191,5 +1203,26 @@ if (import.meta.main) {
 	const abort = new AbortController();
 	process.on("SIGTERM", () => abort.abort());
 	const options: RunOptions = await Bun.stdin.json();
-	console.log(JSON.stringify(await run(options, abort.signal)));
+	let diagnostics: Diagnostics | undefined;
+	let hasDiagnosticChannel = false;
+	try {
+		const completed = await withDiagnostics(
+			() => run(options, abort.signal),
+			(snapshot) => {
+				diagnostics = snapshot;
+				try {
+					writeSync(3, JSON.stringify({ diagnostics: snapshot }) + "\n");
+					hasDiagnosticChannel = true;
+				} catch {
+					/* direct invocation */
+				}
+			},
+		);
+		completed.value.diagnostics = completed.diagnostics;
+		console.log(JSON.stringify(completed.value));
+	} catch (error) {
+		console.error(error);
+		if (diagnostics && !hasDiagnosticChannel) console.error(diagnosticLines(diagnostics).join("\n"));
+		process.exitCode = 1;
+	}
 }

@@ -21,6 +21,16 @@ import {
 	unstructuredResultText,
 } from "./display.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
+import { type Diagnostics, completeDiagnostics, diagnosticLines } from "./diagnostics.ts";
+
+class RunnerError extends Error {
+	constructor(
+		message: string,
+		readonly diagnostics: Diagnostics,
+	) {
+		super(message);
+	}
+}
 
 // Runs typically take well under a second. Longer transformations can request more time.
 const DEFAULT_TIMEOUT_SECONDS = 2;
@@ -81,16 +91,28 @@ export default function (pi: ExtensionAPI) {
 				});
 			}, 500);
 
-			const result = await runWithBun(
-				{
-					cwd: ctx.cwd,
-					program: params.program,
-					timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
-					rollback: params.rollback ?? "file",
-				},
-				signal,
-				(step) => (latest = step),
-			).finally(() => clearInterval(progress));
+			let result: RunResult;
+			try {
+				result = await runWithBun(
+					{
+						cwd: ctx.cwd,
+						program: params.program,
+						timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
+						rollback: params.rollback ?? "file",
+					},
+					signal,
+					(step) => (latest = step),
+				);
+			} catch (error) {
+				if (!(error instanceof RunnerError)) throw error;
+				return {
+					isError: true,
+					content: [{ type: "text" as const, text: [error.message, ...diagnosticLines(error.diagnostics)].join("\n") }],
+					details: { infrastructureError: error.message, diagnostics: error.diagnostics },
+				};
+			} finally {
+				clearInterval(progress);
+			}
 			return {
 				content: [{ type: "text", text: textForModel(result, toolCallId) }],
 				details: result,
@@ -116,6 +138,18 @@ export function renderCodeResult(
 		const progress = (result.details as { progress?: string } | undefined)?.progress;
 		return new Text(theme.fg("muted", progress ? `running… ${progress}` : "running…"), 0, 0);
 	}
+	if (result.details && typeof result.details === "object" && "infrastructureError" in result.details) {
+		const failure = result.details as { infrastructureError: string; diagnostics: Diagnostics };
+		return new Text(
+			[
+				theme.fg("error", failure.infrastructureError),
+				"",
+				...diagnosticLines(failure.diagnostics).map((line) => theme.fg("muted", line)),
+			].join("\n"),
+			0,
+			0,
+		);
+	}
 	const run = result.details as RunResult | undefined;
 	if (!run) return new Text(theme.fg("error", unstructuredResultText(result.content)), 0, 0);
 	return new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
@@ -131,6 +165,13 @@ export function runWithBun(
 	signal?: AbortSignal,
 	onProgress?: (step: string) => void,
 ): Promise<RunResult> {
+	const startedAt = performance.now();
+	let firstEventAt: number | undefined;
+	let diagnostics: Diagnostics = { spans: [], counters: {} };
+	const finishDiagnostics = () => {
+		const now = performance.now();
+		return completeDiagnostics(diagnostics, now - startedAt, (firstEventAt ?? now) - startedAt);
+	};
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) return reject(new Error("Aborted"));
 		const runner = spawn("bun", [path.join(import.meta.dirname, "runner.ts")], {
@@ -155,14 +196,23 @@ export function runWithBun(
 			progressBuffer = lines.pop() ?? "";
 			for (const line of lines) {
 				try {
-					const event = JSON.parse(line) as { step?: unknown };
+					const event = JSON.parse(line) as { step?: unknown; diagnostics?: Diagnostics };
+					firstEventAt ??= performance.now();
+					if (event.diagnostics) {
+						diagnostics = event.diagnostics;
+						const active = diagnostics.spans.findLast((span) => span.durationMs === undefined);
+						if (active) onProgress?.(active.name);
+					}
 					if (typeof event.step === "string") onProgress?.(event.step);
 				} catch {
 					// Progress is advisory; malformed events do not affect the run.
 				}
 			}
 		});
-		runner.on("error", reject);
+		runner.on("error", (error) => {
+			signal?.removeEventListener("abort", stop);
+			reject(new RunnerError(error.message, finishDiagnostics()));
+		});
 		runner.on("close", (code) => {
 			signal?.removeEventListener("abort", stop);
 			try {
@@ -171,10 +221,24 @@ export function runWithBun(
 				// nothing left
 			}
 			if (code === 0) {
-				const result: RunResult = JSON.parse(stdout);
+				let result: RunResult;
+				try {
+					result = JSON.parse(stdout);
+				} catch {
+					reject(new RunnerError("Runner returned invalid JSON", finishDiagnostics()));
+					return;
+				}
+				diagnostics = result.diagnostics ?? diagnostics;
+				result.diagnostics = finishDiagnostics();
 				if (!signal?.aborted || result.applied.length > 0 || result.cleanupWarnings.length > 0) resolve(result);
 				else reject(new Error("Aborted"));
-			} else reject(new Error(stderr.trim() || (signal?.aborted ? "Aborted" : `runner exited with ${code}`)));
+			} else
+				reject(
+					new RunnerError(
+						stderr.trim() || (signal?.aborted ? "Aborted" : `runner exited with ${code}`),
+						finishDiagnostics(),
+					),
+				);
 		});
 
 		runner.stdin.end(JSON.stringify(options));
@@ -243,6 +307,8 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	// On failure the error goes last, where it's easiest to find; on success, the diff does.
 	if (run.exitCode === 0 && run.conflicts.length === 0) lines.push(...output, ...diff);
 	else lines.push(...diff, ...output);
+	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= run.timeoutMs || run.exitCode !== 0))
+		lines.push("", ...diagnosticLines(run.diagnostics));
 	return lines.join("\n");
 }
 

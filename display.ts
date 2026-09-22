@@ -9,6 +9,7 @@
 
 import { getLanguageFromPath, highlightCode, keyHint, renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
 import type { FileChange, RunResult, RunTimings } from "./runner.ts";
+import { diagnosticLines } from "./diagnostics.ts";
 
 type ToolBackground = "toolSuccessBg" | "toolErrorBg";
 
@@ -85,6 +86,9 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 	for (const section of sections) lines.push("", ...section);
 	const timing = timingBreakdown(run);
 	if (timing) lines.push("", theme.fg("muted", `timing: ${timing}`));
+	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= run.timeoutMs || run.exitCode !== 0)) {
+		lines.push(...diagnosticLines(run.diagnostics).map((line) => theme.fg("muted", line)));
+	}
 	return lines;
 }
 
@@ -104,7 +108,7 @@ const TIMING_LABELS: Record<keyof RunTimings, string> = {
 
 /** Explain calls exceeding the configured program budget, even when no individual phase does. */
 export function timingBreakdown(run: RunResult): string | undefined {
-	if (!run.timings || run.durationMs < run.timeoutMs) return undefined;
+	if (!run.timings || (run.diagnostics?.wallMs ?? run.durationMs) < run.timeoutMs) return undefined;
 	const significant = Object.entries(run.timings)
 		.map(([phase, milliseconds]) => ({
 			label: TIMING_LABELS[phase as keyof RunTimings],
