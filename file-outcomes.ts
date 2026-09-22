@@ -11,6 +11,7 @@ export type FileOutcomeEvent =
 
 const descriptor = process.env.PI_SHORTHAND_OUTCOMES_FD;
 const root = process.env.PI_SHORTHAND_EXECUTION_ROOT;
+export { root as executionRoot };
 const forceInspectionFailure = process.env.PI_SHORTHAND_INSPECTION_FAILURE === "1";
 // Subprocesses do not inherit descriptor 3 by default, so do not advertise it to them.
 delete process.env.PI_SHORTHAND_OUTCOMES_FD;

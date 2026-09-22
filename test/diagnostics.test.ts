@@ -12,7 +12,7 @@ import {
 	measure,
 	withDiagnostics,
 } from "../diagnostics.ts";
-import { copyStableTree } from "../overlay-linux.ts";
+import { TransactionJournal } from "../transaction-journal.ts";
 import { runWithBun } from "../index.ts";
 
 const publish = () => {
@@ -75,26 +75,24 @@ test("concurrent measurements are isolated and failure phase survives cleanup", 
 	expect(failed!.spans.find((span) => span.name === "copy attempt")?.failed).toBe(true);
 });
 
-test("snapshot diagnostics distinguish inventory, copy and verification with repository size", async () => {
+test("dependency diagnostics count retained originals without a repository inventory", async () => {
 	const root = await mkdtemp(join(tmpdir(), "shorthand-diagnostics-"));
 	try {
 		await writeFile(join(root, "file"), "hello");
+		const journal = new TransactionJournal(root);
 		const { diagnostics } = await withDiagnostics(
-			() => copyStableTree(root, root + "-copy"),
+			async () => {
+				await measure("capturing dependency", () => journal.observe("file"));
+				await journal.observe("file");
+				diagnosticCounter("observed entries", journal.entryCount);
+				diagnosticCounter("content captures", journal.contentCaptureCount);
+			},
 			() => {},
 		);
-		expect(diagnostics.spans.map((span) => span.name)).toEqual([
-			"snapshot inventory",
-			"snapshot reset",
-			"snapshot copy",
-			"snapshot verification",
-		]);
-		expect(diagnostics.counters["snapshot attempts"]).toBe(1);
-		expect(diagnostics.counters["snapshot entries"]).toBe(2);
-		expect(diagnostics.counters["snapshot logical bytes"]).toBe(5);
+		expect(diagnostics.spans.map((span) => span.name)).toEqual(["capturing dependency"]);
+		expect(diagnostics.counters).toEqual({ "observed entries": 1, "content captures": 1 });
 	} finally {
 		await rm(root, { recursive: true, force: true });
-		await rm(root + "-copy", { recursive: true, force: true });
 	}
 });
 
@@ -104,27 +102,6 @@ test("a missing completion event reports incomplete execution rather than respon
 	expect(diagnostics.responseMs).toBe(0);
 	expect(diagnostics.incomplete).toBe(true);
 	expect(diagnosticLines(diagnostics).join("\n")).toContain("copy: incomplete");
-});
-
-test("exhausted snapshot retries retain every failed attempt", async () => {
-	const root = await mkdtemp(join(tmpdir(), "shorthand-retries-"));
-	let diagnostics: Diagnostics | undefined;
-	try {
-		await expect(
-			withDiagnostics(
-				() => copyStableTree(join(root, "missing"), join(root, "copy")),
-				(snapshot) => {
-					diagnostics = snapshot;
-				},
-			),
-		).rejects.toThrow("kept changing");
-		expect(diagnostics!.counters["snapshot attempts"]).toBe(3);
-		expect(diagnostics!.spans).toHaveLength(3);
-		expect(diagnostics!.spans.every((span) => span.failed && span.durationMs !== undefined)).toBe(true);
-		expect(diagnostics!.runnerMs).toBeDefined();
-	} finally {
-		await rm(root, { recursive: true, force: true });
-	}
 });
 
 test("infrastructure failure retains diagnostics without duplicating them in stderr", async () => {

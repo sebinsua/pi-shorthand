@@ -10,6 +10,46 @@ afterEach(async () => {
 	await Promise.all(temporary.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
+test.skipIf(process.platform !== "darwin")(
+	"macOS denies direct connections to observer and backend ports",
+	async () => {
+		const root = await realpath(await mkdtemp(path.join(tmpdir(), "shorthand-port-policy-")));
+		temporary.push(root);
+		const blocked = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+		const allowed = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+		try {
+			const reachable = await Bun.connect({ hostname: "127.0.0.1", port: blocked.port, socket: { data() {} } });
+			reachable.end();
+			const profile = sandboxProfile(
+				path.join(root, "repo"),
+				path.join(root, "internal"),
+				path.join(root, "mount"),
+				path.join(root, "state", "file"),
+				[],
+				path.join(root, "canary"),
+				path.join(root, "helper", "file"),
+				path.join(root, "scratch"),
+				[blocked.port],
+			);
+			const code = `const socket = {data(){}};
+let rejected = false;
+try { const client = await Bun.connect({hostname:"127.0.0.1",port:${blocked.port},socket}); client.end(); }
+catch(error) { if (!["EPERM","EACCES","ECONNREFUSED"].includes(error.code)) throw error; rejected = true; }
+if (!rejected) throw new Error("protected port accessible");
+const client = await Bun.connect({hostname:"127.0.0.1",port:${allowed.port},socket}); client.end();`;
+			const child = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, process.execPath, "-e", code], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const stderr = await new Response(child.stderr).text();
+			expect({ code: await child.exited, stderr }).toEqual({ code: 0, stderr: "" });
+		} finally {
+			blocked.stop(true);
+			allowed.stop(true);
+		}
+	},
+);
+
 test("AgentFS change records preserve newline, tab, and Unicode paths", async () => {
 	const directory = await mkdtemp(path.join(tmpdir(), "shorthand-agentfs-records-"));
 	temporary.push(directory);

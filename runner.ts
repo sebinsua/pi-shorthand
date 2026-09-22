@@ -112,7 +112,8 @@ export type FilesystemEntry =
 
 /** A copy-on-write view of the repository. */
 export interface Overlay {
-	originalDir: string; // where the original files are while the overlay is open
+	original(file: string): Promise<FilesystemEntry | null>; // retained on-demand baseline
+	dependencyConflicts(): Promise<string[]>; // valid only after a successful observation close
 	writableDir: string; // writing a file here puts it into the overlay
 	executionDir: string; // repository root as seen by the program process
 	gitExcludes: string[]; // extra patterns git should ignore inside the overlay
@@ -122,6 +123,7 @@ export interface Overlay {
 	ignoredPaths?: string[]; // final ignore policy for the candidates returned by changes()
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
 	terminateProcesses?(): Promise<void>; // backend lifecycle boundary for descendants outside our process group
+	stopProgram?(pid: number): void; // permit the observer to reap tracees and finish its journal
 	changes(): Promise<{ file: string; entry: FilesystemEntry | null }[]>; // may include files only read
 	close(): Promise<void>;
 }
@@ -176,7 +178,15 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 			program = await runProgram({ ...options, cwd }, abort, overlay, repo, tempDir);
 			finishPhase("programMs");
 			reportProgress("scanning changes");
-			changes = await findChanges(overlay);
+			try {
+				changes = abort.aborted ? [] : await findChanges(overlay);
+			} catch (error) {
+				// Cancellation can stop observation before its first handshake. There
+				// is no candidate to publish; do not demand a completed journal just
+				// to discard it. Every non-cancelled path still fails closed.
+				if (!abort.aborted) throw error;
+				changes = [];
+			}
 			const preserved: { file: string; base64: string }[] = [];
 			if (process.env.PI_SHORTHAND_PRESERVE_TEXT !== "0") {
 				for (const change of changes) {
@@ -256,7 +266,11 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 		const shown = (file: string) => path.relative(cwd, path.join(repo, file));
 		const { applied: requested, rolledBack } = whatToApply(changes, program, options.rollback, abort.aborted);
 		reportProgress("checking for conflicts");
-		let conflicts = await conflictingFiles(repo, requested);
+		let conflicts = abort.aborted
+			? []
+			: [
+					...new Set([...(await overlay.dependencyConflicts()), ...(await conflictingFiles(repo, requested))]),
+				].toSorted();
 		finishPhase("checkConflictsMs");
 		let applied: Change[] = [];
 		let applicationWarnings: string[] = [];
@@ -568,13 +582,31 @@ async function runProgram(
 		},
 	});
 	const progress = trackProgress(child);
-	const killAll = () => killGroup(child);
+	const killAll = () => {
+		if (overlay.stopProgram) {
+			// Native observers do not exit until their tracees are gone. Never
+			// signal their former PID after exit: it may already have been reused.
+			if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+			try {
+				overlay.stopProgram(child.pid);
+			} catch {
+				/* already exited */
+			}
+		} else killGroup(child);
+	};
 	abort.addEventListener("abort", killAll);
 	if (abort.aborted) killAll();
 
 	const { exitCode, timedOut, openForWriting, stillRunning } = await measure(
 		"sandbox wait (includes preloads and program)",
-		() => waitWithTimeout(child, options.timeoutMs, overlay.executionDir, options.testHooks?.writerInspectionFailure),
+		() =>
+			waitWithTimeout(
+				child,
+				options.timeoutMs,
+				overlay.executionDir,
+				options.testHooks?.writerInspectionFailure,
+				killAll,
+			),
 	);
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
@@ -672,7 +704,13 @@ function fileOutcomes(text: string) {
  * it (or anything it started) still has open for writing, since they may be half-written, and which
  * commands it was still running, since one of them is probably why it timed out.
  */
-async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: string, forceInspectionFailure = false) {
+async function waitWithTimeout(
+	child: ChildProcess,
+	timeoutMs: number,
+	repo: string,
+	forceInspectionFailure = false,
+	stop = () => killGroup(child),
+) {
 	const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
 	let timer: Timer | undefined;
 	const timeout = new Promise<"timeout">((resolve) => {
@@ -686,7 +724,7 @@ async function waitWithTimeout(child: ChildProcess, timeoutMs: number, repo: str
 		filesOpenForWriting(repo, forceInspectionFailure),
 		commandsRunning(child.pid!),
 	]);
-	killGroup(child);
+	stop();
 	await exited;
 	return {
 		exitCode: null,
@@ -805,7 +843,7 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 	for (const { file, entry: after } of candidates) {
 		if (ignored.has(file) || seen.has(file)) continue;
 		seen.add(file);
-		const before = await snapshotEntry(path.join(overlay.originalDir, file));
+		const before = await overlay.original(file);
 		if (!before && !after) continue;
 		if (entriesEqual(before, after)) continue; // read or copy-up, not changed
 		changes.push({ file, before, after });

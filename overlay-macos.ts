@@ -1,8 +1,8 @@
 /**
  * macOS has no mount namespaces, so AgentFS is mounted at a private temporary path rather than at
  * the public checkout. The program runs inside that mount while editors and other host processes
- * continue to see the real repository. A stable copy is the lower tree, so neither side can change
- * what the other reads during execution; runner.ts detects destination edits before publishing.
+ * continue to see the real repository. AgentFS retains private writes; the NFS observer retains
+ * on-demand originals and validates all observed dependencies before anything is published.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -11,14 +11,16 @@ import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
-import { copyStableTree } from "./overlay-linux.ts";
+import { measure } from "./diagnostics.ts";
+import { createAgentFsDatabase } from "./agentfs-database.ts";
+import { openNfsObservation, type NfsObservation } from "./nfs-worker.ts";
 import type { FilesystemEntry, Overlay } from "./runner.ts";
 
 export async function openMacOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const agentfs = process.env.AGENTFS_BIN ?? Bun.which("agentfs");
 	if (!agentfs) throw new Error("The code tool needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
-	const gitMetadata = await gitMetadataDirectories(repo);
-	const cleanupHelper = await macProcessCleanupHelper();
+	const gitMetadata = await measure("resolving macOS Git metadata", () => gitMetadataDirectories(repo));
+	const cleanupHelper = await measure("preparing macOS cleanup helper", macProcessCleanupHelper);
 	const processDeniedCanary = path.join(tempDir, `process-denied-${randomUUID()}`);
 	const processAllowedCanary = path.join(tempDir, `process-allowed-${randomUUID()}`);
 	await Promise.all([
@@ -28,7 +30,6 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 
 	const stateFile = await recoveryFile(repo);
 	await recoverCrashedRun(stateFile);
-	const base = path.join(tempDir, "base");
 	const mountContainer = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-workspace-"));
 	const mount = path.join(mountContainer, "repo");
 	const scratch = path.join(mountContainer, "tmp");
@@ -38,16 +39,21 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 	await writeRecoveryState(stateFile, state);
 
 	try {
-		await copyStableTree(repo, base);
-		const database = await createDatabase(agentfs, base, tempDir);
-		const server = await serveAndMount(agentfs, database, mount, async (serverPid) => {
+		const database = await measure("preparing AgentFS database", () => createAgentFsDatabase(agentfs, repo, tempDir));
+		const { server, observation, ports } = await serveAndMount(agentfs, database, repo, mount, async (serverPid) => {
 			state.serverPid = serverPid;
 			await writeRecoveryState(stateFile, state);
 		});
 		let closed = false;
+		let dependencyConflicts: string[] | undefined;
 
 		return {
-			originalDir: base,
+			original: (file) => observation.original(file),
+			dependencyConflicts: async () => {
+				if (!dependencyConflicts)
+					throw new Error("Transaction observation did not finish successfully; nothing can be applied.");
+				return dependencyConflicts;
+			},
 			writableDir: mount,
 			executionDir: mount,
 			environment: { TMPDIR: scratch, TMP: scratch, TEMP: scratch },
@@ -55,7 +61,17 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 			wrap: (command) => [
 				"/usr/bin/sandbox-exec",
 				"-p",
-				sandboxProfile(repo, tempDir, mount, stateFile, gitMetadata, processDeniedCanary, cleanupHelper, scratch),
+				sandboxProfile(
+					repo,
+					tempDir,
+					mount,
+					stateFile,
+					gitMetadata,
+					processDeniedCanary,
+					cleanupHelper,
+					scratch,
+					ports,
+				),
 				...command,
 			],
 			terminateProcesses: async () => {
@@ -64,20 +80,18 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 					throw new Error(`Could not terminate every sandbox subprocess (cleanup exit ${result.exitCode}).`);
 				}
 			},
-			changes: () => changesInDatabase(database, base, mount),
+			changes: () => changesInDatabase(database, observation, mount),
 			close: async () => {
 				if (closed) return;
 				closed = true;
-				let unmountError: unknown;
 				try {
-					await unmount(mount);
-				} catch (error) {
-					unmountError = error;
+					await measure("unmounting AgentFS", () => unmount(mount));
+					dependencyConflicts = await observation.finish();
 				} finally {
+					await observation.abort();
 					server.kill();
 					await server.exited;
 				}
-				if (unmountError) throw unmountError;
 				await fs.rm(mountContainer, { recursive: true, force: true });
 				await fs.rm(stateFile, { force: true });
 			},
@@ -183,14 +197,10 @@ function isAlive(pid: number): boolean {
 	}
 }
 
-async function createDatabase(agentfs: string, base: string, tempDir: string): Promise<string> {
-	await $`${agentfs} init run --base ${base}`.cwd(tempDir).quiet();
-	return path.join(tempDir, ".agentfs", "run.db");
-}
-
 async function serveAndMount(
 	agentfs: string,
 	database: string,
+	repo: string,
 	mount: string,
 	onSpawn: (pid: number) => Promise<void>,
 ) {
@@ -199,15 +209,24 @@ async function serveAndMount(
 		stdout: "ignore",
 		stderr: "ignore",
 	});
+	let observation: NfsObservation | undefined;
 	try {
-		await onSpawn(server.pid);
-		await waitForPort(port);
+		await measure("starting AgentFS server", async () => {
+			await onSpawn(server.pid);
+			await waitForPort(port);
+		});
+		observation = await measure("starting NFS observation worker", () =>
+			openNfsObservation({ root: repo, backendPort: port, requestTimeoutMs: 10_000 }),
+		);
 		// AgentFS copy-up can change directory attributes. Stale NFS directory caches can make
 		// getcwd() fail in nested directories; keep file caching but revalidate directories immediately.
-		const options = `locallocks,vers=3,tcp,port=${port},mountport=${port},soft,timeo=100,retrans=5,acdirmin=0,acdirmax=0`;
-		await $`/sbin/mount_nfs -o ${options} 127.0.0.1:/ ${mount}`.quiet();
-		return server;
+		const options = `locallocks,vers=3,tcp,port=${observation.port},mountport=${observation.port},soft,timeo=100,retrans=5,acdirmin=0,acdirmax=0`;
+		await measure("mounting AgentFS", async () => {
+			await $`/sbin/mount_nfs -o ${options} 127.0.0.1:/ ${mount}`.quiet();
+		});
+		return { server, observation, ports: [port, observation.port] };
 	} catch (error) {
+		await observation?.abort();
 		server.kill();
 		await server.exited;
 		throw error;
@@ -224,10 +243,12 @@ export function sandboxProfile(
 	processDeniedCanary: string,
 	cleanupHelper: string,
 	scratch: string,
+	protectedPorts: number[] = [],
 ): string {
 	return [
 		"(version 1)",
 		"(allow default)",
+		...protectedPorts.map((port) => `(deny network-outbound (remote tcp ${JSON.stringify(`*:${port}`)}))`),
 		"(deny file-write*)",
 		`(allow file-write* (require-all (subpath ${JSON.stringify(mount)}) (require-not (subpath ${JSON.stringify(path.join(mount, ".git"))}))))`,
 		`(allow file-write* (subpath ${JSON.stringify(scratch)}))`,
@@ -303,40 +324,46 @@ async function gitMetadataDirectories(repo: string): Promise<string[]> {
 }
 
 /** Snapshot the AgentFS database while its server owns the live database lock. */
-async function changesInDatabase(database: string, base: string, mount: string) {
+async function changesInDatabase(database: string, observation: NfsObservation, mount: string) {
 	const snapshotDir = path.join(path.dirname(path.dirname(database)), "database-snapshot");
-	await cloneDatabase(path.dirname(database), "run.db", snapshotDir, "run.db");
-	const records = agentFsChangeRecords(path.join(snapshotDir, "run.db"));
+	await measure("copying AgentFS change database", () =>
+		cloneDatabase(path.dirname(database), "run.db", snapshotDir, "run.db"),
+	);
+	const records = await measure("enumerating AgentFS change records", async () =>
+		agentFsChangeRecords(path.join(snapshotDir, "run.db")),
+	);
 
 	const changes: { file: string; entry: FilesystemEntry | null }[] = [];
-	for (const record of records) {
-		const { file } = record;
-		if (path.basename(file).startsWith("._")) continue;
-		if (file === ".git" || file.startsWith(".git/")) continue;
+	await measure("reading AgentFS changed entries", async () => {
+		for (const record of records) {
+			const { file } = record;
+			if (path.basename(file).startsWith("._")) continue;
+			if (file === ".git" || file.startsWith(".git/")) continue;
 
-		if (record.deleted) {
-			for (const descendant of await filesUnder(path.join(base, file))) {
-				changes.push({ file: path.join(file, descendant), entry: null });
-			}
-			continue;
-		}
-
-		switch (record.type) {
-			case "f":
-			case "l":
-				changes.push({ file, entry: await readEntry(path.join(mount, file)) });
-				break;
-			case "d": {
-				const original = await fs.lstat(path.join(base, file)).catch(() => null);
-				if (original && !original.isDirectory()) {
-					throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
+			if (record.deleted) {
+				for (const descendant of await observation.originalFiles(file)) {
+					changes.push({ file: descendant, entry: null });
 				}
-				break;
+				continue;
 			}
-			case "unsupported":
-				throw new Error(`Unsupported AgentFS entry type at ${JSON.stringify(file)}.`);
+
+			switch (record.type) {
+				case "f":
+				case "l":
+					changes.push({ file, entry: await readEntry(path.join(mount, file)) });
+					break;
+				case "d": {
+					const original = await observation.originalKind(file);
+					if (original !== "absent" && original !== "directory") {
+						throw new Error(`Unsupported directory replacement at ${JSON.stringify(file)}.`);
+					}
+					break;
+				}
+				case "unsupported":
+					throw new Error(`Unsupported AgentFS entry type at ${JSON.stringify(file)}.`);
+			}
 		}
-	}
+	});
 	return changes;
 }
 
@@ -399,22 +426,6 @@ function agentFsType(mode: number): AgentFsEntryType {
 		default:
 			return "unsupported";
 	}
-}
-
-async function filesUnder(original: string): Promise<string[]> {
-	const stats = await fs.lstat(original).catch(() => null);
-	if (!stats) return [""];
-	if (stats.isFile() || stats.isSymbolicLink()) return [""];
-	if (!stats.isDirectory()) throw new Error(`Unsupported filesystem entry at ${JSON.stringify(original)}.`);
-	const files: string[] = [];
-	for (const entry of await fs.readdir(original, { recursive: true, withFileTypes: true })) {
-		if (entry.isFile() || entry.isSymbolicLink()) {
-			files.push(path.relative(original, path.join(entry.parentPath, entry.name)));
-		} else if (!entry.isDirectory()) {
-			throw new Error(`Unsupported filesystem entry at ${JSON.stringify(path.join(entry.parentPath, entry.name))}.`);
-		}
-	}
-	return files;
 }
 
 async function cloneDatabase(fromDir: string, fromName: string, toDir: string, toName: string) {

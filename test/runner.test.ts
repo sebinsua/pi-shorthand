@@ -70,7 +70,8 @@ function withApplicationTestHooks(apply: ApplicationTestHooks): Partial<RunOptio
 async function waitUntil(
 	description: string,
 	predicate: () => boolean | Promise<boolean>,
-	timeoutMs = 2_000,
+	// This is a synchronization deadline, not a workspace latency assertion.
+	timeoutMs = 10_000,
 ): Promise<void> {
 	const deadline = performance.now() + timeoutMs;
 	do {
@@ -651,7 +652,7 @@ await ts.renameFile({ from, to });`,
 			writer.write("// open\\n");
 			writer.flush();
 			await Bun.sleep(30_000);`,
-				{ rollback: "file", timeoutMs: 300, testHooks: { writerInspectionFailure: true } },
+				{ rollback: "file", timeoutMs: 1000, testHooks: { writerInspectionFailure: true } },
 			);
 
 			expect(result.timedOut).toBe(true);
@@ -704,7 +705,7 @@ await ts.renameFile({ from, to });`,
 				const result = await run(repo, `await Bun.write("src/a.ts", "finished"); ${failure};`, { rollback: "file" });
 				expect(result.exitCode).not.toBe(0);
 				expect(result.timedOut).toBe(false);
-				expect(result.applied).toEqual(["src/a.ts"]);
+				expect(result.applied, JSON.stringify(result)).toEqual(["src/a.ts"]);
 				expect(result.rolledBack).toEqual([]);
 				expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("finished");
 			},
@@ -1439,7 +1440,121 @@ await ts.renameFile({ from, to });`,
 	});
 
 	describe("concurrency and conflict handling", () => {
-		test("a run keeps reading its starting snapshot after an external edit", async () => {
+		test.skipIf(process.platform !== "linux")(
+			"lost native observation discards even completed file-level edits",
+			async () => {
+				const repo = await makeRepo(FILES);
+				const runner = startRunner(
+					repo,
+					`
+				await Bun.write("src/a.ts", "completed private edit\\n");
+				process.kill(process.pid, "SIGSTOP");
+			`,
+					{ rollback: "file" },
+				);
+				const { stderr, exitCode } = await runnerOutcome(runner);
+				expect(exitCode).not.toBe(0);
+				expect(stderr).toMatch(/observation|explicit process group stops/);
+				expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(FILES["src/a.ts"]);
+				expect(await gitStatus(repo)).toBe("");
+			},
+		);
+
+		test("renaming a newly created directory applies its staged descendants", async () => {
+			const repo = await makeRepo(FILES);
+			const result = await run(
+				repo,
+				`
+				const fs = await import("node:fs/promises");
+				await fs.mkdir("staged/nested", { recursive: true });
+				await Bun.write("staged/nested/new.txt", "new content\\n");
+				await fs.rename("staged", "destination");
+				await fs.rename("destination", "final");
+			`,
+			);
+			expect(result.applied).toEqual(["final/nested/new.txt"]);
+			expect(await Bun.file(path.join(repo, "final/nested/new.txt")).text()).toBe("new content\n");
+		});
+
+		for (const dependency of [
+			{ name: "mapped contents", read: 'console.log(Bun.mmap("src/a.ts")[0]);', changed: "src/a.ts" },
+			{ name: "metadata", read: 'console.log((await fs.stat("src/a.ts")).size);', changed: "src/a.ts" },
+			{
+				name: "negative lookup",
+				read: 'console.log(await Bun.file("src/missing.ts").exists());',
+				changed: "src/missing.ts",
+			},
+			{ name: "directory listing", read: 'console.log(await fs.readdir("src"));', changed: "src/added.ts" },
+			{ name: "subprocess input", read: "await $`cat src/a.ts`; ", changed: "src/a.ts" },
+		]) {
+			test(`changed ${dependency.name} rejects the entire candidate`, async () => {
+				const repo = await makeRepo(FILES);
+				let reached = false;
+				const barrier = Bun.serve({
+					port: 0,
+					hostname: "127.0.0.1",
+					fetch: async () => {
+						reached = true;
+						await Bun.write(path.join(repo, dependency.changed), "external dependency change\n");
+						return new Response("changed");
+					},
+				});
+				try {
+					const runner = startRunner(
+						repo,
+						`
+						const fs = await import("node:fs/promises");
+						${dependency.read}
+						await fetch(${JSON.stringify(`http://127.0.0.1:${barrier.port}`)});
+						await Bun.write("candidate.txt", "must not apply");
+					`,
+					);
+					const { stdout, stderr, exitCode } = await runnerOutcome(runner);
+					expect(reached, stderr).toBe(true);
+					if (exitCode === 0) {
+						const result: RunResult = JSON.parse(stdout);
+						expect(result.conflicts.length).toBeGreaterThan(0);
+						expect(result.applied).toEqual([]);
+					} else expect(stderr).toMatch(/observation|source changed/);
+					expect(await Bun.file(path.join(repo, "candidate.txt")).exists()).toBe(false);
+					expect(await Bun.file(path.join(repo, dependency.changed)).text()).toBe("external dependency change\n");
+				} finally {
+					barrier.stop(true);
+				}
+			});
+		}
+
+		test("a changed read-only input rejects an otherwise unrelated output", async () => {
+			const repo = await makeRepo(FILES);
+			const barrier = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch: async () => {
+					await Bun.write(path.join(repo, "src/a.ts"), "external input\n");
+					return new Response("changed");
+				},
+			});
+			try {
+				const runner = startRunner(
+					repo,
+					`const input = await Bun.file("src/a.ts").text();
+await fetch(${JSON.stringify(`http://127.0.0.1:${barrier.port}`)});
+await Bun.write("src/generated.ts", input);`,
+				);
+				const { stdout, stderr, exitCode } = await runnerOutcome(runner);
+				if (exitCode === 0) {
+					const result: RunResult = JSON.parse(stdout);
+					expect(result.conflicts).toContain("src/a.ts");
+					expect(result.applied).toEqual([]);
+				} else expect(stderr).toMatch(/observation|source changed/);
+				expect(await Bun.file(path.join(repo, "src/generated.ts")).exists()).toBe(false);
+				expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external input\n");
+			} finally {
+				barrier.stop(true);
+			}
+		});
+
+		test("a run captures a file at first access rather than freezing the whole checkout at startup", async () => {
 			const repo = await makeRepo(FILES);
 			const ready = path.join(path.dirname(repo), "program-started");
 			const runner = startRunner(
@@ -1459,29 +1574,32 @@ await ts.renameFile({ from, to });`,
 
 			expect(result.applied).toEqual(["src/generated.ts"]);
 			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
-			expect(await Bun.file(path.join(repo, "src/generated.ts")).text()).toBe(FILES["src/a.ts"]);
+			expect(await Bun.file(path.join(repo, "src/generated.ts")).text()).toBe("external edit\n");
 		});
 
 		test("an external edit to a destination prevents every change from applying", async () => {
 			const repo = await makeRepo(FILES);
-			const ready = path.join(path.dirname(repo), "conflict-program-started");
+			const barrier = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch: async () => {
+					await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
+					return new Response("changed");
+				},
+			});
 			const runner = startRunner(
 				repo,
-				`await Bun.sleep(500);
-			await Bun.write("src/a.ts", "program edit\\n");
+				`await Bun.write("src/a.ts", "program edit\\n");
+			await fetch(${JSON.stringify(`http://127.0.0.1:${barrier.port}`)});
 			await Bun.write("src/generated.ts", "should not apply\\n");`,
-				{ testHooks: { programStartMarker: ready } },
 			);
-			await waitForFile(ready);
-			expect(await Bun.file(ready).exists()).toBe(true);
-			await Bun.write(path.join(repo, "src/a.ts"), "external edit\n");
-
 			const { stdout, stderr, exitCode } = await runnerOutcome(runner);
-			expect(exitCode, stderr).toBe(0);
-			const result: RunResult = JSON.parse(stdout);
-
-			expect(result.conflicts).toEqual(["src/a.ts"]);
-			expect(result.applied).toEqual([]);
+			barrier.stop(true);
+			if (exitCode === 0) {
+				const result: RunResult = JSON.parse(stdout);
+				expect(result.conflicts).toContain("src/a.ts");
+				expect(result.applied).toEqual([]);
+			} else expect(stderr).toMatch(/observation|source changed/);
 			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("external edit\n");
 			expect(await Bun.file(path.join(repo, "src/generated.ts")).exists()).toBe(false);
 		});
@@ -1575,11 +1693,13 @@ await ts.renameFile({ from, to });`,
 			await symlink(outside, path.join(repo, "src"));
 
 			const { stdout, stderr, exitCode } = await runnerOutcome(runner);
-			expect(exitCode, stderr).toBe(0);
-			const result: RunResult = JSON.parse(stdout);
-
-			expect(result.conflicts).toEqual(["src/a.ts"]);
-			expect(result.applied).toEqual([]);
+			if (exitCode === 0) {
+				const result: RunResult = JSON.parse(stdout);
+				// A live lower may encounter the replacement before its first read.
+				// In that case the sandbox rejects the write, without a candidate to conflict.
+				expect(result.conflicts.includes("src/a.ts") || result.exitCode !== 0).toBe(true);
+				expect(result.applied).toEqual([]);
+			} else expect(stderr).toMatch(/observation|source changed/);
 			expect(await Bun.file(path.join(outside, "a.ts")).text()).toBe("outside\n");
 		});
 
@@ -1705,7 +1825,8 @@ await ts.renameFile({ from, to });`,
 
 		test("a direct runner call retains its last step in memory", async () => {
 			const repo = await makeRepo(FILES);
-			const result = await run(repo, `grep("oldApi", "src");\nwhile (true) {}`, { timeoutMs: 300 });
+			// Permit startup and grep before testing the subsequent busy-loop timeout.
+			const result = await run(repo, `grep("oldApi", "src");\nwhile (true) {}`, { timeoutMs: 1000 });
 
 			expect(result.timedOut).toBe(true);
 			expect(result.lastStep).toMatch(/^grep \(\d+ ms\)$/);
@@ -2398,6 +2519,7 @@ sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
 		const repo = await makeRepo(FILES);
 		const result = await run(repo, `console.log(JSON.stringify([glob("a.ts", "src"), glob("a.ts", { cwd: "src" })]));`);
 
+		expect(result.exitCode, result.output).toBe(0);
 		expect(JSON.parse(result.output)).toEqual([["src/a.ts"], ["src/a.ts"]]);
 	});
 

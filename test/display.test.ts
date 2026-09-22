@@ -197,9 +197,9 @@ describe("unstructured completed results", () => {
 			{
 				content: [],
 				details: {
-					infrastructureError: "snapshot failed",
+					infrastructureError: "observation failed",
 					diagnostics: {
-						spans: [{ name: "snapshot copy", startMs: 0, durationMs: 23, failed: true }],
+						spans: [{ name: "observer preparation", startMs: 0, durationMs: 23, failed: true }],
 						counters: {},
 						failurePhase: "creating workspace",
 					},
@@ -208,9 +208,9 @@ describe("unstructured completed results", () => {
 			{ expanded: false, isPartial: false },
 			recordingTheme,
 		);
-		expect(calls.filter((call) => call.color === "error").map((call) => call.text)).toEqual(["snapshot failed"]);
-		expect(calls.filter((call) => call.text.includes("snapshot copy"))).toEqual([
-			{ color: "muted", text: "  snapshot copy: 23ms (failed)" },
+		expect(calls.filter((call) => call.color === "error").map((call) => call.text)).toEqual(["observation failed"]);
+		expect(calls.filter((call) => call.text.includes("observer preparation"))).toEqual([
+			{ color: "muted", text: "  observer preparation: 23ms (failed)" },
 		]);
 	});
 

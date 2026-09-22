@@ -17,7 +17,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 import * as astGrep from "@ast-grep/napi";
 import { type Edit, Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
-import { editingFiles, installFileOutcomeTracking } from "./file-outcomes.ts";
+import { editingFiles, executionRoot, installFileOutcomeTracking } from "./file-outcomes.ts";
 import {
 	file as selectFile,
 	getMatchSnapshot,
@@ -28,12 +28,7 @@ import {
 	remove,
 	type FileTarget,
 } from "./placement.ts";
-import {
-	rename as renameTypeScriptSymbol,
-	renameFile as renameTypeScriptFile,
-	type RenameFileOptions,
-	type RenameOptions,
-} from "./typescript-refactors.ts";
+import type { RenameFileOptions, RenameOptions } from "./typescript-refactors.ts";
 
 installFileOutcomeTracking();
 
@@ -132,7 +127,9 @@ function git(args: string[], allowedExitCodes: number[] = []): string {
 	return result.stdout.toString();
 }
 
-const repositoryRoot = git(["rev-parse", "--show-toplevel"]).trim();
+// The runner already resolved this before starting the sandbox. Standalone preloads
+// still ask Git, preserving the existing direct-use behavior.
+const repositoryRoot = executionRoot || git(["rev-parse", "--show-toplevel"]).trim();
 
 /** Normalize an invocation path or glob to the path form emitted by `git ls-files --full-name`. */
 function gitPath(input: string): string {
@@ -567,19 +564,21 @@ const globals = {
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
 	ts: {
 		rename: (options: RenameOptions<TypeScriptFile>) =>
-			logged("ts.rename", [options], () =>
-				renameTypeScriptSymbol(repositoryRoot, {
+			logged("ts.rename", [options], () => {
+				const prepared = {
 					...options,
 					file: typeScriptFile("ts.rename", options.file),
-				}),
-			),
+				};
+				return import("./typescript-refactors.ts").then(({ rename }) => rename(repositoryRoot, prepared));
+			}),
 		renameFile: (options: RenameFileOptions<TypeScriptFile>) =>
-			logged("ts.renameFile", [options], () =>
-				renameTypeScriptFile(repositoryRoot, {
+			logged("ts.renameFile", [options], () => {
+				const prepared = {
 					from: typeScriptFile("ts.renameFile", options.from),
 					to: typeScriptFile("ts.renameFile", options.to),
-				}),
-			),
+				};
+				return import("./typescript-refactors.ts").then(({ renameFile }) => renameFile(repositoryRoot, prepared));
+			}),
 	},
 };
 
