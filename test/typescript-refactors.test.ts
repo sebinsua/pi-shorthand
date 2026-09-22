@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { rename } from "../typescript-refactors.ts";
+import { rename, renameFile } from "../typescript-refactors.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -64,4 +64,46 @@ test.each([
 	});
 	await expect(rename(root, { file: "src/app.ts", symbol, to: "next" })).rejects.toThrow(message);
 	expect(await Bun.file(path.join(root, "src/app.ts")).text()).toBe(source);
+});
+
+test("renameFile moves a file and updates resolved module paths", async () => {
+	const root = await fixture({
+		"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
+		"src/shared/types.ts": "export interface User { name: string }\n",
+		"src/parse-user.ts":
+			'import type { User } from "./shared/types";\nexport function parseUser(name: string): User { return { name }; }\n',
+		"src/index.ts": 'export { parseUser } from "./parse-user";\n',
+		"src/app.ts": 'import { parseUser } from "./parse-user";\nexport const user = parseUser("Ada");\n',
+	});
+
+	await renameFile(root, { from: "src/parse-user.ts", to: "src/users/parse-user.ts" });
+
+	expect(await Bun.file(path.join(root, "src/parse-user.ts")).exists()).toBe(false);
+	expect(await Bun.file(path.join(root, "src/users/parse-user.ts")).text()).toBe(
+		'import type { User } from "../shared/types";\nexport function parseUser(name: string): User { return { name }; }\n',
+	);
+	expect(await Bun.file(path.join(root, "src/index.ts")).text()).toBe(
+		'export { parseUser } from "./users/parse-user";\n',
+	);
+	expect(await Bun.file(path.join(root, "src/app.ts")).text()).toBe(
+		'import { parseUser } from "./users/parse-user";\nexport const user = parseUser("Ada");\n',
+	);
+});
+
+test("renameFile rejects an existing destination without writing", async () => {
+	const root = await fixture({
+		"src/old.ts": "export const old = true;\n",
+		"src/new.ts": "export const existing = true;\n",
+	});
+	await expect(renameFile(root, { from: "src/old.ts", to: "src/new.ts" })).rejects.toThrow(
+		"destination already exists",
+	);
+	expect(await Bun.file(path.join(root, "src/old.ts")).text()).toContain("old = true");
+	expect(await Bun.file(path.join(root, "src/new.ts")).text()).toContain("existing = true");
+});
+
+test("renameFile rejects a destination outside the project", async () => {
+	const root = await fixture({ "src/old.ts": "export const old = true;\n" });
+	await expect(renameFile(root, { from: "src/old.ts", to: "../outside.ts" })).rejects.toThrow("outside the repository");
+	expect(await Bun.file(path.join(root, "src/old.ts")).exists()).toBe(true);
 });

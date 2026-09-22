@@ -27,6 +27,7 @@ Common operations:
 - sg.one(pattern, files?) selects exactly one match; sg.find returns an array. sg.rewrite also accepts a selected match or array without a file scope.
 - A rewrite callback receives a match and returns text, a native node.replace(text) edit, or null to skip. Return native edits to apply them. Pass selected arrays together for independent edits; select again after changing their file.
 - await ts.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
+- await ts.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
 
 See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs.`;
 

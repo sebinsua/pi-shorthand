@@ -1,5 +1,5 @@
-import { readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface Position {
@@ -23,8 +23,23 @@ export interface WorkspaceEdit {
 }
 
 export function existingProjectFile(root: string, file: string): string {
+	const absolute = projectPath(root, file);
+	if (!statSync(absolute).isFile()) throw new Error(`not a file: ${JSON.stringify(file)}`);
+	return absolute;
+}
+
+/** Resolve an existing or future path without allowing symlink escapes from the repository. */
+export function projectPath(root: string, file: string): string {
 	const repository = realpathSync(root);
-	const absolute = realpathSync(resolve(repository, file));
+	let ancestor = resolve(repository, file);
+	const missing: string[] = [];
+	while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
+		const parent = dirname(ancestor);
+		if (parent === ancestor) throw new Error(`cannot resolve path: ${JSON.stringify(file)}`);
+		missing.unshift(basename(ancestor));
+		ancestor = parent;
+	}
+	const absolute = resolve(realpathSync(ancestor), ...missing);
 	const local = relative(repository, absolute);
 	if (local === ".." || local.startsWith("../") || isAbsolute(local))
 		throw new Error(`path is outside the repository: ${JSON.stringify(file)}`);

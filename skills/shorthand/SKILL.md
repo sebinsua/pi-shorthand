@@ -20,18 +20,18 @@ surrounding text to distinguish repeated occurrences. Replacement text is litera
 Line-ending differences are accepted when matching.
 `edit` calls are synchronous and can be combined in one program; later calls see earlier changes.
 
-## Rename a TypeScript symbol
+## Semantic TypeScript refactors
 
-Use the TypeScript language server to rename one resolved symbol and its references across the project:
+Use the TypeScript language server to rename symbols or move files across the project:
 
 ```ts
 await ts.rename({ file: "src/users.ts", symbol: "parseUser", to: "decodeUser" });
+await ts.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
 ```
 
-`file` accepts a path or an `sg.file()` target and identifies the declaration's file. The declaration
-name must be unique in that file; missing or repeated names are errors. Unlike a structural
-identifier rewrite, unrelated symbols with the same spelling in other scopes or files are not
-changed.
+`ts.rename` requires the declaration name to be unique in its file and leaves unrelated symbols
+alone. `ts.renameFile` moves the file and updates imports and exports that resolve to it. Both
+operations are asynchronous.
 
 ## Insert before or after a statement
 

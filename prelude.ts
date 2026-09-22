@@ -28,7 +28,12 @@ import {
 	remove,
 	type FileTarget,
 } from "./placement.ts";
-import { rename as renameTypeScriptSymbol, type RenameOptions } from "./typescript-refactors.ts";
+import {
+	rename as renameTypeScriptSymbol,
+	renameFile as renameTypeScriptFile,
+	type RenameFileOptions,
+	type RenameOptions,
+} from "./typescript-refactors.ts";
 
 installFileOutcomeTracking();
 
@@ -566,6 +571,13 @@ const globals = {
 				renameTypeScriptSymbol(repositoryRoot, {
 					...options,
 					file: typeScriptFile("ts.rename", options.file),
+				}),
+			),
+		renameFile: (options: RenameFileOptions<TypeScriptFile>) =>
+			logged("ts.renameFile", [options], () =>
+				renameTypeScriptFile(repositoryRoot, {
+					from: typeScriptFile("ts.renameFile", options.from),
+					to: typeScriptFile("ts.renameFile", options.to),
 				}),
 			),
 	},

@@ -28,7 +28,10 @@ export async function withTypeScriptServer<T>(
 			processId: process.pid,
 			rootUri: pathToFileURL(root).href,
 			capabilities: {
-				workspace: { workspaceEdit: { documentChanges: true } },
+				workspace: {
+					workspaceEdit: { documentChanges: true },
+					fileOperations: { willRename: true },
+				},
 				textDocument: { rename: { prepareSupport: true } },
 			},
 		});

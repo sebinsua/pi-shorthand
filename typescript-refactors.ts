@@ -1,10 +1,12 @@
-import { writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { editingFiles } from "./file-outcomes.ts";
 import { withTypeScriptServer } from "./lsp-client.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
+	projectPath,
 	type Position,
 	type Range,
 	type WorkspaceEdit,
@@ -14,6 +16,11 @@ export interface RenameOptions<File = string> {
 	file: File;
 	symbol: string;
 	to: string;
+}
+
+export interface RenameFileOptions<File = string> {
+	from: File;
+	to: File;
 }
 
 interface DocumentSymbol {
@@ -58,6 +65,27 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 	});
 }
 
+export async function renameFile(root: string, options: RenameFileOptions): Promise<void> {
+	validateRenameFile(options);
+	const from = existingProjectFile(root, options.from);
+	const to = projectPath(root, options.to);
+	if (from === to) throw new Error("ts.renameFile source and destination are the same file");
+	if (lstatSync(to, { throwIfNoEntry: false }))
+		throw new Error(`ts.renameFile destination already exists: ${JSON.stringify(options.to)}`);
+
+	const edit = await withTypeScriptServer(root, (server) =>
+		server.sendRequest<WorkspaceEdit | null>("workspace/willRenameFiles", {
+			files: [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }],
+		}),
+	);
+	const changes = planWorkspaceEdit(root, edit);
+	editingFiles([...changes.keys(), from, to], () => {
+		for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
+		mkdirSync(dirname(to), { recursive: true });
+		renameSync(from, to);
+	});
+}
+
 function validateRename(options: RenameOptions): void {
 	if (
 		!options ||
@@ -68,6 +96,12 @@ function validateRename(options: RenameOptions): void {
 		throw new TypeError("ts.rename expects { file, symbol, to } strings");
 	if (!options.file || !options.symbol || !options.to)
 		throw new Error("ts.rename file, symbol and to must not be empty");
+}
+
+function validateRenameFile(options: RenameFileOptions): void {
+	if (!options || typeof options.from !== "string" || typeof options.to !== "string")
+		throw new TypeError("ts.renameFile expects { from, to } strings");
+	if (!options.from || !options.to) throw new Error("ts.renameFile from and to must not be empty");
 }
 
 function findSymbols(symbols: Array<DocumentSymbol | SymbolInformation>, name: string): Position[] {

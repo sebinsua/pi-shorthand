@@ -274,6 +274,25 @@ await ts.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 				expect(await Bun.file(path.join(repo, "src/app.ts")).text()).toBe(source);
 			}
 		});
+
+		test("moves a file and updates resolved module paths", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ include: ["src"] }),
+				"src/parse.ts": "export const parse = (value: string) => value;\n",
+				"src/use.ts": 'import { parse } from "./parse";\nexport const value = parse("Ada");\n',
+			});
+			const result = await run(
+				repo,
+				`const from = sg.file("src/parse.ts");
+const to = sg.file("src/lib/parse.ts");
+await ts.renameFile({ from, to });`,
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/parse.ts")).exists()).toBe(false);
+			expect(await Bun.file(path.join(repo, "src/lib/parse.ts")).text()).toContain("export const parse");
+			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toContain('from "./lib/parse"');
+		});
 	});
 
 	describe("transaction application", () => {
