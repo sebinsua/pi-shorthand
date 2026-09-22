@@ -207,6 +207,51 @@ test("NFS close still rejects a pending request that never completes", async () 
 	await expect(journal.seal()).rejects.toThrow("timed out");
 });
 
+test.each([false, true])("NFS proxy finishes a half-closed client's reply (closing proxy: %s)", async (closeEarly) => {
+	let arrived!: () => void;
+	const accepted = new Promise<void>((resolve) => {
+		arrived = resolve;
+	});
+	let release!: () => void;
+	const { proxy, journal, connect } = await fixture((message, socket) => {
+		release = () => socket.write(encodeRpcRecord(reply(message.readUInt32BE())));
+		arrived();
+	});
+	const client = await connect();
+	const received: Buffer[] = [];
+	client.on("data", (chunk) => received.push(Buffer.from(chunk)));
+	const closed = once(client, "close");
+	client.end(encodeRpcRecord(call(43)));
+	await accepted;
+	// Let the request-side FIN arrive while the backend reply is still pending.
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	const closing = closeEarly ? proxy.close() : undefined;
+	release();
+	if (closing) await closing;
+	await closed;
+	await proxy.close();
+	expect(new RpcRecords().push(Buffer.concat(received))).toEqual([reply(43)]);
+	await journal.seal();
+	expect(await journal.conflicts()).toEqual([]);
+});
+
+test("NFS proxy still rejects a mismatched reply after the client half-closes", async () => {
+	const { proxy, journal, connect } = await fixture((_message, socket) => {
+		setTimeout(() => socket.write(encodeRpcRecord(reply(999))), 20);
+	});
+	const client = await connect();
+	let received = false;
+	client.on("data", () => {
+		received = true;
+	});
+	const closed = once(client, "close");
+	client.end(encodeRpcRecord(call(44)));
+	await closed;
+	expect(received).toBe(false);
+	await expect(proxy.close()).rejects.toThrow("unmatched");
+	await expect(journal.seal()).rejects.toThrow("unmatched");
+});
+
 test("NFS observation failure returns a definite RPC error and never forwards later calls", async () => {
 	let forwarded = 0;
 	const { proxy, journal, connect } = await fixture(() => {

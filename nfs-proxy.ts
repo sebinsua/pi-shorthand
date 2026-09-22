@@ -8,7 +8,8 @@ import { IncompleteObservationError, TransactionJournal } from "./transaction-jo
 async function* records(socket: Socket, invalid: (error: unknown) => void): AsyncGenerator<Buffer> {
 	const decoder = new RpcRecords();
 	try {
-		for await (const chunk of socket) {
+		// The connection owner closes the reply side after accepted RPCs drain.
+		for await (const chunk of socket.iterator({ destroyOnReturn: false })) {
 			for (const record of decoder.push(Buffer.from(chunk))) yield record;
 		}
 	} finally {
@@ -151,7 +152,9 @@ export async function openNfsProxy(
 		queue = operation.then(() => {}, fail);
 		return operation;
 	};
-	const server = createServer((client) => {
+	// A request-side FIN does not cancel accepted RPCs. Keep the reply side open
+	// until their backend responses have been observed and delivered.
+	const server = createServer({ allowHalfOpen: true }, (client) => {
 		if (closing) {
 			client.destroy();
 			return;
@@ -162,6 +165,7 @@ export async function openNfsProxy(
 			return;
 		}
 		clients.add(client);
+		client.once("close", () => clients.delete(client));
 		client.on("error", fail);
 		const task = (async () => {
 			try {
@@ -169,7 +173,7 @@ export async function openNfsProxy(
 			} catch (error) {
 				if (!closing) fail(error);
 			} finally {
-				clients.delete(client);
+				client.end();
 			}
 		})();
 		tasks.add(task);
