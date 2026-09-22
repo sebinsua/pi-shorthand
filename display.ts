@@ -8,7 +8,7 @@
  */
 
 import { getLanguageFromPath, highlightCode, keyHint, renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
-import type { FileChange, RunResult } from "./runner.ts";
+import type { FileChange, RunResult, RunTimings } from "./runner.ts";
 
 type ToolBackground = "toolSuccessBg" | "toolErrorBg";
 
@@ -21,7 +21,7 @@ const LISTED_FILES = 8; // …showing this many, then "and N more files"
 const EXPANDED_DIFF_LINES = 2000; // even expanded, a diff of hundreds of files stops here
 
 export function callLine(args: { title?: string; timeout?: number; rollback?: string }, theme: Theme): string {
-	const settings = [args.rollback === "all" && "rollback all", args.timeout && `timeout ${args.timeout}s`];
+	const settings = [args.rollback === "all" && "rollback all", args.timeout && `program timeout ${args.timeout}s`];
 	const suffix = settings.filter(Boolean).join(", ");
 	return `${theme.fg("toolTitle", theme.bold("code"))} ${args.title ?? ""}${suffix ? theme.fg("muted", ` (${suffix})`) : ""}`;
 }
@@ -83,14 +83,48 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 	if (output && (expanded || !error)) sections.push(outputLines(output, expanded, run.changes.length > 0, theme));
 	if (notApplied.length > 0) sections.push(notAppliedLines(notApplied, expanded, theme, background));
 	for (const section of sections) lines.push("", ...section);
+	const timing = timingBreakdown(run);
+	if (timing) lines.push("", theme.fg("muted", `timing: ${timing}`));
 	return lines;
+}
+
+const TIMING_LABELS: Record<keyof RunTimings, string> = {
+	resolveRepositoryMs: "repository",
+	waitForLockMs: "lock wait",
+	workspaceSetupMs: "workspace setup",
+	programMs: "program",
+	scanChangesMs: "change scan",
+	formatMs: "formatter",
+	workspaceCloseMs: "workspace cleanup",
+	checkConflictsMs: "conflict check",
+	applyMs: "apply",
+	renderDiffMs: "diff",
+	unattributedMs: "other",
+};
+
+/** Explain calls exceeding the configured program budget, even when no individual phase does. */
+export function timingBreakdown(run: RunResult): string | undefined {
+	if (!run.timings || run.durationMs < run.timeoutMs) return undefined;
+	const significant = Object.entries(run.timings)
+		.map(([phase, milliseconds]) => ({
+			label: TIMING_LABELS[phase as keyof RunTimings],
+			milliseconds,
+		}))
+		.filter(({ milliseconds }) => milliseconds > 0)
+		.toSorted((a, b) => b.milliseconds - a.milliseconds);
+	if (significant.length === 0) return undefined;
+	return significant.map(({ label, milliseconds }) => `${label} ${formatDuration(milliseconds)}`).join(" · ");
+}
+
+function formatDuration(milliseconds: number): string {
+	return milliseconds < 1_000 ? `${milliseconds}ms` : `${(milliseconds / 1_000).toFixed(1)}s`;
 }
 
 /** e.g. "✓ Applied 3 files · +6 −6 · 0.6s" or "✕ Failed · rolled back all changes · exit 1 · 0.2s" */
 function verdict(run: RunResult, applied: FileChange[], theme: Theme): string {
 	const muted = (text: string) => theme.fg("muted", text);
 	const took = muted(` · ${(run.durationMs / 1000).toFixed(1)}s`);
-	const failure = run.timedOut ? `Timed out after ${run.timeoutMs / 1000}s` : "Failed";
+	const failure = run.timedOut ? `Program timed out after ${run.timeoutMs / 1000}s` : "Failed";
 	const exit = run.timedOut ? "" : muted(` · exit ${run.exitCode}`);
 
 	if (run.conflicts.length > 0) {

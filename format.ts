@@ -4,6 +4,14 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 
 type Command = { name: string; executable: string; args: string[]; cwd: string };
 
+/** A conservative filter: configuration and executable discovery still happen inside the sandbox. */
+export function supportsFormatting(file: string): boolean {
+	return (
+		/\.(?:[cm]?[jt]sx?|jsonc?|css|scss|less|html|vue|svelte|mdx?|ya?ml|graphql)$/i.test(file) ||
+		[".py", ".pyi", ".go", ".rs"].includes(extname(file))
+	);
+}
+
 function text(file: string): string {
 	try {
 		return readFileSync(file, "utf8");

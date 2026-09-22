@@ -76,6 +76,31 @@ describe("the verdict", () => {
 		expect(show(result({}))[0]).toBe("✓ No changes · 0.6s");
 	});
 
+	test("slow runs show a phase breakdown", () => {
+		const lines = show(
+			result({
+				durationMs: 34_382,
+				output: "program output",
+				timings: {
+					resolveRepositoryMs: 12,
+					waitForLockMs: 100,
+					workspaceSetupMs: 32_500,
+					programMs: 40,
+					scanChangesMs: 200,
+					formatMs: 1_400,
+					workspaceCloseMs: 90,
+					checkConflictsMs: 10,
+					applyMs: 20,
+					renderDiffMs: 10,
+					unattributedMs: 0,
+				},
+			}),
+		);
+		expect(lines[0]).toBe("✓ No changes · 34.4s");
+		expect(lines).toContain("program output");
+		expect(lines.at(-1)).toStartWith("timing: workspace setup 32.5s · formatter 1.4s");
+	});
+
 	test('a failure with rollback "all" says it rolled back everything', () => {
 		const run = result({ exitCode: 1, changes: [change("a.ts")] });
 		expect(show(run)[0]).toBe("✕ Failed · rolled back all changes · exit 1 · 0.6s");
@@ -92,7 +117,7 @@ describe("the verdict", () => {
 			rolledBack: ["b.ts"],
 		});
 		const lines = show(run);
-		expect(lines[0]).toBe("⚠ Timed out after 1s · kept 1 file, rolled back 1 · +1 −1 · 0.6s");
+		expect(lines[0]).toBe("⚠ Program timed out after 1s · kept 1 file, rolled back 1 · +1 −1 · 0.6s");
 		expect(lines[1]).toBe("  rolled back b.ts: file edit failed or was interrupted");
 	});
 
@@ -152,7 +177,7 @@ describe("the verdict", () => {
 
 	test("the call line names a non-default rollback mode and the timeout", () => {
 		expect(callLine({ title: "Rename", rollback: "all", timeout: 5 }, theme)).toBe(
-			"code Rename (rollback all, timeout 5s)",
+			"code Rename (rollback all, program timeout 5s)",
 		);
 		expect(callLine({ title: "Rename" }, theme)).toBe("code Rename");
 	});

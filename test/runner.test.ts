@@ -1017,6 +1017,28 @@ await ts.renameFile({ from, to });`,
 	});
 
 	describe("transaction commit and rollback", () => {
+		test("recreating an opaque directory retains only recreated descendants", async () => {
+			const repo = await makeRepo({
+				"src/keep.txt": "before\n",
+				"src/gone.txt": "gone\n",
+				"src/nested/gone.txt": "nested\n",
+				"untouched/keep.txt": "untouched\n",
+			});
+			const result = await run(
+				repo,
+				`
+				const fs = await import("node:fs/promises");
+				await fs.rm("src", { recursive: true });
+				await fs.mkdir("src/nested", { recursive: true });
+				await Bun.write("src/keep.txt", "after\\n");
+			`,
+			);
+			expect(result.applied).toEqual(["src/gone.txt", "src/keep.txt", "src/nested/gone.txt"]);
+			expect(await Bun.file(path.join(repo, "src/keep.txt")).text()).toBe("after\n");
+			expect(await Bun.file(path.join(repo, "src/nested/gone.txt")).exists()).toBe(false);
+			expect(await Bun.file(path.join(repo, "untouched/keep.txt")).text()).toBe("untouched\n");
+		});
+
 		test("applies deleting a whole directory", async () => {
 			const repo = await makeRepo({ ...FILES, "src/lib/x.ts": "export {};\n", "src/lib/y.ts": "export {};\n" });
 			const result = await run(repo, "await $`rm -rf src/lib`;");
@@ -1699,6 +1721,42 @@ await ts.renameFile({ from, to });`,
 });
 
 describe.skipIf(!hasOverlay)("automatic formatting", () => {
+	for (const disabled of [false, true]) {
+		test(`malformed formatter configuration retains completed edits (disabled=${disabled})`, async () => {
+			const repo = await makeRepo({ "a.ts": "before();\n", "package.json": '{"scripts":{"format":42}}' });
+			const result = await run(
+				repo,
+				'await Bun.write("a.ts", "after();\\n");',
+				{},
+				disabled ? { PI_SHORTHAND_FORMAT: "0" } : {},
+			);
+			expect(result.applied).toEqual(["a.ts"]);
+			expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("after();\n");
+			if (disabled) expect(result.warnings).toEqual([]);
+			else expect(result.warnings.join("\n")).toContain("Automatic formatting failed");
+		});
+	}
+
+	test("reports final workspace cleanup in the total and phase timings", async () => {
+		const repo = await makeRepo({ "a.txt": "before\n" });
+		const result = await run(repo, "", { testHooks: { finalCleanupDelayMs: 100 } });
+		expect(result.timings!.workspaceCloseMs).toBeGreaterThanOrEqual(100);
+		expect(result.durationMs).toBeGreaterThanOrEqual(result.timings!.workspaceCloseMs);
+		const total = Object.values(result.timings!).reduce((sum, ms) => sum + ms, 0);
+		expect(Math.abs(result.durationMs - total)).toBeLessThanOrEqual(Object.keys(result.timings!).length);
+	});
+
+	test.skipIf(process.platform !== "linux")(
+		"skips the formatting pass when the edited workspace has no formatter",
+		async () => {
+			const repo = await makeRepo({ "a.ts": "before();\n" });
+			const result = await run(repo, 'await Bun.write("a.ts", "after();\\n");');
+			expect(result.applied).toEqual(["a.ts"]);
+			expect(result.timings?.formatMs).toBe(0);
+			expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("after();\n");
+		},
+	);
+
 	for (const [writer, program] of [
 		["Bun", 'await Bun.write("a.ts", "newApi();\\nadded();\\n");'],
 		["Node", '(await import("node:fs")).writeFileSync("a.ts", "newApi();\\nadded();\\n");'],

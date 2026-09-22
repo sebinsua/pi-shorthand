@@ -12,7 +12,14 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { callLine, countLines, fileMetadataSummary, resultLines, unstructuredResultText } from "./display.ts";
+import {
+	callLine,
+	countLines,
+	fileMetadataSummary,
+	resultLines,
+	timingBreakdown,
+	unstructuredResultText,
+} from "./display.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 
 // Runs typically take well under a second. Longer transformations can request more time.
@@ -207,6 +214,8 @@ function fileLine(change: FileChange): string {
 
 function textForModel(run: RunResult, toolCallId: string): string {
 	const lines = [summaryLine(run)];
+	const timing = timingBreakdown(run);
+	if (timing) lines.push(`Timing: ${timing}`);
 
 	if (run.applied.length === 0 && run.changes.length > 0) {
 		lines.push("The real workspace is unchanged. Below is the candidate diff.");

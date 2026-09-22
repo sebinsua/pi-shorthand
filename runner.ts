@@ -23,6 +23,7 @@ import { structuredPatch } from "diff";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits } from "./program-lint.ts";
+import { supportsFormatting } from "./format.ts";
 import { preserveTextFormat } from "./text-format.ts";
 import { type FileOutcomeEvent, parseOpenWriters } from "./file-outcomes.ts";
 
@@ -39,6 +40,7 @@ interface RunTestHooks {
 	programStartMarker?: string;
 	writerInspectionFailure?: boolean;
 	workspaceCleanupFailure?: boolean;
+	finalCleanupDelayMs?: number;
 }
 
 interface ApplicationTestHooks {
@@ -55,6 +57,7 @@ export interface RunResult {
 	exitCode: number | null; // null if it was killed
 	timedOut: boolean;
 	durationMs: number;
+	timings?: RunTimings;
 	output: string; // stdout and stderr
 	warnings: string[]; // likely mistakes spotted in the program before it ran
 	cleanupWarnings: string[]; // application/cleanup completed with a non-fatal infrastructure warning
@@ -68,6 +71,20 @@ export interface RunResult {
 	errorLine?: string; // on failure: the program's line the error came from, e.g. "line 3: throw new Error(…)"
 	timeoutMs: number;
 	rollback: RunOptions["rollback"];
+}
+
+export interface RunTimings {
+	resolveRepositoryMs: number;
+	waitForLockMs: number;
+	workspaceSetupMs: number;
+	programMs: number;
+	scanChangesMs: number;
+	formatMs: number;
+	workspaceCloseMs: number;
+	checkConflictsMs: number;
+	applyMs: number;
+	renderDiffMs: number;
+	unattributedMs: number;
 }
 
 export interface FileChange {
@@ -92,6 +109,8 @@ export interface Overlay {
 	gitExcludes: string[]; // extra patterns git should ignore inside the overlay
 	executionExcludesFile?: string; // sandbox-visible path when the host temporary path is hidden
 	environment?: Record<string, string>; // backend-specific environment inside the sandbox
+	formattingAvailable?: boolean; // populated by change discovery when the backend can inspect formatter configuration
+	ignoredPaths?: string[]; // final ignore policy for the candidates returned by changes()
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
 	terminateProcesses?(): Promise<void>; // backend lifecycle boundary for descendants outside our process group
 	changes(): Promise<{ file: string; entry: FilesystemEntry | null }[]>; // may include files only read
@@ -114,9 +133,20 @@ const MAX_OUTPUT_CHARS = 1024 * 1024; // a safety cap; index.ts decides how much
 
 async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> {
 	const startedAt = performance.now();
+	let phaseStartedAt = startedAt;
+	const measured: Partial<RunTimings> = {};
+	const finishPhase = (phase: keyof Omit<RunTimings, "unattributedMs">) => {
+		const now = performance.now();
+		measured[phase] = (measured[phase] ?? 0) + now - phaseStartedAt;
+		phaseStartedAt = now;
+	};
+	reportProgress("resolving repository");
 	const cwd = await fs.realpath(options.cwd);
 	const repo = await findRepository(cwd);
+	finishPhase("resolveRepositoryMs");
+	reportProgress("waiting for repository lock");
 	const releaseLock = await takeRepositoryLock(repo, abort);
+	finishPhase("waitForLockMs");
 	let tempDir: string | undefined;
 	let result: RunResult | undefined;
 	let primaryError: unknown;
@@ -124,14 +154,19 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 	const formatWarnings: string[] = [];
 
 	try {
+		reportProgress("creating isolated workspace");
 		tempDir = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), "pi-shorthand-"));
 		const open = process.platform === "darwin" ? openMacOverlay : openLinuxOverlay;
 		const overlay = await open(repo, tempDir);
+		finishPhase("workspaceSetupMs");
 		let program: ProgramRun;
 		let changes: Change[];
 		let executionError: unknown;
 		try {
+			reportProgress("running edit program");
 			program = await runProgram({ ...options, cwd }, abort, overlay, repo, tempDir);
+			finishPhase("programMs");
+			reportProgress("scanning changes");
 			changes = await findChanges(overlay);
 			const preserved: { file: string; base64: string }[] = [];
 			if (process.env.PI_SHORTHAND_PRESERVE_TEXT !== "0") {
@@ -144,14 +179,17 @@ async function run(options: RunOptions, abort: AbortSignal): Promise<RunResult> 
 				}
 				changes = changes.filter((change) => !entriesEqual(change.before, change.after));
 			}
+			finishPhase("scanChangesMs");
 			const files = changes.filter((change) => change.after?.type === "file").map((change) => change.file);
 			if (
 				program.exitCode === 0 &&
 				program.failedFiles.length === 0 &&
 				!abort.aborted &&
-				files.length &&
+				files.some(supportsFormatting) &&
+				overlay.formattingAvailable !== false &&
 				process.env.PI_SHORTHAND_FORMAT !== "0"
 			) {
+				reportProgress("running automatic formatter");
 				try {
 					const module = executionPath(path.join(import.meta.dir, "format.ts"), repo, overlay);
 					const formatting = await runProgram(
@@ -188,11 +226,13 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 				} catch (error) {
 					formatWarnings.push(`Automatic formatting failed; completed edits are retained: ${String(error)}`);
 				}
+				finishPhase("formatMs");
 			}
 		} catch (error) {
 			executionError = error;
 			throw error;
 		} finally {
+			reportProgress("closing isolated workspace");
 			try {
 				await closeOverlay(overlay, options.testHooks?.workspaceCleanupFailure);
 			} catch (error) {
@@ -200,28 +240,52 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 				if (executionError) attachCleanupWarning(executionError, warning);
 				else runCleanupWarnings.push(warning);
 			}
+			finishPhase("workspaceCloseMs");
 		}
 
 		const shown = (file: string) => path.relative(cwd, path.join(repo, file));
 		const { applied: requested, rolledBack } = whatToApply(changes, program, options.rollback, abort.aborted);
+		reportProgress("checking for conflicts");
 		let conflicts = await conflictingFiles(repo, requested);
+		finishPhase("checkConflictsMs");
 		let applied: Change[] = [];
 		let applicationWarnings: string[] = [];
 		if (conflicts.length === 0) {
+			reportProgress("applying changes");
 			({
 				applied,
 				conflicts,
 				warnings: applicationWarnings,
 			} = await applyChanges(repo, requested, { abort, testHooks: options.testHooks?.apply }));
 		}
+		finishPhase("applyMs");
+		reportProgress("rendering diff");
+		const describedChanges = changes.map((change) => describe(shown(change.file), change));
+		finishPhase("renderDiffMs");
+		const durationMs = performance.now() - startedAt;
+		const measuredMs = Object.values(measured).reduce((sum, milliseconds) => sum + (milliseconds ?? 0), 0);
+		const timings: RunTimings = {
+			resolveRepositoryMs: Math.round(measured.resolveRepositoryMs ?? 0),
+			waitForLockMs: Math.round(measured.waitForLockMs ?? 0),
+			workspaceSetupMs: Math.round(measured.workspaceSetupMs ?? 0),
+			programMs: Math.round(measured.programMs ?? 0),
+			scanChangesMs: Math.round(measured.scanChangesMs ?? 0),
+			formatMs: Math.round(measured.formatMs ?? 0),
+			workspaceCloseMs: Math.round(measured.workspaceCloseMs ?? 0),
+			checkConflictsMs: Math.round(measured.checkConflictsMs ?? 0),
+			applyMs: Math.round(measured.applyMs ?? 0),
+			renderDiffMs: Math.round(measured.renderDiffMs ?? 0),
+			unattributedMs: Math.max(0, Math.round(durationMs - measuredMs)),
+		};
 		result = {
 			exitCode: program.exitCode,
 			timedOut: program.timedOut,
-			durationMs: Math.round(performance.now() - startedAt),
+			durationMs: Math.round(durationMs),
+			timings,
 			output: program.output,
 			warnings: [...lint(options.program), ...formatWarnings, ...applicationWarnings, ...runCleanupWarnings],
 			cleanupWarnings: [...applicationWarnings, ...runCleanupWarnings],
-			changes: changes.map((change) => describe(shown(change.file), change)),
+			changes: describedChanges,
 			applied: applied.map((change) => shown(change.file)),
 			conflicts: conflicts.map(shown),
 			rolledBack: rolledBack.map((change) => shown(change.file)),
@@ -238,8 +302,11 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 		for (const warning of runCleanupWarnings) attachCleanupWarning(error, warning);
 		throw error;
 	} finally {
+		const cleanupStartedAt = performance.now();
+		reportProgress("cleaning temporary workspace and releasing lock");
 		const finalWarnings: string[] = [];
 		try {
+			if (options.testHooks?.finalCleanupDelayMs) await Bun.sleep(options.testHooks.finalCleanupDelayMs);
 			if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 		} catch (error) {
 			finalWarnings.push(cleanupWarning("temporary workspace", error));
@@ -252,6 +319,14 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 		if (result) {
 			result.warnings.push(...finalWarnings);
 			result.cleanupWarnings.push(...finalWarnings);
+			const finishedAt = performance.now();
+			measured.workspaceCloseMs = (measured.workspaceCloseMs ?? 0) + finishedAt - cleanupStartedAt;
+			result.durationMs = Math.round(finishedAt - startedAt);
+			if (result.timings) {
+				result.timings.workspaceCloseMs = Math.round(measured.workspaceCloseMs);
+				const accountedMs = Object.values(measured).reduce((sum, milliseconds) => sum + (milliseconds ?? 0), 0);
+				result.timings.unattributedMs = Math.max(0, Math.round(finishedAt - startedAt - accountedMs));
+			}
 		} else if (primaryError) {
 			for (const warning of finalWarnings) attachCleanupWarning(primaryError, warning);
 		}
@@ -521,6 +596,15 @@ async function runProgram(
 	};
 }
 
+/** Report infrastructure phases as well as commands, so a slow call says what it is waiting on. */
+function reportProgress(step: string) {
+	try {
+		writeSync(3, JSON.stringify({ step }) + "\n");
+	} catch {
+		// Direct runner callers do not provide a progress descriptor.
+	}
+}
+
 /** Keep the latest command/helper in memory and relay it to index.ts over the runner's descriptor 3. */
 function trackProgress(child: ChildProcess) {
 	const stream = child.stdio[4];
@@ -540,11 +624,7 @@ function trackProgress(child: ChildProcess) {
 					else if (event.type === "helper" && typeof event.helper === "string" && typeof event.ms === "number")
 						lastStep = `${event.helper} (${event.ms} ms)`;
 					else continue;
-					try {
-						writeSync(3, JSON.stringify({ step: lastStep }) + "\n");
-					} catch {
-						// Direct runner callers do not provide a progress descriptor.
-					}
+					reportProgress(lastStep);
 				} catch {
 					// Progress is advisory; malformed events do not affect the run.
 				}
@@ -701,10 +781,12 @@ async function filesOpenForWriting(dir: string, forceFailure: boolean): Promise<
 /** Compares what the overlay reports with the originals. Only files git sees count. */
 async function findChanges(overlay: Overlay): Promise<Change[]> {
 	const candidates = (await overlay.changes()).filter(({ file }) => path.basename(file) !== PROGRAM_FILE);
-	const ignored = await gitIgnored(
-		overlay,
-		candidates.map(({ file }) => file),
-	);
+	const ignored = overlay.ignoredPaths
+		? new Set(overlay.ignoredPaths)
+		: await gitIgnored(
+				overlay,
+				candidates.map(({ file }) => file),
+			);
 
 	const changes: Change[] = [];
 	const seen = new Set<string>(); // an overlay may report a file twice, e.g. a deleted directory and the files in it
