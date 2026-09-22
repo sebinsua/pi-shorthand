@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { editingFiles } from "./file-outcomes.ts";
-import { withTypeScriptServer } from "./lsp-client.ts";
+import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
@@ -38,7 +38,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 	validateRename(options);
 	const file = existingProjectFile(root, options.file);
 	const uri = pathToFileURL(file).href;
-	const changes = await withTypeScriptServer(root, async (server) => {
+	await withTypeScriptServer(root, async (server) => {
 		const symbols = await server.sendRequest<Array<DocumentSymbol | SymbolInformation> | null>(
 			"textDocument/documentSymbol",
 			{ textDocument: { uri } },
@@ -57,11 +57,12 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position: positions[0],
 			newName: options.to,
 		});
-		return planWorkspaceEdit(root, edit);
-	});
-	if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
-	editingFiles([...changes.keys()], () => {
-		for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
+		const changes = planWorkspaceEdit(root, edit);
+		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
+		editingFiles([...changes.keys()], () => {
+			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
+		});
+		await filesChanged(server, [...changes.keys()]);
 	});
 }
 
@@ -73,16 +74,38 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 	if (lstatSync(to, { throwIfNoEntry: false }))
 		throw new Error(`ts.renameFile destination already exists: ${JSON.stringify(options.to)}`);
 
-	const edit = await withTypeScriptServer(root, (server) =>
-		server.sendRequest<WorkspaceEdit | null>("workspace/willRenameFiles", {
-			files: [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }],
-		}),
-	);
-	const changes = planWorkspaceEdit(root, edit);
-	editingFiles([...changes.keys(), from, to], () => {
-		for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
-		mkdirSync(dirname(to), { recursive: true });
-		renameSync(from, to);
+	await withTypeScriptServer(root, async (server) => {
+		const files = [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }];
+		const edit = await server.sendRequest<WorkspaceEdit | null>("workspace/willRenameFiles", { files });
+		const changes = planWorkspaceEdit(root, edit);
+		editingFiles([...changes.keys(), from, to], () => {
+			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
+			mkdirSync(dirname(to), { recursive: true });
+			renameSync(from, to);
+		});
+		await notifyTypeScriptServer(server, "workspace/didRenameFiles", { files });
+		await filesChanged(
+			server,
+			[...changes.keys()].filter((file) => file !== from),
+			[from],
+			[to],
+		);
+	});
+}
+
+async function filesChanged(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	changed: string[],
+	deleted: string[] = [],
+	created: string[] = [],
+): Promise<void> {
+	recordTypeScriptFiles(server, [...changed, ...deleted, ...created]);
+	await notifyTypeScriptServer(server, "workspace/didChangeWatchedFiles", {
+		changes: [
+			...changed.map((file) => ({ uri: pathToFileURL(file).href, type: 2 })),
+			...deleted.map((file) => ({ uri: pathToFileURL(file).href, type: 3 })),
+			...created.map((file) => ({ uri: pathToFileURL(file).href, type: 1 })),
+		],
 	});
 }
 

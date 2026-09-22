@@ -30,8 +30,9 @@ await ts.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
 ```
 
 `ts.rename` requires the declaration name to be unique in its file and leaves unrelated symbols
-alone. `ts.renameFile` moves the file and updates imports and exports that resolve to it. Both
-operations are asynchronous.
+alone. `ts.renameFile` moves the file and updates imports and exports that resolve to it. Read
+[Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
+rules, updated paths and failure conditions.
 
 ## Insert before or after a statement
 

@@ -3,6 +3,20 @@
 Use this guide for extraction, complex structural rewrites, syntax placement or other languages.
 The everyday file and replacement operations are in [SKILL.md](SKILL.md).
 
+## Semantic TypeScript refactors
+
+Prefer `ts.rename` to a structural rewrite when changing a TypeScript symbol. It asks the TypeScript
+language server to rename the resolved symbol across the project, so unrelated names and strings are
+left alone. `file` is the declaration's file, and `symbol` must name exactly one declaration there.
+Missing names, repeated declarations and overloads are rejected without writing.
+
+Use `ts.renameFile` to move a whole TypeScript file. It updates imports and exports that resolve to
+the file, as well as relative module paths inside the moved file, then performs the move. The source
+must exist, the destination must not exist, and both paths must remain inside the repository.
+
+Await each operation; when it resolves, all of its edits are complete. Use `sg.move` below for
+moving syntax between files; it does not repair imports or bindings.
+
 ## Extract existing source
 
 Select and reuse the implementation rather than copying it into the program or searching for braces.

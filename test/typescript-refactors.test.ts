@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import type { MessageConnection } from "vscode-jsonrpc/node";
+import { withTypeScriptServer } from "../lsp-client.ts";
 import { rename, renameFile } from "../typescript-refactors.ts";
 
 const roots: string[] = [];
@@ -87,6 +89,64 @@ test("renameFile moves a file and updates resolved module paths", async () => {
 	);
 	expect(await Bun.file(path.join(root, "src/app.ts")).text()).toBe(
 		'import { parseUser } from "./users/parse-user";\nexport const user = parseUser("Ada");\n',
+	);
+});
+
+test("consecutive refactors share current TypeScript project state", async () => {
+	const root = await fixture({
+		"tsconfig.json": JSON.stringify({ include: ["src"] }),
+		"src/parse.ts": "export function parseUser(value: string) { return value; }\n",
+		"src/use.ts": 'import { parseUser } from "./parse";\nexport const user = parseUser("Ada");\n',
+	});
+
+	await rename(root, { file: "src/parse.ts", symbol: "parseUser", to: "decodeUser" });
+	await renameFile(root, { from: "src/parse.ts", to: "src/users/decode.ts" });
+	await rename(root, { file: "src/users/decode.ts", symbol: "decodeUser", to: "readUser" });
+
+	expect(await Bun.file(path.join(root, "src/users/decode.ts")).text()).toContain("function readUser");
+	expect(await Bun.file(path.join(root, "src/use.ts")).text()).toBe(
+		'import { readUser } from "./users/decode";\nexport const user = readUser("Ada");\n',
+	);
+});
+
+test("the TypeScript server is reused until other code changes the project", async () => {
+	const root = await fixture({ "src/app.ts": "export const value = 1;\n" });
+	let first!: MessageConnection;
+	await withTypeScriptServer(root, async (server) => {
+		first = server;
+	});
+	await withTypeScriptServer(root, async (server) => {
+		expect(server).toBe(first);
+	});
+	await Bun.write(path.join(root, "src/new.ts"), "export const added = 2;\n");
+	await withTypeScriptServer(root, async (server) => {
+		expect(server).not.toBe(first);
+	});
+});
+
+test("a reused server observes an intervening filesystem edit", async () => {
+	const root = await fixture({
+		"tsconfig.json": JSON.stringify({ include: ["src"] }),
+		"src/app.ts": "export function first() { return 1; }\n",
+	});
+
+	await rename(root, { file: "src/app.ts", symbol: "first", to: "initial" });
+	await Bun.write(
+		path.join(root, "src/app.ts"),
+		(await Bun.file(path.join(root, "src/app.ts")).text()) + "export function second() { return 2; }\n",
+	);
+	await Bun.write(
+		path.join(root, "src/use.ts"),
+		'import { initial } from "./app";\nexport const result = initial();\n',
+	);
+	await rename(root, { file: "src/app.ts", symbol: "second", to: "next" });
+	await rename(root, { file: "src/app.ts", symbol: "initial", to: "final" });
+
+	expect(await Bun.file(path.join(root, "src/app.ts")).text()).toBe(
+		"export function final() { return 1; }\nexport function next() { return 2; }\n",
+	);
+	expect(await Bun.file(path.join(root, "src/use.ts")).text()).toBe(
+		'import { final } from "./app";\nexport const result = final();\n',
 	);
 });
 
