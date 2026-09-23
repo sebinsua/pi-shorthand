@@ -48,7 +48,7 @@ Common operations:
 - await ts.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
 - await ts.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
 
-See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs. Time spent inside ts.* and grit helpers does not count toward it, up to 60 extra seconds.`;
+See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
 
 export default function (pi: ExtensionAPI) {
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
@@ -86,7 +86,7 @@ export default function (pi: ExtensionAPI) {
 			),
 			timeout: Type.Optional(
 				Type.Number({
-					description: "Seconds of program time before it is killed (default 2); ts.* and grit helper time is excluded",
+					description: "Seconds of program time before it is killed (default 2); time inside helpers is excluded",
 				}),
 			),
 		}),

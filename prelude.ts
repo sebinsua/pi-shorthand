@@ -46,15 +46,35 @@ function report(event: Record<string, unknown>) {
 }
 
 let helperCalls = 0;
+let activeHelper: { helper: string; id: number } | undefined;
+
+/**
+ * Runs the program's own code from inside a helper, such as an sg.rewrite callback. That time counts
+ * toward the timeout again, so an endless loop in a callback still times out promptly.
+ */
+function programCode<T>(run: () => T): T {
+	const helper = activeHelper;
+	if (!helper) return run();
+	report({ type: "helper-yield", ...helper });
+	activeHelper = undefined;
+	try {
+		return run();
+	} finally {
+		activeHelper = helper;
+		report({ type: "helper-resume", ...helper });
+	}
+}
 
 /**
  * Runs a helper, logging when it starts, how long it took and how many results it returned. The runner
- * pauses the program's timeout while some helpers run, so every start is matched by a finish, even on failure.
+ * pauses the program's timeout while helpers run, so every start is matched by a finish, even on failure.
  */
 function logged<T>(helper: string, _args: unknown[], run: () => T): T {
 	const id = ++helperCalls;
 	const startedAt = performance.now();
 	report({ type: "helper-start", helper, id });
+	const outer = activeHelper;
+	activeHelper = { helper, id };
 	const done = (value?: unknown) => {
 		const results = Array.isArray(value) ? value.length : typeof value === "number" ? value : undefined;
 		report({
@@ -71,6 +91,8 @@ function logged<T>(helper: string, _args: unknown[], run: () => T): T {
 	} catch (error) {
 		done();
 		throw error;
+	} finally {
+		activeHelper = outer;
 	}
 	if (result instanceof Promise)
 		return result.then(
@@ -396,13 +418,17 @@ type RewriteArgs =
 	| [pattern: string | NapiConfig, replacement: Replacement, files?: FileScope]
 	| [matches: SgMatch | readonly SgMatch[], replacement: Replacement];
 
-function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, file: string): number {
+/**
+ * `patterned`: the matches come from a pattern, not a selection the program made, so matching an earlier
+ * rewrite's output is probably unintended.
+ */
+function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, file: string, patterned = false): number {
 	const edits: Edit[] = [];
 	let count = 0;
 	for (const match of matches) {
 		const result =
 			typeof replacement === "function"
-				? replacement(match)
+				? programCode(() => replacement(match))
 				: replacement.replace(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g, (text, _, name) => match.vars[name] ?? text);
 		const changes = replacementEdits(result, match.node, file);
 		if (changes.length > 0) {
@@ -424,8 +450,51 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 	// A callback can run arbitrary code, including writes: don't overwrite changes made after selection.
 	const sources = new Map<string, string | null>();
 	for (const match of matches) getMatchSnapshot(match, sources, rewriteStaleAdvice);
-	writeFileSync(file, matches[0].node.getRoot().root().commitEdits(edits));
+	const source = matches[0].node.getRoot().root().text();
+	if (patterned) warnAboutRematchedOutput(file, source, matches);
+	const output = matches[0].node.getRoot().root().commitEdits(edits);
+	recordRewriteOutput(file, source, output, ordered);
+	writeFileSync(file, output);
 	return count;
+}
+
+// Where earlier sg.rewrite calls put their replacements, per file, while the file still holds exactly what
+// the last rewrite wrote. Rewrites apply one after another, so a later pattern can match an earlier result:
+// rewriting request(u, undefined, t) to request(u, { timeoutMs: t }) creates a new two-argument call.
+const rewriteOutputs = new Map<string, { text: string; ranges: [number, number][] }>();
+
+function recordRewriteOutput(file: string, before: string, after: string, edits: readonly Edit[]): void {
+	const key = resolve(repositoryRoot, file);
+	const previous = rewriteOutputs.get(key);
+	const ranges: [number, number][] = [];
+	let shift = 0;
+	let next = 0;
+	const earlier = previous?.text === before ? previous.ranges : [];
+	for (const edit of edits) {
+		// Keep earlier ranges this edit leaves alone, moved by the edits before them.
+		for (; next < earlier.length && earlier[next]![1] <= edit.startPos; next++)
+			ranges.push([earlier[next]![0] + shift, earlier[next]![1] + shift]);
+		while (next < earlier.length && earlier[next]![0] < edit.endPos) next++;
+		const start = edit.startPos + shift;
+		ranges.push([start, start + edit.insertedText.length]);
+		shift += edit.insertedText.length - (edit.endPos - edit.startPos);
+	}
+	for (; next < earlier.length; next++) ranges.push([earlier[next]![0] + shift, earlier[next]![1] + shift]);
+	rewriteOutputs.set(key, { text: after, ranges });
+}
+
+function warnAboutRematchedOutput(file: string, source: string, matches: readonly SgMatch[]): void {
+	const recorded = rewriteOutputs.get(resolve(repositoryRoot, file));
+	if (!recorded || recorded.text !== source) return;
+	const rematched = matches.filter((match) => {
+		const { start, end } = match.node.range();
+		return recorded.ranges.some(([from, to]) => start.index >= from && end.index <= to);
+	});
+	if (rematched.length === 0) return;
+	const example = rematched[0]!;
+	console.error(
+		`warning: sg.rewrite matched ${rematched.length} place${rematched.length === 1 ? "" : "s"} that an earlier sg.rewrite produced, e.g. ${gitPath(resolve(repositoryRoot, file))}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another: handle every shape in one callback, or order them so later patterns cannot match earlier output.`,
+	);
 }
 
 /** Rewrites patterns or existing selections; returns matches producing edits, not individual edits. */
@@ -468,7 +537,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 				toMatch(file, node, parsed.source, pattern),
 			);
 			matched += matches.length;
-			return applyRewrites(matches, replacement, file);
+			return applyRewrites(matches, replacement, file, true);
 		});
 	}
 	if (matched === 0) {
@@ -633,7 +702,11 @@ const globals = {
 		one: (...args: Parameters<typeof one>) => logged("sg.one", args, () => one(...args)),
 		file: (...args: Parameters<typeof placementFile>) => logged("sg.file", args, () => placementFile(...args)),
 		insert: (...args: Parameters<typeof insert>) => logged("sg.insert", args, () => insert(...args)),
-		move: (...args: Parameters<typeof move>) => logged("sg.move", args, () => move(...args)),
+		move: (...args: Parameters<typeof move>) => {
+			const [match, destination, transform] = args;
+			const own = transform && ((text: string) => programCode(() => transform(text)));
+			return logged("sg.move", args, () => move(match, destination, own));
+		},
 		remove: (...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args)),
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},

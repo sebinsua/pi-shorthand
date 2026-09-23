@@ -1,11 +1,9 @@
 /**
- * Program time for the timeout. Helpers such as ts.rename start a language server and index the project;
- * that work scales with the repository, not the program, so it pauses the clock. The pause is capped:
- * a helper that never returns still times out, at most `allowanceMs` after the program's own timeout.
+ * Program time for the timeout. Shorthand's helpers (edit, glob, grep, sg, grit, ts) do work that scales
+ * with the repository, such as parsing every file in scope or starting a language server, so time inside
+ * them pauses the clock. The pause is capped: a helper that never returns still times out, at most
+ * `allowanceMs` after the program's own timeout.
  */
-
-/** Helpers whose running time does not count toward the program's timeout. */
-export const PAUSING_HELPERS = new Set(["ts.rename", "ts.renameFile", "grit"]);
 
 /** The most helper time one run may exclude from its timeout. */
 export const HELPER_ALLOWANCE_MS = 60_000;

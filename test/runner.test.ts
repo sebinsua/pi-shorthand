@@ -2059,6 +2059,13 @@ ${timeout ? "await Bun.sleep(30_000);" : "process.exit(2);"}
 	});
 });
 
+const THREE_THEN_TWO = `sg.rewrite("request($URL, undefined, $T)", "request($URL, { timeoutMs: $T })", "src");
+sg.rewrite("request($URL, $R, $T)", "request($URL, { retries: $R, timeoutMs: $T })", "src");
+sg.rewrite("request($URL, $R)", "request($URL, { retries: $R })", "src");`;
+const TWO_THEN_THREE = `sg.rewrite("request($URL, $R)", "request($URL, { retries: $R })", "src");
+sg.rewrite("request($URL, undefined, $T)", "request($URL, { timeoutMs: $T })", "src");
+sg.rewrite("request($URL, $R, $T)", "request($URL, { retries: $R, timeoutMs: $T })", "src");`;
+
 describe.skipIf(!hasOverlay)("prelude", () => {
 	test("glob and grep throw with Git diagnostics while grep no-match remains empty", async () => {
 		const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
@@ -2314,6 +2321,61 @@ ts.createSourceFile("a.ts", "", 99);`,
 		expect(result.warnings).toEqual([
 			expect.stringMatching(/^typescript resolves to 7\.[\d.]+ here, which has no compiler API/),
 		]);
+	});
+
+	test("sg.rewrite warns when it matches what an earlier rewrite produced", async () => {
+		const source =
+			'export const mascot = "😀"; request("/a", undefined, 750);\nrequest("/b", 3);\nrequest("/c", 2, 500);\n';
+		const cases = [
+			// The benchmark's order: the new two-argument call is rewritten again.
+			{
+				program: THREE_THEN_TWO,
+				warns:
+					/matched 2 places that an earlier sg\.rewrite produced, e\.g\. src\/a\.ts:1 request\("\/a", \{ timeoutMs: 750 \}\)/,
+			},
+			// Two-argument calls first: later patterns cannot match earlier output.
+			{ program: TWO_THEN_THREE, warns: null },
+			// Wrapping earlier output in a larger node is intended.
+			{ program: `${TWO_THEN_THREE}\nsg.rewrite("request($$$ARGS);", "void request($$$ARGS);", "src");`, warns: null },
+		];
+		for (const { program, warns } of cases) {
+			const repo = await makeRepo({ "src/a.ts": source });
+			const result = await run(repo, program);
+			expect(result.exitCode).toBe(0);
+			if (warns) expect(result.output).toMatch(warns);
+			else expect(result.output).not.toContain("earlier sg.rewrite produced");
+		}
+	});
+
+	test("sg.rewrite follows earlier output through later edits to the same file", async () => {
+		const repo = await makeRepo({ "src/a.ts": 'const m = "😀"; old(1);\nkeep(2);\nold(3);\n' });
+		const result = await run(
+			repo,
+			`sg.rewrite("old($A)", "next($A, { from: $A })", "src");
+sg.rewrite("keep($A)", "kept($A, $A, $A)", "src");
+sg.rewrite("next($A, $B)", "last($A)", "src");`,
+		);
+
+		expect(result.output).toMatch(
+			/matched 2 places that an earlier sg\.rewrite produced, e\.g\. src\/a\.ts:1 next\(1, \{ from: 1 \}\)/,
+		);
+	});
+
+	test("time inside sg helpers does not count toward the program timeout", async () => {
+		const files = Object.fromEntries(
+			Array.from({ length: 40 }, (_, i) => [`src/f${i}.ts`, `export const value${i} = call(${i});\n`.repeat(40)]),
+		);
+		const repo = await makeRepo(files);
+		const result = await run(
+			repo,
+			`const started = performance.now();
+while (performance.now() - started < 1500) sg.find("call($A)", "src");`,
+			{ timeoutMs: 300 },
+		);
+
+		expect(result.timedOut).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.helperMs).toBeGreaterThan(1000);
 	});
 
 	test("sg matches a standalone class method pattern as a method", async () => {

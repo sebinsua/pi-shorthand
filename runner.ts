@@ -23,7 +23,7 @@ import { structuredPatch } from "diff";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits, typeScriptApiHint } from "./program-lint.ts";
-import { PAUSING_HELPERS, ProgramClock } from "./program-clock.ts";
+import { ProgramClock } from "./program-clock.ts";
 import { supportsFormatting } from "./format.ts";
 import {
 	type Diagnostics,
@@ -81,7 +81,7 @@ export interface RunResult {
 	lastStep?: string; // on timeout: the last step the program logged, e.g. "$ find / -name x" or "grep (18 ms)"
 	errorLine?: string; // on failure: the program's line the error came from, e.g. "line 3: throw new Error(…)"
 	timeoutMs: number;
-	helperMs?: number; // time in ts.* and grit helpers, which did not count toward timeoutMs
+	helperMs?: number; // time inside shorthand helpers, which did not count toward timeoutMs
 	rollback: RunOptions["rollback"];
 }
 
@@ -703,7 +703,14 @@ function trackProgress(child: ChildProcess, clock: ProgramClock) {
 					};
 					if (event.type === "command" && typeof event.command === "string") lastStep = `$ ${event.command}`;
 					else if (event.type === "helper-start" && typeof event.helper === "string") {
-						if (PAUSING_HELPERS.has(event.helper) && typeof event.id === "number") clock.helperStarted(event.id);
+						if (typeof event.id === "number") clock.helperStarted(event.id);
+						lastStep = `${event.helper} (running)`;
+					} else if (event.type === "helper-yield" && typeof event.helper === "string") {
+						// The helper is running the program's own callback, which counts toward the timeout.
+						if (typeof event.id === "number") clock.helperFinished(event.id);
+						lastStep = `${event.helper} callback (running)`;
+					} else if (event.type === "helper-resume" && typeof event.helper === "string") {
+						if (typeof event.id === "number") clock.helperStarted(event.id);
 						lastStep = `${event.helper} (running)`;
 					} else if (event.type === "helper" && typeof event.helper === "string" && typeof event.ms === "number") {
 						if (typeof event.id === "number") clock.helperFinished(event.id);

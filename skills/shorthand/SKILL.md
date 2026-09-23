@@ -70,6 +70,8 @@ sg.rewrite("connect($URL, $RETRIES)", (m) => {
 ```
 
 A callback returns text to replace the whole match, a native edit for part of it, or `null` to skip.
+Rewrites apply one after another, so a later pattern can match an earlier result: handle several call
+shapes in one callback on `request($URL, $$$ARGS)` rather than one rewrite per shape.
 **`node.replace()` constructs an edit; return it from the callback so `sg.rewrite` applies it.**
 
 ## Replace an implementation while keeping its signature
