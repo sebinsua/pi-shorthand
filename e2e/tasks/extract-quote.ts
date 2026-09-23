@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Lang, parse } from "@ast-grep/napi";
-import type { Task } from "./tasks.ts";
-import { assertImports } from "./verification.ts";
+import type { Task } from "./task.ts";
+import { assertImports } from "../verification.ts";
 
 const types = `export interface Item { sku: string; price: number; quantity: number; taxable: boolean }
 export interface Options { discount?: number; shipping?: number; taxRate?: number }

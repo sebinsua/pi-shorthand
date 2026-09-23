@@ -78,13 +78,15 @@ Make `calculateTotal` sum its prices, preserving parameter and return types:
 
 ```ts
 const fn = sg.one(
-	{ rule: { kind: "function_declaration", has: { field: "name", pattern: "calculateTotal" } } },
+	{ rule: { kind: "function_declaration", has: { field: "name", regex: "^calculateTotal$" } } },
 	"prices.ts",
 );
 sg.rewrite(fn, (m) => m.node.field("body")!.replace("{ return prices.reduce((total, price) => total + price, 0); }"));
 ```
 
-`sg.rewrite(match, "new source")` replaces the whole selected node instead. `sg.find` returns an
+Use `kind: "method_definition"` with the same `has` to select a class method; match names with
+`regex`, since a method's name is not an identifier pattern. `sg.rewrite(match, "new source")`
+replaces the whole selected node instead. `sg.find` returns an
 array: pass it once to `sg.rewrite(matches, callback)` for independent edits. Each call writes
 immediately within the editing workspace; select again if a later edit depends on that write.
 

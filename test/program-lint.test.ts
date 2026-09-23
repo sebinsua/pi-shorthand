@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Lang, parse } from "@ast-grep/napi";
-import { discardedEdits } from "../program-lint.ts";
+import { discardedEdits, typeScriptApiHint } from "../program-lint.ts";
 
 const warnings = (program: string) => discardedEdits(parse(Lang.TypeScript, program).root());
 
@@ -51,4 +51,16 @@ test("does not confuse string or application methods with native nodes", () => {
 		'try {} catch ({sg}) { sg.one(pattern).node.replace("x"); }',
 	])
 		expect(warnings(program)).toEqual([]);
+});
+
+test("the TypeScript API hint needs a TypeScript import, a TypeError and TypeScript 7", () => {
+	const program = 'import ts from "typescript";\nts.createSourceFile("a.ts", "", 99);';
+	const error = "TypeError: ts.createSourceFile is not a function";
+	expect(typeScriptApiHint(program, error, "7.0.2")).toEqual([
+		expect.stringContaining("7.0.2 here, which has no compiler API"),
+	]);
+	expect(typeScriptApiHint(program, error, "5.9.3")).toEqual([]);
+	expect(typeScriptApiHint(program, "Error: missing file", "7.0.2")).toEqual([]);
+	expect(typeScriptApiHint('const ts = require("typescript");', error, "7.0.2")).toHaveLength(1);
+	expect(typeScriptApiHint('import { x } from "typescript-helper";', error, "7.0.2")).toEqual([]);
 });

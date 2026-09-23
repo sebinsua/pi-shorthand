@@ -4,8 +4,7 @@ import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { runWithBun } from "../index.ts";
-import { guidanceTasks } from "./guidance-tasks.ts";
-import { materializeTask } from "./tasks.ts";
+import { allTasks, materializeTask } from "./tasks.ts";
 import { runVerification } from "./harness.ts";
 import { saveChanges } from "./artifacts.ts";
 
@@ -23,7 +22,7 @@ await mkdir(output, { recursive: true });
 const results = [];
 for (const name of names) {
 	const id = name.replace(/\.ts\.txt$/, "");
-	const task = guidanceTasks.find((item) => id.startsWith(item.id + "-"));
+	const task = allTasks.find((item) => id.startsWith(item.id + "-"));
 	if (!task) throw new Error(`No task for ${name}`);
 	const root = await mkdtemp(path.join(tmpdir(), "shorthand-reference-"));
 	try {
@@ -41,7 +40,7 @@ for (const name of names) {
 		});
 		const artifacts = await saveChanges(before, workspace, path.join(output, `${id}.artifacts`));
 		// Evaluate in a fresh process, outside the editing program, including the compiler check.
-		const command = ["bun", path.join(import.meta.dir, "guidance-tasks.ts"), task.id, workspace].map(quote).join(" ");
+		const command = ["bun", path.join(import.meta.dir, "tasks.ts"), task.id, workspace].map(quote).join(" ");
 		const verification = await runVerification(command, workspace, 30_000);
 		const result = {
 			id,

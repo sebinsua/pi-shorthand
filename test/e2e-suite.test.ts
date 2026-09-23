@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { materializeTask, taskById, tasks } from "../e2e/tasks.ts";
+import { allTasks, applySolution, materializeTask, taskById } from "../e2e/tasks.ts";
 import { saveChanges } from "../e2e/artifacts.ts";
 import { extensionEntry, conditionTools } from "../e2e/conditions.ts";
 import { sessionReport } from "../e2e/report.ts";
@@ -31,12 +31,12 @@ test("copied fixtures provide the same local TypeScript compiler without downloa
 	expect(await $`git ls-files node_modules`.cwd(copy).text()).toBe("");
 });
 
-for (const task of tasks)
+for (const task of allTasks)
 	test(`evaluator rejects initial ${task.id} and accepts its reference solution`, async () => {
 		const root = await directory();
 		await materializeTask(task, root);
 		await expect(task.verify(root)).rejects.toThrow();
-		for (const [file, content] of Object.entries(task.solution)) await writeFile(path.join(root, file), content);
+		await applySolution(task, root);
 		// A fresh subprocess avoids module caching between the negative and positive checks.
 		const child = Bun.spawn(["bun", path.resolve("e2e/tasks.ts"), task.id, root], { stdout: "pipe", stderr: "pipe" });
 		const [exit, stdout, stderr] = await Promise.all([
@@ -104,7 +104,7 @@ for (const example of evaluatorCases)
 		const task = taskById(example.id);
 		await materializeTask(task, root);
 		for (const [file, content] of Object.entries(task.solution))
-			await writeFile(path.join(root, file), example.change(content));
+			await writeFile(path.join(root, file), example.change(content!));
 		const child = Bun.spawn(["bun", path.resolve("e2e/tasks.ts"), task.id, root], { stdout: "pipe", stderr: "pipe" });
 		const [exit, stdout, stderr] = await Promise.all([
 			child.exited,
@@ -124,7 +124,7 @@ test("artifacts preserve the dirty starting tree, additions, binary files and de
 	const root = await directory();
 	const before = path.join(root, "before");
 	const after = path.join(root, "after");
-	await materializeTask(tasks[0], before);
+	await materializeTask(allTasks[0]!, before);
 	await writeFile(path.join(before, "average.ts"), "dirty starting content\n");
 	await writeFile(path.join(before, "old.txt"), "untracked starting content\n");
 	await $`cp -R ${before} ${after}`.quiet();
@@ -151,8 +151,8 @@ for (const [id, restoredFiles] of [
 		const task = taskById(id);
 		const root = await directory();
 		await materializeTask(task, root);
-		for (const [file, content] of Object.entries(task.solution)) await writeFile(path.join(root, file), content);
-		for (const file of restoredFiles) await writeFile(path.join(root, file), task.files[file]);
+		await applySolution(task, root);
+		for (const file of restoredFiles) await writeFile(path.join(root, file), task.files[file]!);
 		const child = Bun.spawn(["bun", path.resolve("e2e/tasks.ts"), id, root], { stdout: "pipe", stderr: "pipe" });
 		const [exit] = await Promise.all([
 			child.exited,
@@ -229,7 +229,7 @@ test("runner compares conditions from identical fixtures and saves independent r
 	const root = await directory();
 	const fixture = path.join(root, "fixture");
 	const results = path.join(root, "results");
-	await materializeTask(tasks[0], fixture);
+	await materializeTask(allTasks[0]!, fixture);
 	const env = await fakeEnvironment(root);
 	const child = Bun.spawn(
 		[
@@ -283,7 +283,7 @@ test("spending threshold disqualifies an otherwise passing fake session", async 
 	const root = await directory();
 	const fixture = path.join(root, "fixture");
 	const results = path.join(root, "results");
-	await materializeTask(tasks[0], fixture);
+	await materializeTask(allTasks[0]!, fixture);
 	const env = await fakeEnvironment(root);
 	const child = Bun.spawn(
 		[

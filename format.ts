@@ -117,14 +117,26 @@ export function formatterFor(file: string, root: string): Command | null {
 	return null;
 }
 
+/** Files of one kind share a formatter decision: JS-family files, Python, Go or Rust. */
+function formatterKind(file: string): string {
+	const extension = extname(file);
+	if (/\.(?:[cm]?[jt]sx?|jsonc?|css|scss|less|html|vue|svelte|mdx?|ya?ml|graphql)$/i.test(extension)) return "js";
+	return extension === ".pyi" ? ".py" : extension;
+}
+
 export async function formatChanged(
 	files: string[],
 	root: string,
 ): Promise<{ messages: string[]; warnings: string[] }> {
 	const groups = new Map<string, { command: Command; files: string[] }>();
 	const result = { messages: [] as string[], warnings: [] as string[] };
+	// The choice depends only on a file's directory and kind of source, and each lookup checks several
+	// config files per ancestor directory, so decide once for files that share both.
+	const decided = new Map<string, Command | null>();
 	for (const file of files) {
-		const command = formatterFor(file, root);
+		const place = `${dirname(resolve(root, file))}\0${formatterKind(file)}`;
+		if (!decided.has(place)) decided.set(place, formatterFor(file, root));
+		const command = decided.get(place)!;
 		if (!command) continue;
 		const key = JSON.stringify(command);
 		const group = groups.get(key) ?? { command, files: [] };

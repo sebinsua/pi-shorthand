@@ -41,8 +41,8 @@ Preserve imports and dependencies; moving source does not remove its dependence 
 
 ## Structural matching details
 
-Patterns must parse as one syntax node. Use a rule object to select a class method, as above,
-rather than a standalone method fragment. `$X` captures one node, `$$$X` a sequence, and `$_`
+Patterns must parse as one syntax node; a standalone class method such as
+`format($$$PARAMS) { $$$BODY }` is matched as a method. `$X` captures one node, `$$$X` a sequence, and `$_`
 matches without capturing. Capture text is available as `m.X` or `m.vars.X`.
 
 Callbacks are synchronous. They can return an array of native edits, or `null`/`undefined`/`false`

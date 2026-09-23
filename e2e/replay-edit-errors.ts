@@ -4,8 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { runWithBun } from "../index.ts";
-import { guidanceTasks } from "./guidance-tasks.ts";
-import { materializeTask } from "./tasks.ts";
+import { allTasks, materializeTask } from "./tasks.ts";
 import { runVerification } from "./harness.ts";
 
 const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
@@ -17,7 +16,7 @@ const results = [];
 for (const name of ["method-pattern", "file-target"]) {
 	const dir = path.join(import.meta.dir, "recovery-programs");
 	const metadata = JSON.parse(await readFile(path.join(dir, `${name}.json`), "utf8"));
-	const task = guidanceTasks.find((item) => item.id === metadata.task)!;
+	const task = allTasks.find((item) => item.id === metadata.task)!;
 	const root = await mkdtemp(path.join(tmpdir(), "shorthand-recovery-"));
 	try {
 		await materializeTask(task, root);
@@ -31,7 +30,7 @@ for (const name of ["method-pattern", "file-target"]) {
 		if (!supported && (failed.exitCode === 0 || failed.applied.length))
 			throw new Error(`Expected ${name} to fail without applying changes`);
 		const corrected = supported ? null : await execute("corrected");
-		const command = ["bun", path.join(import.meta.dir, "guidance-tasks.ts"), task.id, root].map(quote).join(" ");
+		const command = ["bun", path.join(import.meta.dir, "tasks.ts"), task.id, root].map(quote).join(" ");
 		const verification = await runVerification(command, root, 30_000);
 		const result = {
 			name,

@@ -1,0 +1,20 @@
+edit({
+	path: "src/lib/http.ts",
+	oldText: `export function request(url: string, retries = 0, timeoutMs = 1000) {
+  return { url, retries, timeoutMs };
+}`,
+	newText: `export function request(url: string, options: RequestOptions = {}) {
+  return { url, retries: options.retries ?? 0, timeoutMs: options.timeoutMs ?? 1000 };
+}`,
+});
+// Only calls to the imported request: skip files that define their own.
+const callers = grep('import { request } from', "src/features").map((hit) => hit.file);
+sg.rewrite("request($URL, $$$REST)", (m) => {
+	const rest = m.node.getMultipleMatches("REST").filter((node) => node.kind() !== ",");
+	if (!rest.length) return null;
+	const [retries, timeout] = rest.map((node) => node.text());
+	const fields = [];
+	if (retries && retries !== "undefined") fields.push(retries === "retries" ? "retries" : `retries: ${retries}`);
+	if (timeout) fields.push(`timeoutMs: ${timeout}`);
+	return `request(${m.node.getMatch("URL").text()}, { ${fields.join(", ")} })`;
+}, [...new Set(callers)]);

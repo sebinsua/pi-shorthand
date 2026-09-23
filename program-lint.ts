@@ -110,3 +110,16 @@ export function discardedEdits(root: SgNode): string[] {
 	}
 	return warnings;
 }
+
+/**
+ * After a failure: a program that loaded the TypeScript package and then hit a TypeError was probably
+ * reaching for a compiler API that TypeScript 7 no longer ships. Only said when that is the version resolved.
+ */
+export function typeScriptApiHint(program: string, output: string, version: string | undefined): string[] {
+	if (!/\bTypeError\b/.test(output)) return [];
+	if (!/(?:\bfrom\s*|\brequire\(\s*|\bimport\(\s*)["']typescript["']/.test(program)) return [];
+	if (!version || Number.parseInt(version, 10) < 7) return [];
+	return [
+		`typescript resolves to ${version} here, which has no compiler API (ts.createSourceFile, ts.SyntaxKind and so on). Use sg to read and edit syntax, or ts.rename and ts.renameFile for refactors.`,
+	];
+}

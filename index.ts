@@ -23,6 +23,7 @@ import {
 } from "./display.ts";
 import type { FileChange, RunOptions, RunResult } from "./runner.ts";
 import { type Diagnostics, completeDiagnostics, diagnosticLines } from "./diagnostics.ts";
+import { modelDiff } from "./model-diff.ts";
 
 class RunnerError extends Error {
 	constructor(
@@ -341,13 +342,17 @@ function diffForModel(run: RunResult, toolCallId: string): string[] {
 	const diff = run.changes.map((change) => change.patch).join("\n");
 	if (!diff) return [];
 
-	const truncated = truncateHead(diff);
+	// A large diff is shown as one example of each distinct change, then cut to Pi's usual limits.
+	const shown = modelDiff(run.changes);
+	const truncated = truncateHead(shown.text);
 	const lines = ["", truncated.content];
-	if (truncated.truncated) {
+	if (shown.summarized || truncated.truncated) {
 		const fullDiffPath = path.join(tmpdir(), `pi-shorthand-${toolCallId}.diff`);
 		writeFileSync(fullDiffPath, diff);
 		lines.push(
-			`[diff truncated at ${truncated.outputLines} of ${truncated.totalLines} lines; full diff: ${fullDiffPath}]`,
+			truncated.truncated
+				? `[diff truncated at ${truncated.outputLines} of ${truncated.totalLines} lines; full diff: ${fullDiffPath}]`
+				: `[full diff: ${fullDiffPath}]`,
 		);
 	}
 	return lines;

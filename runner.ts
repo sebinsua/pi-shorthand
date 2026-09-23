@@ -13,7 +13,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, type Stats, writeSync } from "node:fs";
+import { constants, readFileSync, type Stats, writeSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -22,7 +22,7 @@ import { $ } from "bun";
 import { structuredPatch } from "diff";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
-import { discardedEdits } from "./program-lint.ts";
+import { discardedEdits, typeScriptApiHint } from "./program-lint.ts";
 import { PAUSING_HELPERS, ProgramClock } from "./program-clock.ts";
 import { supportsFormatting } from "./format.ts";
 import {
@@ -310,7 +310,15 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 			durationMs: Math.round(durationMs),
 			timings,
 			output: program.output,
-			warnings: [...lint(options.program), ...formatWarnings, ...applicationWarnings, ...runCleanupWarnings],
+			warnings: [
+				...lint(options.program),
+				...(program.exitCode !== 0 && !program.timedOut
+					? typeScriptApiHint(options.program, program.output, typeScriptVersion(cwd))
+					: []),
+				...formatWarnings,
+				...applicationWarnings,
+				...runCleanupWarnings,
+			],
 			cleanupWarnings: [...applicationWarnings, ...runCleanupWarnings],
 			changes: describedChanges,
 			applied: applied.map((change) => shown(change.file)),
@@ -520,6 +528,19 @@ function lint(program: string): string[] {
 			return `line ${line}: ${node.text().split("\n")[0]} isn't awaited, so the command may not have run`;
 		}),
 	];
+}
+
+/** The TypeScript version a program started in `cwd` would import: the project's own, else ours. */
+function typeScriptVersion(cwd: string): string | undefined {
+	for (const from of [cwd, import.meta.dir]) {
+		try {
+			const manifest = Bun.resolveSync("typescript/package.json", from);
+			return JSON.parse(readFileSync(manifest, "utf8")).version;
+		} catch {
+			// Not installed here; try the next location.
+		}
+	}
+	return undefined;
 }
 
 async function findRepository(cwd: string): Promise<string> {

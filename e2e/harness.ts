@@ -1,6 +1,7 @@
 import { chmod, lstat, mkdir, readFile, readlink, symlink } from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
+import type { Drift } from "./tasks/drift.ts";
 
 export type JsonEvent = Record<string, any>;
 
@@ -39,6 +40,14 @@ export interface RunMeasurement {
 	verified: boolean;
 	seconds: number;
 	usage: UsageTotals;
+	tools?: Record<string, number>;
+	drift?: Drift | null;
+}
+
+/** The evaluator's `DRIFT {...}` line, when its task measures drift. */
+export function parseDrift(stdout: string | undefined): Drift | null {
+	const line = stdout?.split("\n").find((item) => item.startsWith("DRIFT "));
+	return line ? JSON.parse(line.slice("DRIFT ".length)) : null;
 }
 
 export interface FrozenExtension {
@@ -176,9 +185,12 @@ export function pairedOrder(run: number): ["baseline", "candidate"] | ["candidat
 	return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
 }
 
+const mean = (values: number[]) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0);
+
 export function aggregateRuns(runs: RunMeasurement[], budgetSeconds: number) {
 	const completed = runs.filter((run) => run.verified);
 	const totalCost = runs.reduce((sum, run) => sum + run.usage.cost.total, 0);
+	const measured = runs.flatMap((run) => (run.drift ? [run.drift] : []));
 	return {
 		attempts: runs.length,
 		verifiedCompletions: completed.length,
@@ -186,7 +198,18 @@ export function aggregateRuns(runs: RunMeasurement[], budgetSeconds: number) {
 		budgetSeconds,
 		totalCost,
 		costPerVerifiedCompletion: completed.length ? totalCost / completed.length : null,
-		meanLatencySeconds: runs.length ? runs.reduce((sum, run) => sum + run.seconds, 0) / runs.length : 0,
+		meanLatencySeconds: mean(runs.map((run) => run.seconds)),
+		meanToolCalls: mean(runs.map((run) => Object.values(run.tools ?? {}).reduce((sum, calls) => sum + calls, 0))),
+		meanOutputTokens: mean(runs.map((run) => run.usage.output)),
+		// Mean counts per measured attempt; drift is absent for tasks without site checks.
+		drift: measured.length
+			? {
+					attempts: measured.length,
+					missed: mean(measured.map((drift) => drift.missed.length)),
+					overmatched: mean(measured.map((drift) => drift.overmatched.length)),
+					unrelated: mean(measured.map((drift) => drift.unrelated.length)),
+				}
+			: null,
 	};
 }
 

@@ -1,14 +1,45 @@
 # Session comparisons
 
 This harness compares how Pi completes coding tasks with different editing interfaces. It records the whole
-session, checks the result independently, and keeps evidence for human review. The checked-in suite is a small,
-locally provisioned pilot; it does not establish performance on large repositories or public benchmarks.
+session, checks the result independently, and keeps evidence for human review.
+
+## Findings so far
+
+- **Pass rate never separated the conditions.** In every pilot and guidance study, stock Pi and shorthand both
+  verified every task. Those fixtures are too small for editing mechanics to matter.
+- **Shorthand was slower in every stock comparison**, by 9–76%. Part of this is reading the skill before the
+  first edit; with the tool optional, agents often chose stock `edit` instead.
+- **The skill changed strategy more than speed.** Without it, sessions were faster but lost source reuse and
+  syntax-aware migration.
+- **The scale references found a `ts.rename` bug, now fixed.** At 100 files, renaming at the declaration rewrote
+  a barrel to `export { formatPrice as formatAmount }`, so barrel importers kept the old name. The server now
+  renames without aliases, and object literal shorthands keep their keys. All four scale references (TypeScript
+  server, ast-grep and GritQL) pass at 100 files with zero drift.
+- **Known backend issue:** a combined GritQL `sequential` query panicked in the installed CLI; two separate
+  queries work.
+- **Open question:** whether shorthand wins when a change fans out across many files, or when the prompt is a
+  precise brief. The [scale suite](#scale-suite) tests this.
+
+## Layout
+
+| Path                                             | Contents                                                              |
+| ------------------------------------------------ | --------------------------------------------------------------------- |
+| [tasks.ts](tasks.ts)                             | Suite registry, fixture materialization and the evaluator CLI         |
+| [tasks/pilot.ts](tasks/pilot.ts)                 | `pilot`: the original six compact tasks                               |
+| [tasks/guidance.ts](tasks/guidance.ts)           | `guidance`: three held-out fixtures for documentation comparisons     |
+| [tasks/scale.ts](tasks/scale.ts)                 | `scale`: generated repository-scale refactors at 10, 40 and 100 files |
+| [tasks/drift.ts](tasks/drift.ts)                 | Missed-site, over-match and unrelated-change measurement              |
+| [suite.ts](suite.ts), [run.ts](run.ts)           | Planning/execution across tasks, and the per-task session runner      |
+| [reference-edits.ts](reference-edits.ts)         | Human-authored shorthand programs replayed through the real backend   |
+| [replay-edit-errors.ts](replay-edit-errors.ts)   | Replays of observed API failures and their minimal corrections        |
+| [transaction-scaling.ts](transaction-scaling.ts) | Backend regression: untouched tree size must not expand observation   |
 
 ## Plan without calling a model
 
 ```sh
 bun e2e/suite.ts
 bun e2e/suite.ts --tasks status-options,shared-validation --documentation shipped,minimal
+bun e2e/suite.ts --suite scale --prompts outcome,brief
 ```
 
 The suite prints the tasks and conditions and exits. **Only `--execute` starts model sessions.** Tests use a fake
@@ -17,7 +48,9 @@ it starts Pi immediately.
 
 ## Tasks and verification
 
-[tasks.ts](tasks.ts) contains versioned starting files, outcome-only prompts, reference solutions, and evaluators.
+`--suite pilot|guidance|scale` selects a suite (default `pilot`); `--tasks` accepts IDs from any suite. Each task
+has versioned starting files, an outcome-only prompt, a reference solution and an evaluator. Evaluate a
+working directory with `bun e2e/tasks.ts <task-id> <directory>`.
 Starting files, a TypeScript configuration, and a package with a `check` script are copied into the agent's fixture. Reference solutions and
 evaluators stay outside it. These are evaluation boundaries, not a security sandbox against a malicious agent.
 
@@ -38,13 +71,49 @@ The regression tests require each starting fixture to fail its evaluator and its
 These compact tasks are a starting point; add larger repository tasks before interpreting small differences as
 general performance gains.
 
-`guidance-tasks.ts` contains three additional fixtures for testing documentation changes: table-formatting
-extraction, boolean-option migration with comment preservation, and request-header propagation. They are
-separate from the default suite. Use `materializeTask` to prepare a fixture and pass
-`bun /absolute/path/to/e2e/guidance-tasks.ts <task-id> "$PWD"` as the runner's `--check` command. Paired
+The `guidance` suite contains three held-out fixtures for testing documentation changes: table-formatting
+extraction, boolean-option migration with comment preservation, and request-header propagation. Paired
 `--baseline-extension`/`--candidate-extension` runs with `--skills shorthand --runs 2` alternate old/new
 guidance order; both snapshots should use identical execution code. These tasks test transfer beyond the
 original fixtures, not general repository performance.
+
+### Scale suite
+
+Every earlier study passed 100% in both stock and shorthand conditions, so pass rate could not distinguish
+them. The `scale` suite generates four refactors, each across 10, 40 and 100 consumer files, e.g.
+`rename-symbol-40`:
+
+| Family              | Change                                                         | Decoys that must stay unchanged                                             |
+| ------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `rename-symbol`     | Rename an exported function, through a barrel and aliases      | Same-named legacy function and its importers, shadowing parameters, strings |
+| `options-migration` | Positional `request(url, retries, timeoutMs)` to options       | `cache.request`, file-local `request` functions, strings                    |
+| `move-module`       | Move a module, updating its own import, re-exports and imports | Barrel importers, a same-named legacy module, strings naming the old path   |
+| `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it    | `audit.log`, `Math.log`, strings                                            |
+
+Consumers vary call shape (multi-line calls, variables, `undefined` placeholders, dynamic levels) and directory
+depth. Evaluators check behaviour of every consumer, type-check the fixture, and require zero drift.
+
+**Drift** is reported separately from pass/fail, so failed attempts still show how far they strayed:
+
+- _missed_: intended sites that were not changed;
+- _overmatched_: decoys that were changed;
+- _unrelated_: files changed outside the expected set, including scratch files. Whitespace, quote style and
+  trailing commas are ignored.
+
+The evaluator prints `DRIFT {…}` before verifying; `run.ts` records it per attempt and averages it by condition
+alongside tool calls and output tokens.
+
+**Prompts.** Every scale task has two prompts, selected with `--prompts outcome,brief`. `outcome` states the goal
+only; `brief` is a precise, tool-neutral instruction of the kind a parent agent writes after exploring. It names
+the sites, the decoys and the check command. This follows CodeTaste's instructed and open tracks, where frontier
+models scored about 70% with detailed instructions and under 8% without
+([CodeTaste, arXiv:2603.04177](https://arxiv.org/abs/2603.04177)). The brief isolates editing mechanics from discovery.
+Each prompt style is a separate `run.ts` experiment, recorded as `promptStyle`.
+
+Start small: one family at 10 and 100 files, both prompts, `baseline` and `code`, before the full matrix.
+Real-repository refactoring benchmarks with TypeScript instances, such as CodeTaste and
+[SWE-Bench ProMax](https://arxiv.org/abs/2608.09802), are candidates for a later external suite once the generated
+suite shows an effect.
 
 ## Conditions
 
@@ -144,7 +213,7 @@ tool-call counts alone are not a fluency score.
 ## Local validation
 
 ```sh
-bun test test/e2e-harness.test.ts test/e2e-suite.test.ts test/guidance-tasks.test.ts test/seed-session.test.ts
+bun test test/e2e-harness.test.ts test/e2e-suite.test.ts test/scale-tasks.test.ts test/seed-session.test.ts
 npm run check
 ```
 
@@ -153,9 +222,8 @@ results directory; do not combine them blindly with new experiments. Use a fresh
 
 ## Local reference edits and recovery
 
-[reference-edits.md](reference-edits.md) compares verified ast-grep, GritQL and source-text programs with the
-recorded agent programs. Run `bun e2e/reference-edits.ts` to execute the references, or
-`bun e2e/replay-edit-errors.ts` to replay two observed API failures. The original file-target program now
-passes unchanged; the method-pattern case still verifies a minimal contextual-pattern correction. These
-commands use temporary repositories and the real overlay backend, with independent evaluation after editing.
-They do not call a model. The restored shorthand skill remains fixed during this investigation.
+[reference-programs](reference-programs) holds human-authored ast-grep, GritQL, TypeScript-server and
+source-text programs, named `<task-id>-<approach>.ts.txt`; scale references run at 100 files. Run
+`bun e2e/reference-edits.ts` (`--only` selects some) to execute them, or `bun e2e/replay-edit-errors.ts` to
+replay two observed API failures and their corrections. Both use temporary repositories and the real overlay
+backend, evaluate independently afterwards, and never call a model.

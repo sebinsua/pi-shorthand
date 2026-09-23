@@ -2289,21 +2289,52 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "other.js")).text()).toBe("oldApi(3);\n");
 	});
 
-	test("sg suggests an executable contextual pattern for a standalone class method", async () => {
-		const source = "class C { format(x: number): string { return String(x); } }\n";
-		const repo = await makeRepo({ "src/a.ts": source });
-		const failure = await run(repo, 'sg.one("format($$$PARAMS): string { $$$BODY }", "src/a.ts");');
-		expect(failure.exitCode).toBe(1);
-		expect(failure.output).toContain("sg.one:");
-		const suggestion = failure.output.match(/Replace only the pattern argument with (\{[^\n]+\})\./)?.[1];
-		expect(suggestion).toBeDefined();
-		const pattern = JSON.parse(suggestion!);
-		const correction = await run(
+	test("ts explains that it is not the TypeScript compiler API", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
 			repo,
-			`sg.rewrite(${JSON.stringify(pattern)}, m => m.text.replace("String(x)", "String(x + 1)"), "src/a.ts");`,
+			`await Promise.resolve(ts);
+console.log(typeof ts.rename, JSON.stringify(Object.keys(ts)));
+ts.createSourceFile("a.ts", "", 99);`,
 		);
-		expect(correction.exitCode).toBe(0);
-		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(source.replace("String(x)", "String(x + 1)"));
+
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain('function ["rename","renameFile"]');
+		expect(result.output).toContain("ts.createSourceFile does not exist: ts holds shorthand's TypeScript refactors");
+	});
+
+	test("a failure after importing TypeScript 7 explains that it has no compiler API", async () => {
+		const repo = await makeRepo(FILES);
+		const result = await run(
+			repo,
+			`import ts from "typescript";\nts.createSourceFile("a.ts", "", ts.ScriptTarget.Latest);`,
+		);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.warnings).toEqual([
+			expect.stringMatching(/^typescript resolves to 7\.[\d.]+ here, which has no compiler API/),
+		]);
+	});
+
+	test("sg matches a standalone class method pattern as a method", async () => {
+		const source =
+			"class C {\n  format(x: number): string { return String(x); }\n  other(x: number): string { return String(x); }\n}\n";
+		const repo = await makeRepo({ "src/a.ts": source });
+		const result = await run(
+			repo,
+			`const method = sg.one("format($$$PARAMS): string { $$$BODY }", "src/a.ts");
+console.log(method.vars.PARAMS);
+sg.rewrite(method, (m) => m.node.field("body")!.replace("{ return String(x + 1); }"));`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("x: number");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
+			source.replace(
+				"format(x: number): string { return String(x); }",
+				"format(x: number): string { return String(x + 1); }",
+			),
+		);
 	});
 
 	test("sg leaves unrelated invalid patterns as errors without suggesting a class-method match", async () => {
@@ -2315,7 +2346,6 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("sg.rewrite:");
 		expect(result.output).toContain("Patterns must parse as one syntax node");
-		expect(result.output).not.toContain("This class-method pattern");
 		expect(result.applied).toEqual([]);
 	});
 
@@ -2587,6 +2617,29 @@ sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
 			["src/a.ts"],
 			0,
 		]);
+	});
+
+	test("a list of scopes selects the same files as each scope on its own", async () => {
+		const repo = await makeRepo({
+			".gitignore": "src/ignored.ts\n",
+			"src/a/one.ts": "oldApi(1);\n",
+			"src/ab.ts": "oldApi(2);\n",
+			"src/deleted.ts": "oldApi(3);\n",
+			"src/ignored.ts": "oldApi(4);\n",
+			"lib/two.ts": "oldApi(5);\n",
+			"lib/three.js": "oldApi(6);\n",
+		});
+		const result = await run(
+			repo,
+			`await Bun.file("src/deleted.ts").delete();
+const scopes = ["src/a", "src/ignored.ts", "src/deleted.ts", "lib/*.js", "lib/two.ts", "missing/*.ts"];
+const files = (scope) => sg.find("oldApi($A)", scope).map((match) => match.file);
+console.log(JSON.stringify([files(scopes), [...new Set(scopes.flatMap(files))].toSorted()]));`,
+		);
+
+		const [together, separately] = JSON.parse(result.output.trim().split("\n").at(-1)!);
+		expect(together.toSorted()).toEqual(separately);
+		expect(separately).toEqual(["lib/three.js", "lib/two.ts", "src/a/one.ts"]);
 	});
 
 	test("sg warns when the files it's given contain no JS/TS files", async () => {

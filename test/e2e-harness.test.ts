@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import {
 	aggregateRuns,
+	parseDrift,
 	copyFixture,
 	fixtureIdentity,
 	freezeExtension,
@@ -115,7 +116,46 @@ test("aggregate results charge failed attempts to verified completions", () => {
 		totalCost: 3,
 		costPerVerifiedCompletion: 3,
 		meanLatencySeconds: 3,
+		meanToolCalls: 0,
+		meanOutputTokens: 0,
+		drift: null,
 	});
+});
+
+const drift = (missed: number) => ({
+	sites: 4,
+	missed: Array(missed).fill("site"),
+	decoys: 2,
+	overmatched: [],
+	unrelated: ["scratch.ts"],
+});
+
+test("aggregate results average tool calls, output tokens and drift", () => {
+	expect(
+		aggregateRuns(
+			[
+				{
+					verified: false,
+					seconds: 2,
+					usage: { ...usage(1), output: 100 },
+					tools: { read: 3, edit: 5 },
+					drift: drift(2),
+				},
+				{ verified: true, seconds: 4, usage: { ...usage(1), output: 300 }, tools: { code: 1 }, drift: drift(0) },
+			],
+			60,
+		),
+	).toMatchObject({
+		meanToolCalls: 4.5,
+		meanOutputTokens: 200,
+		drift: { attempts: 2, missed: 1, overmatched: 0, unrelated: 1 },
+	});
+});
+
+test("drift is read from the evaluator's output", () => {
+	expect(parseDrift('DRIFT {"missed":["a"]}\nBehavioural checks passed')).toEqual({ missed: ["a"] } as never);
+	expect(parseDrift("checks passed")).toBeNull();
+	expect(parseDrift(undefined)).toBeNull();
 });
 
 test("paired revisions are frozen separately from an identical dirty fixture", async () => {

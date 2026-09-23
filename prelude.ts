@@ -161,22 +161,54 @@ function gitPath(input: string): string {
 	return normalized;
 }
 
+/** Tracked or non-ignored untracked files, as Git lists them, relative to the repository root. */
+function listGitFiles(pathspec = "."): string[] {
+	const output = git(["ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard", "--", pathspec]);
+	return [...new Set(output.split("\0"))].filter(Boolean);
+}
+
+/** Git still lists a tracked file the program has deleted, so check the final filesystem too. */
+function existing(files: string[]): string[] {
+	return files.filter((file) => lstatSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })).toSorted();
+}
+
 /** Existing tracked or non-ignored untracked files, always named relative to the repository root. */
 function gitFiles(pathspec = "."): string[] {
-	const output = git(["ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard", "--", pathspec]);
-	// Git still lists a tracked file the program has deleted, so check the final filesystem too.
-	return [...new Set(output.split("\0"))]
-		.filter((file) => file && lstatSync(resolve(repositoryRoot, file), { throwIfNoEntry: false }))
-		.toSorted();
+	return existing(listGitFiles(pathspec));
+}
+
+// Starting git costs tens of milliseconds inside the sandbox. While set, one listing serves every
+// input of a selection, so a list of 80 paths runs git once rather than 80 times.
+let sharedListing: { files?: string[] } | undefined;
+
+function withSharedListing<T>(select: () => T): T {
+	if (sharedListing) return select();
+	sharedListing = {};
+	try {
+		return select();
+	} finally {
+		sharedListing = undefined;
+	}
 }
 
 /** Select a Git-visible file, directory, or glob and return repository-relative paths. */
 function selectFiles(input: string): string[] {
 	const normalized = gitPath(input);
 	const stats = statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false });
-	if (stats?.isFile() || stats?.isDirectory()) return gitFiles(normalized);
+	const pathspec = stats?.isFile() || stats?.isDirectory();
+	if (!sharedListing) {
+		if (pathspec) return gitFiles(normalized);
+		const matcher = new Glob(normalized);
+		return gitFiles().filter((file) => matcher.match(file));
+	}
+	const files = (sharedListing.files ??= listGitFiles());
+	if (pathspec)
+		// A pathspec matches the path itself and everything beneath it.
+		return existing(
+			normalized === "." ? files : files.filter((file) => file === normalized || file.startsWith(`${normalized}/`)),
+		);
 	const matcher = new Glob(normalized);
-	return gitFiles().filter((file) => matcher.match(file));
+	return existing(files.filter((file) => matcher.match(file)));
 }
 
 // ── ast-grep ──────────────────────────────────────────────────────────────────────
@@ -212,6 +244,11 @@ export type FileScope = string | FileTarget | (string | FileTarget)[];
 /** File targets opt into explicit files; strings retain the helper's existing selection semantics. */
 function scopeFiles(helper: string, files: FileScope, select: (input: string) => string[]): string[] {
 	const inputs = Array.isArray(files) ? files : [files];
+	const selectAll = () => selectScope(helper, inputs, select);
+	return inputs.length > 1 ? withSharedListing(selectAll) : selectAll();
+}
+
+function selectScope(helper: string, inputs: (string | FileTarget)[], select: (input: string) => string[]): string[] {
 	return [
 		...new Set(
 			inputs.flatMap((input) => {
@@ -273,26 +310,24 @@ function one(pattern: string | NapiConfig, files: FileScope = "."): SgMatch {
 	return matches[0];
 }
 
-/** Keep parse failures local to the pattern argument, with a verified contextual alternative when possible. */
+/**
+ * A class method written on its own ("name($$$ARGS) { $$$BODY }") does not parse as one node, so it is
+ * matched as a method of a class instead. Other fragments keep the parse failure, with how to fix it.
+ */
 function findNodes(helper: string, root: SgNode, pattern: string | NapiConfig): SgNode[] {
 	try {
 		return root.findAll(pattern);
 	} catch (error) {
 		if (typeof pattern !== "string" || !(error instanceof Error) || !error.message.includes("Multiple AST nodes"))
 			throw error;
-		const contextual = {
-			rule: { pattern: { context: `class C { ${pattern} }`, selector: "method_definition" } },
-		};
-		let matchesMethod = false;
 		try {
-			matchesMethod = root.findAll(contextual).length > 0;
+			return root.findAll({
+				rule: { pattern: { context: `class C { ${pattern} }`, selector: "method_definition" } },
+			});
 		} catch {
-			// A class context is not suitable for every invalid snippet. Preserve the original failure below.
+			// Not a class member either. Preserve the original failure below.
 		}
-		const hint = matchesMethod
-			? `This class-method pattern needs a class context. Replace only the pattern argument with ${JSON.stringify(contextual)}.`
-			: 'Patterns must parse as one syntax node. For a fragment, use { rule: { pattern: { context: "complete surrounding code", selector: "node_kind" } } }.';
-		error.message = `${helper}: ${error.message}\n${hint}`;
+		error.message = `${helper}: ${error.message}\nPatterns must parse as one syntax node. For a fragment, use { rule: { pattern: { context: "complete surrounding code", selector: "node_kind" } } }.`;
 		throw error;
 	}
 }
@@ -563,6 +598,27 @@ function editText({ path, oldText, newText }: { path: string; oldText: string; n
 	);
 }
 
+// Keys that awaiting, printing or serializing an object may probe without meaning to use it.
+const PROBED_KEYS = new Set(["then", "toJSON", "asymmetricMatch", "nodeType", "$$typeof"]);
+
+/**
+ * `ts` holds refactors, not the compiler API, which programs often reach for by habit (ts.createSourceFile,
+ * ts.SyntaxKind). Say so at the first such access rather than failing later on "undefined is not an object".
+ */
+function onlyTypeScriptRefactors<T extends object>(refactors: T): T {
+	return new Proxy(refactors, {
+		get(target, key, receiver) {
+			if (typeof key === "string" && !(key in target) && !PROBED_KEYS.has(key))
+				throw new TypeError(
+					`ts.${key} does not exist: ts holds shorthand's TypeScript refactors (${Object.keys(target)
+						.map((name) => `ts.${name}`)
+						.join(", ")}), not the TypeScript compiler API. Use sg to read and edit syntax.`,
+				);
+			return Reflect.get(target, key, receiver);
+		},
+	});
+}
+
 const globals = {
 	$,
 	edit: (...args: Parameters<typeof editText>) =>
@@ -582,7 +638,7 @@ const globals = {
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
-	ts: {
+	ts: onlyTypeScriptRefactors({
 		rename: (options: RenameOptions<TypeScriptFile>) =>
 			logged("ts.rename", [options], () => {
 				const prepared = {
@@ -599,7 +655,7 @@ const globals = {
 				};
 				return import("./typescript-refactors.ts").then(({ renameFile }) => renameFile(repositoryRoot, prepared));
 			}),
-	},
+	}),
 };
 
 export type ShorthandGlobals = typeof globals;

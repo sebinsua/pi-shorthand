@@ -6,7 +6,7 @@
  *     [--check "<shell command>"] [--budget-seconds 600] [--budget-dollars 2]
  *     [--documentation shipped,minimal] [--skills none,shorthand]
  *     [--extension <path> | --baseline-extension <path> --candidate-extension <path>]
- *     [--seed-messages <recovery-context.json>]
+ *     [--seed-messages <recovery-context.json>] [--task-id <id>] [--category <c>] [--prompt-style outcome|brief]
  *
  * Paired extension runs use separate frozen snapshots, alternate execution order, and start from copies of the
  * same recorded fixture. A completion is verified only when Pi succeeds within budget and --check passes.
@@ -24,6 +24,7 @@ import {
 	fixtureIdentity,
 	freezeExtension,
 	gitStatus,
+	parseDrift,
 	processOutcome,
 	runVerification,
 	summarizeEvents,
@@ -55,6 +56,7 @@ const { values: args } = parseArgs({
 		"budget-dollars": { type: "string" },
 		"task-id": { type: "string" },
 		category: { type: "string" },
+		"prompt-style": { type: "string" },
 		model: { type: "string", default: "anthropic/claude-sonnet-4-6" },
 		reasoning: { type: "string", default: "high" },
 		runs: { type: "string", default: "1" },
@@ -147,6 +149,7 @@ try {
 		task: args.task,
 		taskId: args["task-id"] ?? null,
 		category: args.category ?? null,
+		promptStyle: args["prompt-style"] ?? null,
 		fixture: startingFixture,
 		runOrder: summaries.map(({ name, condition, runOrder: position }) => ({
 			name,
@@ -159,7 +162,7 @@ try {
 				aggregateRuns(
 					summaries
 						.filter((summary) => summary.condition === label)
-						.map((summary) => ({ verified: summary.verified, seconds: summary.seconds, usage: summary.usage })),
+						.map(({ verified, seconds, usage, tools, drift }) => ({ verified, seconds, usage, tools, drift })),
 					budgetSeconds,
 				),
 			]),
@@ -311,6 +314,7 @@ async function runPi(
 		task: args.task,
 		taskId: args["task-id"] ?? null,
 		category: args.category ?? null,
+		promptStyle: args["prompt-style"] ?? null,
 		budgetDollars,
 		exceededCost,
 		artifacts,
@@ -337,6 +341,7 @@ async function runPi(
 		pi: processOutcome(piExitCode, stderr, exceededBudget, observed.invalidLines),
 		...eventSummary,
 		verification,
+		drift: parseDrift(verification?.stdout),
 		verified,
 		changes,
 		log: logFile,

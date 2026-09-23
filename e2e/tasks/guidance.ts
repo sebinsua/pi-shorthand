@@ -1,12 +1,11 @@
-/** Held-out fixtures for comparing editing guidance; not included in the default pilot. */
+/** Held-out fixtures for comparing editing guidance: transfer beyond the pilot tasks, not repository scale. */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { $ } from "bun";
 import { Lang, parse } from "@ast-grep/napi";
-import type { Task } from "./tasks.ts";
-import { assertImports } from "./verification.ts";
+import type { Task } from "./task.ts";
+import { assertImports } from "../verification.ts";
 
 const load = (root: string, file: string) => import(pathToFileURL(path.join(root, file)).href);
 const read = (root: string, file: string) => readFile(path.join(root, file), "utf8");
@@ -263,12 +262,3 @@ export const guidanceTasks: Task[] = [
 		},
 	},
 ];
-
-if (import.meta.main) {
-	const [id, root] = process.argv.slice(2);
-	const task = guidanceTasks.find((item) => item.id === id);
-	if (!task || !root) throw new Error("Usage: bun e2e/guidance-tasks.ts <task-id> <fixture>");
-	await task.verify(path.resolve(root));
-	await $`${path.resolve(import.meta.dir, "../node_modules/.bin/tsc")} -p ${path.join(root, "tsconfig.json")}`;
-	console.log("Behavioural, structural and type checks passed");
-}
