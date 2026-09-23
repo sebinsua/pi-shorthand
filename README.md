@@ -31,3 +31,5 @@ sudo apt install bubblewrap build-essential lsof
 pi-shorthand gives Pi a programming environment instead of a patch format. This makes multi-file and structural edits possible in one call, but does not guarantee that Pi will find it easier or more reliable than its built-in edit tool. Which works better depends on the model and the task.
 
 Programs edit a private workspace, with host files outside the repository kept read-only. By default, a failure keeps completed files and rolls back failed or interrupted edits. Concurrent edits can cause a run to be rejected; conflict detection is best-effort, not an atomic commit.
+
+The `code` tool uses Pi's working directory by default. Pass `cwd` to target another checkout; relative paths are resolved from Pi's working directory. For example, when Pi starts in a bare worktree container, `cwd: "child"` targets its `child` worktree. The chosen directory must be inside a Git worktree.

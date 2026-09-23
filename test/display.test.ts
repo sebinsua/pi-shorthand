@@ -180,6 +180,7 @@ describe("the verdict", () => {
 			"code Rename (rollback all, program timeout 5s)",
 		);
 		expect(callLine({ title: "Rename" }, theme)).toBe("code Rename");
+		expect(callLine({ title: "Rename", cwd: "child" }, theme)).toBe("code Rename (cwd child)");
 	});
 });
 

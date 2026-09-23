@@ -35,7 +35,7 @@ class RunnerError extends Error {
 // Runs typically take well under a second. Longer transformations can request more time.
 const DEFAULT_TIMEOUT_SECONDS = 2;
 
-const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
+const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
 
 Common operations:
 - edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
@@ -70,6 +70,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			title: Type.String({ description: "A few words describing the change, shown to the user" }),
 			program: Type.String({ description: "TypeScript program run with Bun (top-level await allowed)" }),
+			cwd: Type.Optional(
+				Type.String({
+					description:
+						"Working directory for the program; relative to Pi's working directory, or an absolute path. Defaults to Pi's working directory. Must be inside a git worktree.",
+				}),
+			),
 			rollback: Type.Optional(
 				StringEnum(["all", "file"] as const, {
 					description:
@@ -95,7 +101,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				result = await runWithBun(
 					{
-						cwd: ctx.cwd,
+						cwd: path.resolve(ctx.cwd, params.cwd ?? "."),
 						program: params.program,
 						timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
 						rollback: params.rollback ?? "file",

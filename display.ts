@@ -21,8 +21,15 @@ const INLINE_DIFF_LINES = 40; // a longer diff collapses to a list of its filesâ
 const LISTED_FILES = 8; // â€¦showing this many, then "and N more files"
 const EXPANDED_DIFF_LINES = 2000; // even expanded, a diff of hundreds of files stops here
 
-export function callLine(args: { title?: string; timeout?: number; rollback?: string }, theme: Theme): string {
-	const settings = [args.rollback === "all" && "rollback all", args.timeout && `program timeout ${args.timeout}s`];
+export function callLine(
+	args: { title?: string; cwd?: string; timeout?: number; rollback?: string },
+	theme: Theme,
+): string {
+	const settings = [
+		args.cwd && `cwd ${args.cwd}`,
+		args.rollback === "all" && "rollback all",
+		args.timeout && `program timeout ${args.timeout}s`,
+	];
 	const suffix = settings.filter(Boolean).join(", ");
 	return `${theme.fg("toolTitle", theme.bold("code"))} ${args.title ?? ""}${suffix ? theme.fg("muted", ` (${suffix})`) : ""}`;
 }
