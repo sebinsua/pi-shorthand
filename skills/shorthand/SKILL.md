@@ -25,12 +25,12 @@ Line-ending differences are accepted when matching.
 Use the TypeScript language server to rename symbols or move files across the project:
 
 ```ts
-await ts.rename({ file: "src/users.ts", symbol: "parseUser", to: "decodeUser" });
-await ts.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
+await refactor.rename({ file: "src/users.ts", symbol: "parseUser", to: "decodeUser" });
+await refactor.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
 ```
 
-`ts.rename` requires the declaration name to be unique in its file and leaves unrelated symbols
-alone. `ts.renameFile` moves the file and updates imports and exports that resolve to it. Read
+`refactor.rename` requires the declaration name to be unique in its file and leaves unrelated symbols
+alone. `refactor.renameFile` moves the file and updates imports and exports that resolve to it. Read
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
 rules, updated paths and failure conditions.
 

@@ -11,7 +11,7 @@ session, checks the result independently, and keeps evidence for human review.
   first edit; with the tool optional, agents often chose stock `edit` instead.
 - **The skill changed strategy more than speed.** Without it, sessions were faster but lost source reuse and
   syntax-aware migration.
-- **The scale references found a `ts.rename` bug, now fixed.** At 100 files, renaming at the declaration rewrote
+- **The scale references found a `refactor.rename` bug, now fixed.** At 100 files, renaming at the declaration rewrote
   a barrel to `export { formatPrice as formatAmount }`, so barrel importers kept the old name. The server now
   renames without aliases, and object literal shorthands keep their keys. All four scale references (TypeScript
   server, ast-grep and GritQL) pass at 100 files with zero drift.

@@ -247,7 +247,7 @@ describe.skipIf(!hasOverlay)("runner", () => {
 			const result = await run(
 				repo,
 				`const file = sg.file("src/parse.ts");
-await ts.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
+await refactor.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 			);
 
 			expect(result.exitCode).toBe(0);
@@ -267,7 +267,7 @@ await ts.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 				const repo = await makeRepo({ "tsconfig.json": "{}", "src/app.ts": source });
 				const result = await run(
 					repo,
-					`await ts.rename({ file: "src/app.ts", symbol: ${JSON.stringify(symbol)}, to: "next" });`,
+					`await refactor.rename({ file: "src/app.ts", symbol: ${JSON.stringify(symbol)}, to: "next" });`,
 					{ timeoutMs: 15_000 },
 				);
 				expect(result.exitCode).toBe(1);
@@ -286,7 +286,7 @@ await ts.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 				repo,
 				`const from = sg.file("src/parse.ts");
 const to = sg.file("src/lib/parse.ts");
-await ts.renameFile({ from, to });`,
+await refactor.renameFile({ from, to });`,
 			);
 
 			expect(result.exitCode).toBe(0);
@@ -304,7 +304,7 @@ await ts.renameFile({ from, to });`,
 			// Starting the language server alone takes longer than this timeout.
 			const result = await run(
 				repo,
-				`await ts.rename({ file: "src/parse.ts", symbol: "parseUser", to: "decodeUser" });`,
+				`await refactor.rename({ file: "src/parse.ts", symbol: "parseUser", to: "decodeUser" });`,
 				{
 					timeoutMs: 300,
 				},
@@ -321,7 +321,7 @@ await ts.renameFile({ from, to });`,
 			const repo = await makeRepo({ "tsconfig.json": "{}", "src/app.ts": "export const value = 1;\n" });
 			const result = await run(
 				repo,
-				`await ts.rename({ file: "src/app.ts", symbol: "missing", to: "next" }).catch(() => {});
+				`await refactor.rename({ file: "src/app.ts", symbol: "missing", to: "next" }).catch(() => {});
 await Bun.sleep(30_000);`,
 				{ timeoutMs: 1000 },
 			);
@@ -2294,20 +2294,6 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toContain("done(1)");
 		expect(await Bun.file(path.join(repo, "b.ts")).text()).toContain("newApi(2)");
 		expect(await Bun.file(path.join(repo, "other.js")).text()).toBe("oldApi(3);\n");
-	});
-
-	test("ts explains that it is not the TypeScript compiler API", async () => {
-		const repo = await makeRepo(FILES);
-		const result = await run(
-			repo,
-			`await Promise.resolve(ts);
-console.log(typeof ts.rename, JSON.stringify(Object.keys(ts)));
-ts.createSourceFile("a.ts", "", 99);`,
-		);
-
-		expect(result.exitCode).toBe(1);
-		expect(result.output).toContain('function ["rename","renameFile"]');
-		expect(result.output).toContain("ts.createSourceFile does not exist: ts holds shorthand's TypeScript refactors");
 	});
 
 	test("a failure after importing TypeScript 7 explains that it has no compiler API", async () => {

@@ -1,1 +1,1 @@
-await ts.rename({ file: "src/lib/money.ts", symbol: "formatAmount", to: "formatPrice" });
+await refactor.rename({ file: "src/lib/money.ts", symbol: "formatAmount", to: "formatPrice" });

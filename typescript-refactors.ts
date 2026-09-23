@@ -49,11 +49,11 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		const positions = findSymbols(symbols ?? [], options.symbol);
 		if (positions.length === 0)
 			throw new Error(
-				`ts.rename found no declaration named ${JSON.stringify(options.symbol)} in ${JSON.stringify(options.file)}`,
+				`refactor.rename found no declaration named ${JSON.stringify(options.symbol)} in ${JSON.stringify(options.file)}`,
 			);
 		if (positions.length > 1)
 			throw new Error(
-				`ts.rename found more than one declaration named ${JSON.stringify(options.symbol)} in ${JSON.stringify(options.file)}`,
+				`refactor.rename found more than one declaration named ${JSON.stringify(options.symbol)} in ${JSON.stringify(options.file)}`,
 			);
 		const edit = await server.sendRequest<WorkspaceEdit | null>("textDocument/rename", {
 			textDocument: { uri },
@@ -97,9 +97,9 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 	validateRenameFile(options);
 	const from = existingProjectFile(root, options.from);
 	const to = projectPath(root, options.to);
-	if (from === to) throw new Error("ts.renameFile source and destination are the same file");
+	if (from === to) throw new Error("refactor.renameFile source and destination are the same file");
 	if (lstatSync(to, { throwIfNoEntry: false }))
-		throw new Error(`ts.renameFile destination already exists: ${JSON.stringify(options.to)}`);
+		throw new Error(`refactor.renameFile destination already exists: ${JSON.stringify(options.to)}`);
 
 	await withTypeScriptServer(root, async (server) => {
 		const files = [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }];
@@ -143,15 +143,15 @@ function validateRename(options: RenameOptions): void {
 		typeof options.symbol !== "string" ||
 		typeof options.to !== "string"
 	)
-		throw new TypeError("ts.rename expects { file, symbol, to } strings");
+		throw new TypeError("refactor.rename expects { file, symbol, to } strings");
 	if (!options.file || !options.symbol || !options.to)
-		throw new Error("ts.rename file, symbol and to must not be empty");
+		throw new Error("refactor.rename file, symbol and to must not be empty");
 }
 
 function validateRenameFile(options: RenameFileOptions): void {
 	if (!options || typeof options.from !== "string" || typeof options.to !== "string")
-		throw new TypeError("ts.renameFile expects { from, to } strings");
-	if (!options.from || !options.to) throw new Error("ts.renameFile from and to must not be empty");
+		throw new TypeError("refactor.renameFile expects { from, to } strings");
+	if (!options.from || !options.to) throw new Error("refactor.renameFile from and to must not be empty");
 }
 
 function findSymbols(symbols: Array<DocumentSymbol | SymbolInformation>, name: string): Position[] {

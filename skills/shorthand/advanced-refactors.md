@@ -5,12 +5,12 @@ The everyday file and replacement operations are in [SKILL.md](SKILL.md).
 
 ## Semantic TypeScript refactors
 
-Prefer `ts.rename` to a structural rewrite when changing a TypeScript symbol. It asks the TypeScript
+Prefer `refactor.rename` to a structural rewrite when changing a TypeScript symbol. It asks the TypeScript
 language server to rename the resolved symbol across the project, so unrelated names and strings are
 left alone. `file` is the declaration's file, and `symbol` must name exactly one declaration there.
 Missing names, repeated declarations and overloads are rejected without writing.
 
-Use `ts.renameFile` to move a whole TypeScript file. It updates imports and exports that resolve to
+Use `refactor.renameFile` to move a whole TypeScript file. It updates imports and exports that resolve to
 the file, as well as relative module paths inside the moved file, then performs the move. The source
 must exist, the destination must not exist, and both paths must remain inside the repository.
 
@@ -160,7 +160,7 @@ path is inaccessible on macOS. On both platforms, host paths outside the workspa
 Writes to `.git` are blocked.
 
 The default timeout is two seconds; request more for longer transformations. Time inside helpers
-(`edit`, `glob`, `grep`, `sg`, `grit`, `ts`) does not count toward it, up to 60 extra seconds per run.
+(`edit`, `glob`, `grep`, `sg`, `grit`, `refactor`) does not count toward it, up to 60 extra seconds per run.
 By default, rollback happens per file: files involved in failed or interrupted edits are discarded,
 while the others are retained, including after exceptions. Unattributed failures
 (such as failed checks) preserve completed edits and report the failure. A failed file loses all

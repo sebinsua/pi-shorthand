@@ -1,6 +1,6 @@
 /**
  * Preloaded into every `code` program. On top of ordinary Bun and Node it adds these globals:
- * $ (Bun shell), edit, glob, grep, sg (ast-grep) and grit (GritQL).
+ * $ (Bun shell), edit, glob, grep, sg (ast-grep), grit (GritQL) and refactor (renames and file moves).
  *
  * sg is ast-grep's own JavaScript API plus file-backed search, rewrite and placement helpers.
  * Programs can also import "@ast-grep/napi" directly.
@@ -676,27 +676,6 @@ function editText({ path, oldText, newText }: { path: string; oldText: string; n
 	);
 }
 
-// Keys that awaiting, printing or serializing an object may probe without meaning to use it.
-const PROBED_KEYS = new Set(["then", "toJSON", "asymmetricMatch", "nodeType", "$$typeof"]);
-
-/**
- * `ts` holds refactors, not the compiler API, which programs often reach for by habit (ts.createSourceFile,
- * ts.SyntaxKind). Say so at the first such access rather than failing later on "undefined is not an object".
- */
-function onlyTypeScriptRefactors<T extends object>(refactors: T): T {
-	return new Proxy(refactors, {
-		get(target, key, receiver) {
-			if (typeof key === "string" && !(key in target) && !PROBED_KEYS.has(key))
-				throw new TypeError(
-					`ts.${key} does not exist: ts holds shorthand's TypeScript refactors (${Object.keys(target)
-						.map((name) => `ts.${name}`)
-						.join(", ")}), not the TypeScript compiler API. Use sg to read and edit syntax.`,
-				);
-			return Reflect.get(target, key, receiver);
-		},
-	});
-}
-
 const globals = {
 	$,
 	edit: (...args: Parameters<typeof editText>) =>
@@ -720,24 +699,24 @@ const globals = {
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
-	ts: onlyTypeScriptRefactors({
+	refactor: {
 		rename: (options: RenameOptions<TypeScriptFile>) =>
-			logged("ts.rename", [options], () => {
+			logged("refactor.rename", [options], () => {
 				const prepared = {
 					...options,
-					file: typeScriptFile("ts.rename", options.file),
+					file: typeScriptFile("refactor.rename", options.file),
 				};
 				return import("./typescript-refactors.ts").then(({ rename }) => rename(repositoryRoot, prepared));
 			}),
 		renameFile: (options: RenameFileOptions<TypeScriptFile>) =>
-			logged("ts.renameFile", [options], () => {
+			logged("refactor.renameFile", [options], () => {
 				const prepared = {
-					from: typeScriptFile("ts.renameFile", options.from),
-					to: typeScriptFile("ts.renameFile", options.to),
+					from: typeScriptFile("refactor.renameFile", options.from),
+					to: typeScriptFile("refactor.renameFile", options.to),
 				};
 				return import("./typescript-refactors.ts").then(({ renameFile }) => renameFile(repositoryRoot, prepared));
 			}),
-	}),
+	},
 };
 
 export type ShorthandGlobals = typeof globals;

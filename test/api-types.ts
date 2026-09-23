@@ -12,12 +12,12 @@ export async function supportedProgram() {
 	sg.rewrite("run($A)", (match) => match.A.toUpperCase(), target);
 	sg.insert("initialize();", { endOf: target });
 	grit("`run($a)` => `go($a)`", [target, "src/**/*.ts"]);
-	await ts.rename({ file: target, symbol: "run", to: "start" });
-	await ts.renameFile({ from: "src/other.ts", to: sg.file("src/start.ts") });
+	await refactor.rename({ file: target, symbol: "run", to: "start" });
+	await refactor.renameFile({ from: "src/other.ts", to: sg.file("src/start.ts") });
 	// @ts-expect-error A semantic rename requires the new name.
-	await ts.rename({ file: "src/app.ts", symbol: "run" });
+	await refactor.rename({ file: "src/app.ts", symbol: "run" });
 	// @ts-expect-error A file rename requires the destination.
-	await ts.renameFile({ from: "src/other.ts" });
+	await refactor.renameFile({ from: "src/other.ts" });
 
 	// @ts-expect-error A plain object is not an sg.file target.
 	sg.find("run($A)", { file: "src/app.ts" });
