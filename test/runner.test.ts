@@ -2719,9 +2719,13 @@ console.log(JSON.stringify([files(scopes), [...new Set(scopes.flatMap(files))].t
 			sg.rewrite("doesNotExist($$$A)", "x", "src");
 			sg.rewrite("doesNotExist($$$A)", "x");
 			sg.rewrite("doesNotExist($$$A)", "x", ["src/a.ts", sg.file("src/b.ts")]);
+			sg.rewrite("doesNotExist($$$A)", "x", ["src/a.ts", "src/b.ts", "src/api.ts", "src", "."]);
 		`,
 		);
 		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain(
+			'matched nothing for "doesNotExist($$$A)" in 5 paths ("src/a.ts", "src/b.ts", "src/api.ts", …)',
+		);
 		expect(result.output).toContain('matched nothing for "doesNotExist($$$A)" in ["src"]');
 		expect(result.output).toContain('matched nothing for "doesNotExist($$$A)" in ["."]');
 		expect(result.output).toContain('matched nothing for "doesNotExist($$$A)" in ["src/a.ts","src/b.ts"]');

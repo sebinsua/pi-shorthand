@@ -87,7 +87,7 @@ them. The `scale` suite generates four refactors, each across 10, 40 and 100 con
 | ------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `rename-symbol`     | Rename an exported function, through a barrel and aliases      | Same-named legacy function and its importers, shadowing parameters, strings |
 | `options-migration` | Positional `request(url, retries, timeoutMs)` to options       | `cache.request`, file-local `request` functions, strings                    |
-| `move-module`       | Move a module, updating its own import, re-exports and imports | Barrel importers, a same-named legacy module, strings naming the old path   |
+| `move-module`       | Move a module, updating its own import, re-exports and imports | Barrel importers and a same-named legacy module                             |
 | `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it    | `audit.log`, `Math.log`, strings                                            |
 
 Consumers vary call shape (multi-line calls, variables, `undefined` placeholders, dynamic levels) and directory

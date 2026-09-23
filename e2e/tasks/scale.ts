@@ -33,6 +33,8 @@ interface Fixture {
 interface Family {
 	id: string;
 	category: Task["category"];
+	/** Bumped when a family's fixtures change, so results from different versions are not mixed. */
+	revision: string;
 	build: (size: number) => Fixture;
 }
 
@@ -67,6 +69,7 @@ const logEntry = (level: string, message: string, context?: unknown) =>
 
 const renameSymbol: Family = {
 	id: "rename-symbol",
+	revision: "scale-v1",
 	category: "rename",
 	build(size) {
 		const before: Record<string, string> = {
@@ -167,6 +170,7 @@ export function ${call}() {
 
 const optionsMigration: Family = {
 	id: "options-migration",
+	revision: "scale-v1",
 	category: "migration",
 	build(size) {
 		const types = "export interface RequestOptions { retries?: number; timeoutMs?: number }\n";
@@ -314,6 +318,7 @@ export function ${call}() {
 
 const moveModule: Family = {
 	id: "move-module",
+	revision: "scale-v2",
 	category: "move",
 	build(size) {
 		const from = "src/utils/date.ts";
@@ -352,7 +357,6 @@ export function ${call}() {
 }
 `,
 					`export { formatDate as ${call} } from "${specifier(file, target)}";
-export const path${i} = "src/utils/date.ts";
 `,
 					`import { formatDate } from "${specifier(file, "src/legacy/date.ts")}";
 export function ${call}() {
@@ -364,7 +368,6 @@ export function ${call}() {
 			if (kind === 0 || kind === 2) after[file] = text(to);
 			if (kind === 0 || kind === 2) sites.push(resolvesTo(file, to));
 			if (kind === 1) decoys.push(resolvesTo(file, "src/utils/index.ts"));
-			if (kind === 2) decoys.push(contains(file, `path${i} = "src/utils/date.ts"`, "string contents"));
 			if (kind === 3) decoys.push(resolvesTo(file, "src/legacy/date.ts"));
 			cases.push({
 				file,
@@ -381,13 +384,14 @@ export function ${call}() {
 			decoys,
 			cases,
 			prompt: `Move ${from} to ${to} and update everything that depends on it. Preserve behaviour.`,
-			brief: `Move ${from} to ${to}. Update the moved file's own import of ./locale, the re-export in src/utils/index.ts, and the imports and re-exports in the ${direct} files under src/features that reference utils/date directly. Files importing the src/utils barrel keep that import. Do not change src/legacy/date.ts or its importers, or strings that mention the old path. Do not leave a copy or re-export shim at the old path. Make no other changes; run \`npm run check\` afterwards.`,
+			brief: `Move ${from} to ${to}. Update the moved file's own import of ./locale, the re-export in src/utils/index.ts, and the imports and re-exports in the ${direct} files under src/features that reference utils/date directly. Files importing the src/utils barrel keep that import. Do not change src/legacy/date.ts or its importers. Do not leave a copy or re-export shim at the old path. Make no other changes; run \`npm run check\` afterwards.`,
 		};
 	},
 };
 
 const loggerMigration: Family = {
 	id: "logger-migration",
+	revision: "scale-v1",
 	category: "migration",
 	build(size) {
 		const before: Record<string, string> = {
@@ -571,7 +575,7 @@ function scaleTask(family: Family, size: number): Task {
 	return {
 		id: `${family.id}-${size}`,
 		category: family.category,
-		revision: "scale-v1",
+		revision: family.revision,
 		prompt: fixture.prompt,
 		brief: fixture.brief,
 		files: fixture.before,

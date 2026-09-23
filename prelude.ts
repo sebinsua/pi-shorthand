@@ -288,6 +288,18 @@ function selectScope(helper: string, inputs: (string | FileTarget)[], select: (i
 	];
 }
 
+/** A scope for a warning: short scopes in full, long ones as a count and the first few paths. */
+function describeScope(scope: FileScope): string {
+	const paths = (Array.isArray(scope) ? scope : [scope]).map((entry) =>
+		typeof entry === "string" ? entry : gitPath(entry.file),
+	);
+	if (paths.length <= 3) return JSON.stringify(paths);
+	return `${paths.length} paths (${paths
+		.slice(0, 3)
+		.map((path) => JSON.stringify(path))
+		.join(", ")}, …)`;
+}
+
 /**
  * The supported syntax files to search. `files` is a Git-visible file, directory, glob, or a list
  * of any of those. Warns if there are none, since that's almost always a mistake.
@@ -298,7 +310,7 @@ function sourceFiles(helper: string, files: FileScope): string[] {
 		(file) =>
 			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
 	);
-	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${JSON.stringify(files)}`);
+	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${describeScope(files)}`);
 	return parseable;
 }
 
@@ -541,10 +553,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		});
 	}
 	if (matched === 0) {
-		const paths = (Array.isArray(scope) ? scope : [scope]).map((entry) =>
-			typeof entry === "string" ? entry : gitPath(entry.file),
-		);
-		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${JSON.stringify(paths)}`);
+		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(scope)}`);
 	}
 	return count;
 }
@@ -586,7 +595,7 @@ function grit(pattern: string, paths: FileScope = ".", options: { lang?: string;
 		return statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false }) ? [normalized] : selectFiles(input);
 	});
 	if (selected.length === 0) {
-		console.error(`warning: grit found no files in ${JSON.stringify(paths)}`);
+		console.error(`warning: grit found no files in ${describeScope(paths)}`);
 		return [];
 	}
 	const flags = ["--force", "--jsonl"];

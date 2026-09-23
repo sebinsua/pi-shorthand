@@ -37,7 +37,7 @@ class RunnerError extends Error {
 // Runs typically take well under a second. Longer transformations can request more time.
 const DEFAULT_TIMEOUT_SECONDS = 2;
 
-const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
+const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
 
 Common operations:
 - edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
@@ -48,7 +48,7 @@ Common operations:
 - await ts.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
 - await ts.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
 
-See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
+See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax, use GritQL or edit other languages. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
 
 export default function (pi: ExtensionAPI) {
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
@@ -67,7 +67,8 @@ export default function (pi: ExtensionAPI) {
 		name: "code",
 		label: "Code",
 		description: DESCRIPTION,
-		promptSnippet: "Make a change with one Bun editing program; run verification separately afterward",
+		promptSnippet:
+			"Make multi-file, repetitive or rename/move changes with one Bun program; a small change to one file is quicker as a direct edit. Run verification separately afterward",
 
 		parameters: Type.Object({
 			title: Type.String({ description: "A few words describing the change, shown to the user" }),
