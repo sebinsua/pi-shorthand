@@ -93,7 +93,7 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 	for (const section of sections) lines.push("", ...section);
 	const timing = timingBreakdown(run);
 	if (timing) lines.push("", theme.fg("muted", `timing: ${timing}`));
-	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= run.timeoutMs || run.exitCode !== 0)) {
+	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= timeoutBudgetMs(run) || run.exitCode !== 0)) {
 		lines.push(...diagnosticLines(run.diagnostics).map((line) => theme.fg("muted", line)));
 	}
 	return lines;
@@ -115,7 +115,7 @@ const TIMING_LABELS: Record<keyof RunTimings, string> = {
 
 /** Explain calls exceeding the configured program budget, even when no individual phase does. */
 export function timingBreakdown(run: RunResult): string | undefined {
-	if (!run.timings || (run.diagnostics?.wallMs ?? run.durationMs) < run.timeoutMs) return undefined;
+	if (!run.timings || (run.diagnostics?.wallMs ?? run.durationMs) < timeoutBudgetMs(run)) return undefined;
 	const significant = Object.entries(run.timings)
 		.map(([phase, milliseconds]) => ({
 			label: TIMING_LABELS[phase as keyof RunTimings],
@@ -131,16 +131,27 @@ function formatDuration(milliseconds: number): string {
 	return milliseconds < 1_000 ? `${milliseconds}ms` : `${(milliseconds / 1_000).toFixed(1)}s`;
 }
 
+/** e.g. "2s" or "2s plus 60.0s in helpers": helper time does not count toward the timeout. */
+function timeoutText(run: RunResult): string {
+	const helpers = run.helperMs ? ` plus ${formatDuration(run.helperMs)} in helpers` : "";
+	return `${run.timeoutMs / 1000}s${helpers}`;
+}
+
+/** The longest a run can take before its timeout, including excluded helper time. */
+export function timeoutBudgetMs(run: RunResult): number {
+	return run.timeoutMs + (run.helperMs ?? 0);
+}
+
 /** e.g. "✓ Applied 3 files · +6 −6 · 0.6s" or "✕ Failed · rolled back all changes · exit 1 · 0.2s" */
 function verdict(run: RunResult, applied: FileChange[], theme: Theme): string {
 	const muted = (text: string) => theme.fg("muted", text);
 	const took = muted(` · ${(run.durationMs / 1000).toFixed(1)}s`);
-	const failure = run.timedOut ? `Program timed out after ${run.timeoutMs / 1000}s` : "Failed";
+	const failure = run.timedOut ? `Program timed out after ${timeoutText(run)}` : "Failed";
 	const exit = run.timedOut ? "" : muted(` · exit ${run.exitCode}`);
 
 	if (run.conflicts.length > 0) {
 		const program = run.timedOut
-			? ` · timed out after ${run.timeoutMs / 1000}s`
+			? ` · timed out after ${timeoutText(run)}`
 			: run.exitCode
 				? ` · exit ${run.exitCode}`
 				: "";

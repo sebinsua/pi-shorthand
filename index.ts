@@ -17,6 +17,7 @@ import {
 	countLines,
 	fileMetadataSummary,
 	resultLines,
+	timeoutBudgetMs,
 	timingBreakdown,
 	unstructuredResultText,
 } from "./display.ts";
@@ -46,7 +47,7 @@ Common operations:
 - await ts.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
 - await ts.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
 
-See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs.`;
+See the shorthand skill for common writes. For extraction, complex rewrites or other languages, read its advanced-refactors.md guide. The default timeout is two seconds; request more for longer programs. Time spent inside ts.* and grit helpers does not count toward it, up to 60 extra seconds.`;
 
 export default function (pi: ExtensionAPI) {
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
@@ -82,7 +83,11 @@ export default function (pi: ExtensionAPI) {
 						'On failure: "file" (default) rolls back failed or interrupted file edits and retains the others; "all" applies nothing',
 				}),
 			),
-			timeout: Type.Optional(Type.Number({ description: "Seconds before the program is killed (default 2)" })),
+			timeout: Type.Optional(
+				Type.Number({
+					description: "Seconds of program time before it is killed (default 2); ts.* and grit helper time is excluded",
+				}),
+			),
 		}),
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -313,7 +318,7 @@ function textForModel(run: RunResult, toolCallId: string): string {
 	// On failure the error goes last, where it's easiest to find; on success, the diff does.
 	if (run.exitCode === 0 && run.conflicts.length === 0) lines.push(...output, ...diff);
 	else lines.push(...diff, ...output);
-	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= run.timeoutMs || run.exitCode !== 0))
+	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= timeoutBudgetMs(run) || run.exitCode !== 0))
 		lines.push("", ...diagnosticLines(run.diagnostics));
 	return lines.join("\n");
 }

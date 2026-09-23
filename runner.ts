@@ -23,9 +23,11 @@ import { structuredPatch } from "diff";
 import { openLinuxOverlay } from "./overlay-linux.ts";
 import { openMacOverlay } from "./overlay-macos.ts";
 import { discardedEdits } from "./program-lint.ts";
+import { PAUSING_HELPERS, ProgramClock } from "./program-clock.ts";
 import { supportsFormatting } from "./format.ts";
 import {
 	type Diagnostics,
+	diagnosticCounter,
 	diagnosticFailure,
 	diagnosticPhase,
 	diagnosticLines,
@@ -79,6 +81,7 @@ export interface RunResult {
 	lastStep?: string; // on timeout: the last step the program logged, e.g. "$ find / -name x" or "grep (18 ms)"
 	errorLine?: string; // on failure: the program's line the error came from, e.g. "line 3: throw new Error(…)"
 	timeoutMs: number;
+	helperMs?: number; // time in ts.* and grit helpers, which did not count toward timeoutMs
 	rollback: RunOptions["rollback"];
 }
 
@@ -318,6 +321,7 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 			lastStep: program.timedOut ? program.lastStep : undefined,
 			errorLine: program.exitCode !== 0 ? failingLine(options.program, program.output) : undefined,
 			timeoutMs: options.timeoutMs,
+			helperMs: program.helperMs,
 			rollback: options.rollback,
 		};
 		return result;
@@ -534,6 +538,7 @@ interface ProgramRun {
 	failedFiles: string[];
 	stillRunning: string[]; // on timeout: the commands it was still running
 	lastStep?: string;
+	helperMs: number;
 }
 
 async function runProgram(
@@ -581,7 +586,8 @@ async function runProgram(
 			PI_SHORTHAND_INSPECTION_FAILURE: options.testHooks?.writerInspectionFailure ? "1" : "",
 		},
 	});
-	const progress = trackProgress(child);
+	const clock = new ProgramClock();
+	const progress = trackProgress(child, clock);
 	const killAll = () => {
 		if (overlay.stopProgram) {
 			// Native observers do not exit until their tracees are gone. Never
@@ -603,6 +609,7 @@ async function runProgram(
 			waitWithTimeout(
 				child,
 				options.timeoutMs,
+				clock,
 				overlay.executionDir,
 				options.testHooks?.writerInspectionFailure,
 				killAll,
@@ -610,6 +617,8 @@ async function runProgram(
 	);
 	killAll(); // anything it left running
 	abort.removeEventListener("abort", killAll);
+	const helperMs = Math.round(clock.excludedMs());
+	if (helperMs > 0) diagnosticCounter("helper ms excluded from timeout", helperMs);
 	try {
 		await measure("descendant cleanup", async () => {
 			await overlay.terminateProcesses?.();
@@ -636,6 +645,7 @@ async function runProgram(
 		stillRunning,
 		failedFiles: outcomes.failedFiles,
 		lastStep: progress.latest(),
+		helperMs,
 	};
 }
 
@@ -650,7 +660,7 @@ function reportProgress(step: string, phase = true) {
 }
 
 /** Keep the latest command/helper in memory and relay it to index.ts over the runner's descriptor 3. */
-function trackProgress(child: ChildProcess) {
+function trackProgress(child: ChildProcess, clock: ProgramClock) {
 	const stream = child.stdio[4];
 	let buffer = "";
 	let lastStep: string | undefined;
@@ -663,11 +673,21 @@ function trackProgress(child: ChildProcess) {
 			buffer = lines.pop() ?? "";
 			for (const line of lines) {
 				try {
-					const event = JSON.parse(line) as { type?: unknown; command?: unknown; helper?: unknown; ms?: unknown };
+					const event = JSON.parse(line) as {
+						type?: unknown;
+						command?: unknown;
+						helper?: unknown;
+						id?: unknown;
+						ms?: unknown;
+					};
 					if (event.type === "command" && typeof event.command === "string") lastStep = `$ ${event.command}`;
-					else if (event.type === "helper" && typeof event.helper === "string" && typeof event.ms === "number")
+					else if (event.type === "helper-start" && typeof event.helper === "string") {
+						if (PAUSING_HELPERS.has(event.helper) && typeof event.id === "number") clock.helperStarted(event.id);
+						lastStep = `${event.helper} (running)`;
+					} else if (event.type === "helper" && typeof event.helper === "string" && typeof event.ms === "number") {
+						if (typeof event.id === "number") clock.helperFinished(event.id);
 						lastStep = `${event.helper} (${event.ms} ms)`;
-					else continue;
+					} else continue;
 					reportProgress(lastStep, false);
 				} catch {
 					// Progress is advisory; malformed events do not affect the run.
@@ -700,13 +720,14 @@ function fileOutcomes(text: string) {
 }
 
 /**
- * Waits for the program to exit, or kills it after timeoutMs. Before killing it, notes which files
+ * Waits for the program to exit, or kills it after timeoutMs of program time (see ProgramClock). Before killing it, notes which files
  * it (or anything it started) still has open for writing, since they may be half-written, and which
  * commands it was still running, since one of them is probably why it timed out.
  */
 async function waitWithTimeout(
 	child: ChildProcess,
 	timeoutMs: number,
+	clock: ProgramClock,
 	repo: string,
 	forceInspectionFailure = false,
 	stop = () => killGroup(child),
@@ -714,7 +735,13 @@ async function waitWithTimeout(
 	const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
 	let timer: Timer | undefined;
 	const timeout = new Promise<"timeout">((resolve) => {
-		timer = setTimeout(() => resolve("timeout"), timeoutMs);
+		// While a pausing helper runs, the remaining time does not shrink, so this rechecks at that interval.
+		const check = () => {
+			const remaining = timeoutMs - clock.elapsedMs();
+			if (remaining <= 0) resolve("timeout");
+			else timer = setTimeout(check, remaining);
+		};
+		timer = setTimeout(check, timeoutMs);
 	});
 	const winner = await Promise.race([exited, timeout]);
 	clearTimeout(timer);

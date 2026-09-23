@@ -45,24 +45,44 @@ function report(event: Record<string, unknown>) {
 	}
 }
 
-/** Runs a helper, logging how long it took and how many results it returned. */
+let helperCalls = 0;
+
+/**
+ * Runs a helper, logging when it starts, how long it took and how many results it returned. The runner
+ * pauses the program's timeout while some helpers run, so every start is matched by a finish, even on failure.
+ */
 function logged<T>(helper: string, _args: unknown[], run: () => T): T {
+	const id = ++helperCalls;
 	const startedAt = performance.now();
-	const result = run();
-	const done = (value: unknown) => {
+	report({ type: "helper-start", helper, id });
+	const done = (value?: unknown) => {
 		const results = Array.isArray(value) ? value.length : typeof value === "number" ? value : undefined;
 		report({
 			type: "helper",
 			helper,
+			id,
 			ms: Math.round(performance.now() - startedAt),
 			results,
 		});
 	};
+	let result: T;
+	try {
+		result = run();
+	} catch (error) {
+		done();
+		throw error;
+	}
 	if (result instanceof Promise)
-		return result.then((value) => {
-			done(value);
-			return value;
-		}) as T;
+		return result.then(
+			(value) => {
+				done(value);
+				return value;
+			},
+			(error) => {
+				done();
+				throw error;
+			},
+		) as T;
 	done(result);
 	return result;
 }

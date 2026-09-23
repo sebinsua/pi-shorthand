@@ -294,6 +294,42 @@ await ts.renameFile({ from, to });`,
 			expect(await Bun.file(path.join(repo, "src/lib/parse.ts")).text()).toContain("export const parse");
 			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toContain('from "./lib/parse"');
 		});
+
+		test("language server time does not count toward the program timeout", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ include: ["src"] }),
+				"src/parse.ts": "export function parseUser(value: string) { return value; }\n",
+				"src/use.ts": 'import { parseUser } from "./parse";\nexport const user = parseUser("Ada");\n',
+			});
+			// Starting the language server alone takes longer than this timeout.
+			const result = await run(
+				repo,
+				`await ts.rename({ file: "src/parse.ts", symbol: "parseUser", to: "decodeUser" });`,
+				{
+					timeoutMs: 300,
+				},
+			);
+
+			expect(result.timedOut).toBe(false);
+			expect(result.exitCode).toBe(0);
+			expect(result.helperMs).toBeGreaterThan(0);
+			expect(result.diagnostics?.counters["helper ms excluded from timeout"]).toBe(result.helperMs);
+			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toContain("decodeUser");
+		});
+
+		test("a failed helper resumes the program timeout", async () => {
+			const repo = await makeRepo({ "tsconfig.json": "{}", "src/app.ts": "export const value = 1;\n" });
+			const result = await run(
+				repo,
+				`await ts.rename({ file: "src/app.ts", symbol: "missing", to: "next" }).catch(() => {});
+await Bun.sleep(30_000);`,
+				{ timeoutMs: 1000 },
+			);
+
+			expect(result.timedOut).toBe(true);
+			expect(result.helperMs).toBeGreaterThan(0);
+			expect(result.durationMs).toBeLessThan(20_000);
+		});
 	});
 
 	describe("transaction application", () => {

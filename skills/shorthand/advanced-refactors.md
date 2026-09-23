@@ -129,8 +129,8 @@ Paths accept files, directories, globs, `sg.file()` targets or mixed arrays.
 
 Worth knowing:
 
-- Each `grit` call takes about a second to start, so pass a longer `timeout` to the code tool when
-  a program calls it.
+- Each `grit` call takes about a second to start. That time does not count toward the program's
+  timeout.
 - A rewrite can drop a statement's trailing semicolon. Check the diff, or use `sg.rewrite` for
   simple JS/TS rewrites.
 
@@ -159,7 +159,8 @@ path is inaccessible on macOS. On both platforms, host paths outside the workspa
 (including external symlink targets). `$TMPDIR` is private to the run.
 Writes to `.git` are blocked.
 
-The default timeout is two seconds; request more for longer transformations.
+The default timeout is two seconds; request more for longer transformations. Time inside `ts.*` and
+`grit` helpers does not count toward it, up to 60 extra seconds per run.
 By default, rollback happens per file: files involved in failed or interrupted edits are discarded,
 while the others are retained, including after exceptions. Unattributed failures
 (such as failed checks) preserve completed edits and report the failure. A failed file loses all
