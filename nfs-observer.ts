@@ -7,6 +7,9 @@ import { IncompleteObservationError, TransactionJournal, type Observation } from
 export class XdrReader {
 	private offset = 0;
 	constructor(private readonly buffer: Buffer) {}
+	get position(): number {
+		return this.offset;
+	}
 	u32(): number {
 		const value = this.take(4).readUInt32BE();
 		return value;
@@ -36,11 +39,22 @@ export class XdrReader {
 	}
 }
 
-type ReplyObserver = (reply: Buffer) => Promise<void>;
+/** Resolves to a replacement reply when the observer rewrites one, as for hidden directory entries. */
+type ReplyObserver = (reply: Buffer) => Promise<Buffer | void>;
+type AfterReply = (response: XdrReader, reply: Buffer) => void | Buffer | Promise<void | Buffer>;
 const nothing = () => {};
+
+/**
+ * macOS stores extended attributes of files on an NFSv3 mount in AppleDouble "._name" files beside them,
+ * and it adds one (com.apple.provenance) to every file a program writes. Those files never reach the
+ * repository, but a program listing a directory would see them, so listings leave out the ones created
+ * during the run for a file it had already touched. Existing "._" files in the repository stay visible.
+ */
+const APPLE_DOUBLE = "._";
 
 export class NfsObserver {
 	private readonly handles = new Map<string, Set<string>>();
+	private readonly appleDouble = new Set<string>();
 	constructor(private readonly journal: TransactionJournal) {}
 
 	/** The transport must serialize request + response pairs across all connections. */
@@ -65,7 +79,7 @@ export class NfsObserver {
 			if (flavor !== 0 && flavor !== 1) throw new IncompleteObservationError("unsupported RPC authentication");
 			request.opaque(400);
 		}
-		let after: (response: XdrReader) => void | Promise<void> = nothing;
+		let after: AfterReply = nothing;
 		// macOS sends the v1 UMNT procedure even for an NFSv3 mount. Only the
 		// no-handle lifecycle calls have the same interpretation across versions.
 		if (program === 100005 && (version === 3 || (version === 1 && [0, 3, 4].includes(procedure)))) {
@@ -93,7 +107,7 @@ export class NfsObserver {
 				response.u32(); // verifier flavor
 				response.opaque(400);
 				if (response.u32() !== 0) throw new IncompleteObservationError("RPC request was not executed");
-				await after(response);
+				return (await after(response, reply)) ?? undefined;
 			} catch (error) {
 				this.journal.invalidate(error instanceof Error ? error.message : String(error));
 				throw error;
@@ -133,7 +147,22 @@ export class NfsObserver {
 		for (const file of files) await this.journal.observe(file, kind);
 	}
 
-	private async nfs(procedure: number, request: XdrReader): Promise<(response: XdrReader) => void | Promise<void>> {
+	private known(file: string): boolean {
+		for (const paths of this.handles.values()) if (paths.has(file)) return true;
+		return false;
+	}
+
+	/** A "._name" file created during the run beside a file the program had already touched. */
+	private async recordAppleDouble(files: string[]): Promise<void> {
+		for (const file of files) {
+			const name = path.posix.basename(file);
+			if (!name.startsWith(APPLE_DOUBLE) || name.length === APPLE_DOUBLE.length) continue;
+			const sibling = path.posix.join(path.posix.dirname(file), name.slice(APPLE_DOUBLE.length));
+			if (this.known(sibling) && (await this.journal.originalKind(file)) === "absent") this.appleDouble.add(file);
+		}
+	}
+
+	private async nfs(procedure: number, request: XdrReader): Promise<AfterReply> {
 		if (procedure === 0) return nothing;
 		if ([1, 2, 4, 5, 6, 7, 18, 19, 20, 21].includes(procedure)) {
 			const files = this.paths(request.opaque(64));
@@ -146,9 +175,10 @@ export class NfsObserver {
 				for (const file of files) await this.journal.observeTree(file);
 			} else await this.observe(files, procedure === 3 ? "metadata" : "contents");
 			if ([12, 13].includes(procedure)) return nothing;
-			return (response) => {
+			return async (response) => {
 				if (response.u32() !== 0) return;
 				if (procedure === 3 || response.bool()) this.register(response.opaque(64), files);
+				if (procedure === 8) await this.recordAppleDouble(files);
 			};
 		}
 		if (procedure === 14) {
@@ -182,11 +212,14 @@ export class NfsObserver {
 		if (procedure === 16 || procedure === 17) {
 			const directories = this.paths(request.opaque(64));
 			for (const directory of directories) await this.journal.observeDirectory(directory, procedure === 17);
-			return (response) => {
+			return (response, reply) => {
 				if (response.u32() !== 0) return;
 				response.postAttributes();
 				response.take(8); // cookie verifier
-				while (response.bool()) {
+				// Keep the reply up to the first entry, then every entry that is not hidden.
+				const kept: Buffer[] = [reply.subarray(0, response.position)];
+				let hidden = false;
+				for (let start = response.position; response.bool(); start = response.position) {
 					response.take(8); // fileid
 					const bytes = response.opaque(255);
 					const name = bytes.toString("utf8");
@@ -203,8 +236,13 @@ export class NfsObserver {
 							this.register(response.opaque(64), files);
 						}
 					}
+					const listed = directories.map((dir) => path.posix.join(dir, name));
+					if (listed.some((file) => this.appleDouble.has(file))) hidden = true;
+					else kept.push(reply.subarray(start, response.position));
 				}
+				const end = response.position - 4; // the "no more entries" marker
 				response.bool(); // EOF
+				return hidden ? Buffer.concat([...kept, reply.subarray(end)]) : undefined;
 			};
 		}
 		throw new IncompleteObservationError(`unknown NFS procedure ${procedure}`);

@@ -134,9 +134,9 @@ export async function openNfsProxy(
 				awaiting = { resolve, reject };
 			});
 			const [, message] = await Promise.all([write(upstream, request), backendReply]);
-			await validateReply(message);
+			const rewritten = await validateReply(message);
 			if (failure) throw failure;
-			return message;
+			return rewritten ?? message;
 		} finally {
 			clearTimeout(timeout);
 		}

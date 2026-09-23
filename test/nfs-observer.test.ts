@@ -29,10 +29,11 @@ const rootHandle = Buffer.from("root");
 const inputHandle = Buffer.from("input");
 const child = (name: string) => Buffer.concat([opaque(rootHandle), opaque(name)]);
 
-async function fixture() {
+async function fixture(files: Record<string, string> = {}) {
 	const root = await fs.mkdtemp(path.join(tmpdir(), "shorthand-nfs-observer-"));
 	roots.push(root);
 	await Bun.write(path.join(root, "input"), "original\n");
+	for (const [file, text] of Object.entries(files)) await Bun.write(path.join(root, file), text);
 	const journal = new TransactionJournal(root);
 	const observer = new NfsObserver(journal);
 	const mounted = await observer.before(call(1, opaque("/"), 100005));
@@ -182,4 +183,70 @@ test("XDR rejects truncated padding, oversized values and invalid booleans", () 
 	expect(() => new XdrReader(Buffer.concat([words(1), Buffer.from("x")])).opaque()).toThrow("truncated");
 	expect(() => new XdrReader(words(1024)).opaque(64)).toThrow("oversized");
 	expect(() => new XdrReader(words(2)).bool()).toThrow("boolean");
+});
+
+/** A READDIRPLUS reply body listing names, each with a handle, followed by EOF. */
+function listing(names: string[]): Buffer {
+	return Buffer.concat([
+		words(0, 0, 0, 0),
+		...names.flatMap((name, i) => [words(1, 0, i + 10), opaque(name), words(0, i + 1, 0, 1), opaque(`h-${name}`)]),
+		words(0, 1),
+	]);
+}
+
+/** Names in a READDIRPLUS reply, checking that the entry list and EOF marker are intact. */
+function listedNames(message: Buffer): string[] {
+	const reader = new XdrReader(message);
+	reader.take(24); // RPC reply header with an empty verifier
+	expect(reader.u32()).toBe(0);
+	reader.postAttributes();
+	reader.take(8);
+	const names: string[] = [];
+	while (reader.bool()) {
+		reader.take(8);
+		names.push(reader.opaque(255).toString());
+		reader.take(8);
+		reader.postAttributes();
+		if (reader.bool()) reader.opaque(64);
+	}
+	expect(reader.bool()).toBe(true);
+	expect(reader.position).toBe(message.length);
+	return names;
+}
+
+async function create(observer: NfsObserver, name: string) {
+	const created = await observer.before(call(8, child(name)));
+	await created(reply(Buffer.concat([words(0, 1), opaque(`h-${name}`), words(0, 0, 0)])));
+}
+
+test("directory listings leave out AppleDouble files created beside files the run touched", async () => {
+	const { observer } = await fixture({ "._kept": "a real file in the repository", kept: "kept\n" });
+	await lookup(observer, "input", inputHandle);
+	await lookup(observer, "kept", Buffer.from("kept-handle"));
+	await create(observer, "._input");
+	await create(observer, "._kept");
+	await create(observer, "._notes");
+
+	for (const procedure of [16, 17]) {
+		const listed = await observer.before(call(procedure, opaque(rootHandle)));
+		const names = ["input", "._input", "kept", "._kept", "._notes"];
+		const body =
+			procedure === 17
+				? listing(names)
+				: Buffer.concat([
+						words(0, 0, 0, 0),
+						...names.flatMap((name, i) => [words(1, 0, i + 10), opaque(name), words(0, i + 1)]),
+						words(0, 1),
+					]);
+		const rewritten = await listed(reply(body));
+		expect(rewritten).toBeInstanceOf(Buffer);
+		if (procedure === 17) expect(listedNames(rewritten as Buffer)).toEqual(["input", "kept", "._kept", "._notes"]);
+		else expect((rewritten as Buffer).toString()).not.toContain("._input");
+	}
+});
+
+test("a listing without hidden files is forwarded unchanged", async () => {
+	const { observer } = await fixture();
+	const listed = await observer.before(call(17, opaque(rootHandle)));
+	expect(await listed(reply(listing(["input"])))).toBeUndefined();
 });
