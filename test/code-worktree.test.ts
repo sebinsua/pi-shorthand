@@ -64,4 +64,5 @@ test("code targets a child worktree from a bare worktree container", async () =>
 		expect(["waiting for repository lock", "creating isolated workspace"]).toContain(phase ?? "");
 		expect(await Bun.file(path.join(child, "target.txt")).text()).toBe("before\n");
 	}
-});
+	// The first overlay run on a fresh CI machine includes mounting AgentFS and transpiling the runner.
+}, 30_000);
