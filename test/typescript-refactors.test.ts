@@ -40,6 +40,31 @@ test("rename changes one resolved symbol across files", async () => {
 	);
 });
 
+test("rename follows re-exports while keeping object literal keys and explicit aliases", async () => {
+	const root = await fixture({
+		"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
+		"src/lib/money.ts": 'export const mascot = "😀";\nexport function formatAmount(n: number) { return String(n); }\n',
+		"src/lib/index.ts": 'export { formatAmount } from "./money";\n',
+		"src/public.ts": 'export { formatAmount as legacyFormat } from "./lib/money";\n',
+		"src/use.ts":
+			'import { formatAmount } from "./lib";\nimport { formatAmount as fmt } from "./lib/money";\nexport const api = { "😀": 1, formatAmount };\nexport const x = api.formatAmount(1) + fmt(2);\n',
+		"src/ns.ts":
+			'import * as money from "./lib/money";\nconst { formatAmount } = money;\nexport const y = formatAmount(3);\n',
+	});
+
+	await rename(root, { file: "src/lib/money.ts", symbol: "formatAmount", to: "formatPrice" });
+
+	const read = (file: string) => Bun.file(path.join(root, file)).text();
+	expect(await read("src/lib/index.ts")).toBe('export { formatPrice } from "./money";\n');
+	expect(await read("src/public.ts")).toBe('export { formatPrice as legacyFormat } from "./lib/money";\n');
+	expect(await read("src/use.ts")).toBe(
+		'import { formatPrice } from "./lib";\nimport { formatPrice as fmt } from "./lib/money";\nexport const api = { "😀": 1, formatAmount: formatPrice };\nexport const x = api.formatAmount(1) + fmt(2);\n',
+	);
+	expect(await read("src/ns.ts")).toBe(
+		'import * as money from "./lib/money";\nconst { formatPrice } = money;\nexport const y = formatPrice(3);\n',
+	);
+});
+
 test("rename rejects overloaded declarations without writing", async () => {
 	const root = await fixture({
 		"tsconfig.json": JSON.stringify({ include: ["src"] }),

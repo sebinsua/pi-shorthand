@@ -1,13 +1,16 @@
 import { lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { parse } from "@ast-grep/napi";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { editingFiles } from "./file-outcomes.ts";
 import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
+import { scriptLanguage } from "./placement.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
 	projectPath,
 	type Position,
+	type AdjustEdit,
 	type Range,
 	type WorkspaceEdit,
 } from "./workspace-edit.ts";
@@ -57,13 +60,37 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position: positions[0],
 			newName: options.to,
 		});
-		const changes = planWorkspaceEdit(root, edit);
+		const changes = planWorkspaceEdit(root, edit, keepShorthandPropertyNames(options.symbol));
 		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
 		editingFiles([...changes.keys()], () => {
 			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
 		});
 		await filesChanged(server, [...changes.keys()]);
 	});
+}
+
+/**
+ * The server renames without aliases, so imports and re-exports follow the new name (see lsp-client.ts). That
+ * would also change the key of an object literal shorthand such as `{ parseUser }`, while reads of that property
+ * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes.
+ */
+function keepShorthandPropertyNames(symbol: string): AdjustEdit {
+	const shorthands = new Map<string, Set<number>>();
+	return (file, source, start, end, text) => {
+		if (source.slice(start, end) !== symbol) return text;
+		let starts = shorthands.get(file);
+		if (!starts) {
+			const lang = scriptLanguage(file);
+			const nodes = lang
+				? parse(lang, source)
+						.root()
+						.findAll({ rule: { kind: "shorthand_property_identifier" } })
+				: [];
+			starts = new Set(nodes.map((node) => node.range().start.index));
+			shorthands.set(file, starts);
+		}
+		return starts.has(start) ? `${symbol}: ${text}` : text;
+	};
 }
 
 export async function renameFile(root: string, options: RenameFileOptions): Promise<void> {

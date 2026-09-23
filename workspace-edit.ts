@@ -46,8 +46,11 @@ export function projectPath(root: string, file: string): string {
 	return absolute;
 }
 
+/** Replacement text for one edit, given its file, source and UTF-16 offsets. */
+export type AdjustEdit = (file: string, source: string, start: number, end: number, text: string) => string;
+
 /** Validate every edit and construct all new contents before any file is written. */
-export function planWorkspaceEdit(root: string, edit: WorkspaceEdit | null): Map<string, string> {
+export function planWorkspaceEdit(root: string, edit: WorkspaceEdit | null, adjust?: AdjustEdit): Map<string, string> {
 	const byUri = new Map<string, TextEdit[]>();
 	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) append(byUri, uri, edits);
 	for (const change of edit?.documentChanges ?? []) {
@@ -62,7 +65,7 @@ export function planWorkspaceEdit(root: string, edit: WorkspaceEdit | null): Map
 				throw new Error(`TypeScript returned an edit for unsupported URI ${JSON.stringify(uri)}`);
 			const file = existingProjectFile(root, fileURLToPath(url));
 			const source = readFileSync(file, "utf8");
-			return [file, applyTextEdits(source, edits, file)];
+			return [file, applyTextEdits(source, edits, file, adjust)];
 		}),
 	);
 }
@@ -71,13 +74,13 @@ function append(byUri: Map<string, TextEdit[]>, uri: string, edits: TextEdit[]):
 	byUri.set(uri, [...(byUri.get(uri) ?? []), ...edits]);
 }
 
-function applyTextEdits(source: string, edits: TextEdit[], file: string): string {
+function applyTextEdits(source: string, edits: TextEdit[], file: string, adjust?: AdjustEdit): string {
 	const ranges = edits
-		.map((edit) => ({
-			start: offsetAt(source, edit.range.start, file),
-			end: offsetAt(source, edit.range.end, file),
-			text: edit.newText,
-		}))
+		.map((edit) => {
+			const start = offsetAt(source, edit.range.start, file);
+			const end = offsetAt(source, edit.range.end, file);
+			return { start, end, text: adjust ? adjust(file, source, start, end, edit.newText) : edit.newText };
+		})
 		.toSorted((a, b) => b.start - a.start || b.end - a.end);
 	for (const range of ranges)
 		if (range.end < range.start) throw new Error(`TypeScript returned a reversed edit for ${JSON.stringify(file)}`);

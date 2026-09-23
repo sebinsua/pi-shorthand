@@ -44,6 +44,11 @@ const languages: Record<string, Lang> = {
 	cjs: Lang.JavaScript,
 };
 
+/** The ast-grep language for a JS/TS filename, by extension. */
+export function scriptLanguage(filename: string): Lang | undefined {
+	return languages[filename.split(".").pop()!];
+}
+
 export function remember<T extends Match>(match: T, source: string, existed = true): T {
 	const filename = existed ? realpathSync(match.file) : resolve(match.file);
 	snapshots.set(match, { file: filename, source, existed, node: match.node });
@@ -52,7 +57,7 @@ export function remember<T extends Match>(match: T, source: string, existed = tr
 
 /** A file root, including a not-yet-created file. Merely selecting it performs no writes. */
 export function file(filename: string): FileTarget {
-	const lang = languages[filename.split(".").pop()!];
+	const lang = scriptLanguage(filename);
 	if (!lang) throw new Error("sg.file requires a JS/TS filename");
 	const existed = existsSync(filename);
 	const source = existed ? readFileSync(filename, "utf8") : "";

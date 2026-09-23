@@ -87,6 +87,9 @@ async function startTypeScriptServer(root: string): Promise<TypeScriptServer> {
 		await connection.sendRequest("initialize", {
 			processId: process.pid,
 			rootUri: pathToFileURL(root).href,
+			// Rename without aliases: by default a renamed declaration is re-exported as `new as old`, so importers
+			// through a barrel keep the old name. typescript-refactors.ts keeps object literal keys unchanged instead.
+			initializationOptions: { userPreferences: { providePrefixAndSuffixTextForRename: false } },
 			capabilities: {
 				workspace: {
 					workspaceEdit: { documentChanges: true },
