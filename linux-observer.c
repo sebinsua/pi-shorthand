@@ -37,6 +37,7 @@ static const char *repository;
 static size_t repository_length;
 static pid_t initial;
 static volatile sig_atomic_t stopping;
+static int unresolved_external_permission;
 
 enum observation_kind {
     OBSERVE_CONTENTS = 'C',
@@ -121,6 +122,61 @@ static void descriptor(pid_t pid, int fd, char result[PATH_MAX]) {
     result[length] = 0;
     if (within(result) && strstr(result, " (deleted)")) die("unresolved deleted repository descriptor");
 }
+/* A missing getprocattr hook reports EINVAL. Other errors, including a label
+ * larger than our buffer, leave the access context unknown. */
+static int security_label(const char *path, char label[4096], size_t *length) {
+    int fd = open(path, O_RDONLY|O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t used = 0;
+    for (;;) {
+        char extra;
+        char *destination = used < 4096 ? label + used : &extra;
+        size_t available = used < 4096 ? 4096 - used : 1;
+        ssize_t count = read(fd, destination, available);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            int error = errno;
+            close(fd);
+            return used == 0 && error == EINVAL ? 0 : -1;
+        }
+        if (!count) { close(fd); *length = used; return 1; }
+        if (used == 4096) { close(fd); return -1; }
+        used += count;
+    }
+}
+static int same_access_context(pid_t pid) {
+    char tracee_path[96], tracee[4096], self[4096];
+    snprintf(tracee_path, sizeof(tracee_path), "/proc/%d/status", pid);
+    FILE *a = fopen(tracee_path, "r"), *b = fopen("/proc/self/status", "r");
+    if (!a || !b) { if (a) fclose(a); if (b) fclose(b); return 0; }
+    const char *fields[] = { "Uid:", "Gid:", "Groups:", "CapEff:" };
+    unsigned matched = 0;
+    while (fgets(tracee, sizeof(tracee), a)) {
+        for (size_t j = 0; j < sizeof(fields)/sizeof(*fields); j++) {
+            if (strncmp(tracee, fields[j], strlen(fields[j]))) continue;
+            if (!strchr(tracee, '\n')) { fclose(a); fclose(b); return 0; }
+            rewind(b);
+            int found = 0;
+            while (fgets(self, sizeof(self), b)) {
+                if (!strncmp(self, fields[j], strlen(fields[j]))) {
+                    if (!strchr(self, '\n') || strcmp(tracee, self)) { fclose(a); fclose(b); return 0; }
+                    found = 1;
+                    break;
+                }
+            }
+            matched += found;
+        }
+    }
+    fclose(a); fclose(b);
+    if (matched != sizeof(fields)/sizeof(*fields)) return 0;
+    snprintf(tracee_path, sizeof(tracee_path), "/proc/%d/attr/current", pid);
+    size_t tracee_length = 0, self_length = 0;
+    int tracee_label = security_label(tracee_path, tracee, &tracee_length);
+    int self_label = security_label("/proc/self/attr/current", self, &self_length);
+    return (tracee_label == 0 && self_label == 0) ||
+        (tracee_label == 1 && self_label == 1 && tracee_length == self_length &&
+         !memcmp(tracee, self, tracee_length));
+}
 /* Walk symlinks in the tracee's mount view, recording each repository link.
  * Never use realpath(/proc/PID/root/...): that can resolve against the host mount.
  */
@@ -182,7 +238,17 @@ static void resolve_name(pid_t pid, int fd, const char *input, int follow, char 
         snprintf(visible, sizeof(visible), "/proc/%d/root%s", pid, result);
         struct stat info;
         int exists = lstat(visible, &info);
-        if (exists < 0 && errno != ENOENT && errno != ENOTDIR) die("cannot inspect tracee path");
+        if (exists < 0 && errno != ENOENT && errno != ENOTDIR) {
+            if ((errno == EACCES || errno == EPERM) && !within(result) && same_access_context(pid)) {
+                /* Matching filesystem credentials, capabilities and security
+                 * label make this external denial apply to the tracee too.
+                 * Confirm the syscall is denied before resuming it. */
+                unresolved_external_permission = 1;
+                result[0] = 0;
+                return;
+            }
+            die("cannot inspect tracee path");
+        }
         if ((!*rest && !follow) || exists < 0 || !S_ISLNK(info.st_mode)) {
             snprintf(pending, sizeof(pending), "%s", rest);
             continue;
@@ -353,6 +419,7 @@ struct task {
     int initial_stop;
     int registered;
     int waiting;
+    int checking_permission;
     struct task *next;
 };
 static struct task *tasks;
@@ -372,7 +439,8 @@ static struct task *task(pid_t pid) {
  * is not completion: retain the live record until wait reports its death or
  * an exec event explicitly identifies the replaced thread ID. */
 static void resume_task(pid_t pid, int signal) {
-    if (ptrace(PTRACE_CONT, pid, 0, signal) && errno != ESRCH) die("trace resume failed");
+    int request = task(pid)->checking_permission ? PTRACE_SYSCALL : PTRACE_CONT;
+    if (ptrace(request, pid, 0, signal) && errno != ESRCH) die("trace resume failed");
 }
 static void syscall_entry(pid_t pid, struct ptrace_syscall_info *info) {
     __u64 *a = info->seccomp.args; long nr = info->seccomp.nr;
@@ -514,6 +582,8 @@ static void exec_event(pid_t pid) {
     unsigned long former;
     if (ptrace(PTRACE_GETEVENTMSG, pid, 0, &former)) die("missing exec thread identity");
     struct task *current = task(pid);
+    if (current->checking_permission || (former != (unsigned long)pid && task(former)->checking_permission))
+        die("unresolved external path was executed");
     if (former != (unsigned long)pid) {
         current->bootstrap = task(former)->bootstrap;
         task(former)->alive = 0;
@@ -559,7 +629,7 @@ int main(int argc, char **argv) {
     int status, exit_code = 125;
     if (waitpid(initial, &status, 0) != initial || !WIFSTOPPED(status)) die("initial trace stop");
     long flags = PTRACE_O_TRACEFORK|PTRACE_O_TRACEVFORK|PTRACE_O_TRACECLONE|PTRACE_O_TRACEEXEC|
-        PTRACE_O_TRACESECCOMP|PTRACE_O_EXITKILL;
+        PTRACE_O_TRACESECCOMP|PTRACE_O_TRACESYSGOOD|PTRACE_O_EXITKILL;
     if (ptrace(PTRACE_SETOPTIONS, initial, 0, flags)) die("ptrace options");
     task(initial)->bootstrap = BEFORE_BWRAP_EXEC;
     task(initial)->registered = 1;
@@ -593,7 +663,22 @@ int main(int argc, char **argv) {
             struct ptrace_syscall_info info;
             if (ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info) < 0 || info.op != PTRACE_SYSCALL_INFO_SECCOMP)
                 die("syscall information unavailable");
-            syscall_entry(pid, &info); signal = 0;
+            unresolved_external_permission = 0;
+            syscall_entry(pid, &info);
+            if (unresolved_external_permission) task(pid)->checking_permission = 1;
+            signal = 0;
+        } else if (signal == (SIGTRAP|0x80) && task(pid)->checking_permission) {
+            struct ptrace_syscall_info info;
+            if (ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info) < 0)
+                die("unresolved external path result unavailable");
+            if (info.op == PTRACE_SYSCALL_INFO_EXIT) {
+                if (info.exit.rval != -EACCES && info.exit.rval != -EPERM)
+                    die("unresolved external path was accessed");
+                task(pid)->checking_permission = 0;
+            } else if (info.op != PTRACE_SYSCALL_INFO_ENTRY) {
+                die("unresolved external path result unavailable");
+            }
+            signal = 0;
         } else if (event == PTRACE_EVENT_FORK || event == PTRACE_EVENT_VFORK || event == PTRACE_EVENT_CLONE) {
             descendant_event(pid);
             signal = 0;

@@ -20,9 +20,10 @@ xcode-select --install
 curl -fsSL https://agentfs.ai/install | bash
 ```
 
-On Linux, install bubblewrap 0.9 or later, a C compiler, and `lsof`. For Debian and Ubuntu:
+On Linux, install bubblewrap 0.11 or later, a C compiler, and `lsof`. For Debian and Ubuntu, check the available bubblewrap version before installing:
 
 ```sh
+apt-cache policy bubblewrap
 sudo apt install bubblewrap build-essential lsof
 ```
 

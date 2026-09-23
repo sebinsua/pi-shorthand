@@ -13,6 +13,7 @@ afterEach(async () => {
 });
 
 const linux = test.skipIf(process.platform !== "linux" || !Bun.which("bwrap"));
+const linuxPermissions = test.skipIf(process.platform !== "linux" || !Bun.which("bwrap") || process.getuid?.() === 0);
 async function fixture() {
 	const root = await fs.mkdtemp(path.join(tmpdir(), "shorthand-native-observer-"));
 	temporary.push(root);
@@ -82,6 +83,87 @@ linux("native observer rejects a wrapper that was never executed", async () => {
 	expect(failure).toBeInstanceOf(Error);
 	expect((failure as Error).message).toContain("expected observer");
 });
+
+linuxPermissions(
+	"an inaccessible external path does not invalidate a repository edit",
+	async () => {
+		const { root, repo, upper, observation, wrap } = await fixture();
+		const inaccessible = path.join(root, "inaccessible");
+		await fs.mkdir(inaccessible, { mode: 0o700 });
+		await fs.writeFile(path.join(inaccessible, "file"), "external");
+		await fs.chmod(inaccessible, 0o000);
+		try {
+			const program = `
+			try { await Bun.file(${JSON.stringify(path.join(inaccessible, "file"))}).text(); }
+			catch (error) { if (error.code !== "EACCES" && error.code !== "EPERM") throw error; }
+			await Bun.write("output", "committed");
+		`;
+			const child = Bun.spawn(wrap([process.execPath, "-e", program]), { stdout: "pipe", stderr: "pipe" });
+			const stderr = await new Response(child.stderr).text();
+			expect({ code: await child.exited, stderr }).toEqual({ code: 0, stderr: "" });
+			expect(await Bun.file(path.join(upper, "output")).text()).toBe("committed");
+			expect(await Bun.file(path.join(repo, "output")).exists()).toBe(false);
+			expect(await observation.journal.original("output")).toBeNull();
+			expect(await observation.finish()).toEqual([]);
+		} finally {
+			await fs.chmod(inaccessible, 0o700);
+		}
+	},
+	30000,
+);
+
+linux(
+	"an accessible external symlink into the repository is still captured",
+	async () => {
+		const { root, repo, observation, wrap } = await fixture();
+		const alias = path.join(root, "repository-alias");
+		await fs.symlink(path.join(repo, "input"), alias);
+		try {
+			const child = Bun.spawn(
+				wrap([process.execPath, "-e", `console.log(await Bun.file(${JSON.stringify(alias)}).text());`]),
+				{
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const [output, stderr, code] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+			expect(output).toContain("original");
+			expect((await observation.journal.original("input"))?.type).toBe("file");
+			expect(await observation.finish()).toEqual([]);
+		} catch (error) {
+			await observation.finish().catch(() => {});
+			throw error;
+		}
+	},
+	30000,
+);
+
+linuxPermissions(
+	"an inaccessible repository path still invalidates observation",
+	async () => {
+		const { repo, observation, wrap } = await fixture();
+		const inaccessible = path.join(repo, "inaccessible");
+		await fs.mkdir(inaccessible, { mode: 0o700 });
+		await fs.writeFile(path.join(inaccessible, "file"), "private");
+		await fs.chmod(inaccessible, 0o000);
+		try {
+			const program = `try { await Bun.file("inaccessible/file").text(); } catch {}`;
+			const child = Bun.spawn(wrap([process.execPath, "-e", program]), { stdout: "pipe", stderr: "pipe" });
+			const stderr = await new Response(child.stderr).text();
+			expect(await child.exited).not.toBe(0);
+			expect(stderr).toContain("cannot inspect tracee path");
+			await expect(observation.finish()).rejects.toThrow();
+		} finally {
+			await fs.chmod(inaccessible, 0o700);
+		}
+	},
+	30000,
+);
 
 for (const alias of ["/proc/self/cwd/input", "/proc/thread-self/cwd/input", "link"]) {
 	linux(
