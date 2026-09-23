@@ -1,6 +1,6 @@
 {
 	"name": "pi-shorthand",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Pi tool for editing repositories with Bun programs, text edits and structural transformations.",
 	"keywords": [
 		"ast-grep",
