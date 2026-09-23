@@ -84,3 +84,17 @@ test("the evaluator prints drift before failing", async () => {
 	const line = stdout.split("\n").find((item) => item.startsWith("DRIFT "));
 	expect(JSON.parse(line!.slice("DRIFT ".length)).missed.length).toBeGreaterThan(0);
 });
+
+test("a migrated logger call counts however its arguments are written", async () => {
+	const task = taskById("logger-migration-10");
+	const root = await fixture(task.id);
+	await applySolution(task, root);
+	await edit(root, "src/features/g1/feature1.ts", (text) =>
+		text.replace("{ error: err }", "err === undefined ? undefined : { error: err }"),
+	);
+	await edit(root, "src/features/g2/feature2.ts", (text) =>
+		text.replace('logger.log(level, "m301")', 'logger[level]("m301")'),
+	);
+	expect(await task.drift!(root)).toMatchObject({ missed: [], overmatched: [], unrelated: [] });
+	await task.verify(root);
+});

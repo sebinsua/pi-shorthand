@@ -389,6 +389,20 @@ export function ${call}() {
 	},
 };
 
+/**
+ * A call migrated to logger, however its arguments are spelled: behaviour checks already compare the
+ * recorded entries, so this only confirms the call now goes through logger. A non-literal level may be
+ * written logger.log(level, m) or logger[level](m).
+ */
+const migratedLog = (file: string, level: "info" | "warn" | "error" | "level", message: string): Check =>
+	matches(
+		file,
+		level === "level"
+			? new RegExp(`logger(?:\\.log\\(level,|\\[level\\]\\()"${message}"`)
+			: new RegExp(`logger\\.${level}\\("${message}"[,)]`),
+		`logger ${level} call for "${message}"`,
+	);
+
 const loggerMigration: Family = {
 	id: "logger-migration",
 	revision: "scale-v1",
@@ -507,18 +521,15 @@ export function ${call}() {
 			][kind]!;
 			before[file] = text!;
 			after[file] = migrated!;
-			if (kind === 0) sites.push(contains(file, `logger.info("${m1}")`), contains(file, `logger.warn("${m2}")`));
-			if (kind === 1)
-				sites.push(
-					matches(file, new RegExp(`logger\\.error\\("${m1}",\\{error(:err)?\\}\\)`), `logger.error("${m1}")`),
-				);
-			if (kind === 2) sites.push(contains(file, `logger.log(level, "${m1}")`));
+			if (kind === 0) sites.push(migratedLog(file, "info", m1), migratedLog(file, "warn", m2));
+			if (kind === 1) sites.push(migratedLog(file, "error", m1));
+			if (kind === 2) sites.push(migratedLog(file, "level", m1));
 			if (kind === 3) {
-				sites.push(contains(file, `logger.info("${m1}")`));
+				sites.push(migratedLog(file, "info", m1));
 				decoys.push(contains(file, `audit.log("info", "${m3}")`), contains(file, "Math.log(1)"));
 			}
 			if (kind === 4) {
-				sites.push(contains(file, `logger.warn("${m1}")`));
+				sites.push(migratedLog(file, "warn", m1));
 				decoys.push(contains(file, `'log("info", "${m2}")'`, "string contents"));
 			}
 			cases.push({
