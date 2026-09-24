@@ -65,6 +65,20 @@ test("rename follows re-exports while keeping object literal keys and explicit a
 	);
 });
 
+test("rename keeps the property a renamed destructured binding reads", async () => {
+	const root = await fixture({
+		"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
+		"src/o.ts": "export const obj = { foo: 1, bar: 2 };\n",
+		"src/a.ts": 'import { obj } from "./o";\nconst { foo } = obj;\nexport const x = foo;\n',
+	});
+
+	await rename(root, { file: "src/a.ts", symbol: "foo", to: "bar" });
+
+	expect(await Bun.file(path.join(root, "src/a.ts")).text()).toBe(
+		'import { obj } from "./o";\nconst { foo: bar } = obj;\nexport const x = bar;\n',
+	);
+});
+
 test("rename rejects overloaded declarations without writing", async () => {
 	const root = await fixture({
 		"tsconfig.json": JSON.stringify({ include: ["src"] }),

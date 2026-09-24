@@ -60,7 +60,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position: positions[0],
 			newName: options.to,
 		});
-		const changes = planWorkspaceEdit(root, edit, keepShorthandPropertyNames(options.symbol));
+		const changes = planWorkspaceEdit(root, edit, keepShorthandPropertyNames(options.symbol, file, positions[0]!));
 		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
 		editingFiles([...changes.keys()], () => {
 			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
@@ -74,23 +74,39 @@ export async function rename(root: string, options: RenameOptions): Promise<void
  * would also change the key of an object literal shorthand such as `{ parseUser }`, while reads of that property
  * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes.
  */
-function keepShorthandPropertyNames(symbol: string): AdjustEdit {
-	const shorthands = new Map<string, Set<number>>();
+function keepShorthandPropertyNames(symbol: string, declarationFile: string, declaration: Position): AdjustEdit {
+	const shorthands = new Map<string, Map<number, string>>();
 	return (file, source, start, end, text) => {
 		if (source.slice(start, end) !== symbol) return text;
-		let starts = shorthands.get(file);
-		if (!starts) {
+		let kinds = shorthands.get(file);
+		if (!kinds) {
 			const lang = scriptLanguage(file);
 			const nodes = lang
 				? parse(lang, source)
 						.root()
-						.findAll({ rule: { kind: "shorthand_property_identifier" } })
+						.findAll({
+							rule: {
+								any: [{ kind: "shorthand_property_identifier" }, { kind: "shorthand_property_identifier_pattern" }],
+							},
+						})
 				: [];
-			starts = new Set(nodes.map((node) => node.range().start.index));
-			shorthands.set(file, starts);
+			kinds = new Map(nodes.map((node) => [node.range().start.index, String(node.kind())]));
+			shorthands.set(file, kinds);
 		}
-		return starts.has(start) ? `${symbol}: ${text}` : text;
+		const kind = kinds.get(start);
+		// In `const { parseUser } = api` the key names a property: it keeps its name when the renamed symbol is
+		// this local binding, and follows the rename when it is the export being read.
+		const renamingBinding =
+			kind === "shorthand_property_identifier_pattern" &&
+			file === declarationFile &&
+			start === offsetOf(source, declaration);
+		return kind === "shorthand_property_identifier" || renamingBinding ? `${symbol}: ${text}` : text;
 	};
+}
+
+function offsetOf(source: string, position: Position): number {
+	const lines = source.split("\n");
+	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character;
 }
 
 export async function renameFile(root: string, options: RenameFileOptions): Promise<void> {
