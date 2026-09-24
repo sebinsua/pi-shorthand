@@ -37,6 +37,12 @@ export async function applySolution(task: Task, root: string): Promise<void> {
 	}
 }
 
+/** A tool installed in this checkout, linked into fixtures rather than downloaded. */
+async function tool(name: string) {
+	const directory = path.resolve(import.meta.dir, "../node_modules", name);
+	return { directory, version: JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")).version };
+}
+
 export async function materializeTask(task: Task, root: string): Promise<void> {
 	await mkdir(root, { recursive: true });
 	for (const [file, content] of Object.entries(task.files)) {
@@ -50,24 +56,26 @@ export async function materializeTask(task: Task, root: string): Promise<void> {
 			include: task.include ?? ["*.ts"],
 		}),
 	);
-	// Provision the same compiler for ordinary shell calls and shorthand programs.
-	// Links reuse the installed toolchain without downloads or copying dependencies.
-	const typescript = path.resolve(import.meta.dir, "../node_modules/typescript");
-	const { version } = JSON.parse(await readFile(path.join(typescript, "package.json"), "utf8"));
+	// Provision the same compiler and formatter for ordinary shell calls and shorthand programs, which formats
+	// the files it changes with the project's formatter. Links reuse the installed toolchain without downloads.
+	const [typescript, oxfmt] = await Promise.all([tool("typescript"), tool("oxfmt")]);
 	await writeFile(
 		path.join(root, "package.json"),
 		JSON.stringify({
 			name: "shorthand-benchmark-fixture",
 			private: true,
 			type: "module",
-			scripts: { check: "tsc --noEmit" },
-			devDependencies: { typescript: version },
+			scripts: { check: "tsc --noEmit", format: "oxfmt" },
+			devDependencies: { typescript: typescript.version, oxfmt: oxfmt.version },
 		}),
 	);
 	await writeFile(path.join(root, ".gitignore"), "node_modules/\n");
+	await writeFile(path.join(root, ".oxfmtrc.json"), "{}\n");
 	await mkdir(path.join(root, "node_modules/.bin"), { recursive: true });
-	await symlink(typescript, path.join(root, "node_modules/typescript"), "dir");
+	await symlink(typescript.directory, path.join(root, "node_modules/typescript"), "dir");
 	await symlink("../typescript/bin/tsc", path.join(root, "node_modules/.bin/tsc"));
+	await symlink(oxfmt.directory, path.join(root, "node_modules/oxfmt"), "dir");
+	await symlink("../oxfmt/bin/oxfmt", path.join(root, "node_modules/.bin/oxfmt"));
 	await $`git init -q`.cwd(root).quiet();
 	await $`git add .`.cwd(root).quiet();
 	await $`git -c user.name=Benchmark -c user.email=benchmark@localhost -c commit.gpgsign=false commit -qm ${task.revision}`

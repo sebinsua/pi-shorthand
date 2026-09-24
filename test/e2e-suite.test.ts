@@ -48,6 +48,19 @@ for (const task of allTasks)
 		expect(stdout).toContain("checks passed");
 	});
 
+for (const task of allTasks)
+	test(`${task.id} accepts its reference solution after the fixture's formatter runs`, async () => {
+		const root = await directory();
+		await materializeTask(task, root);
+		await applySolution(task, root);
+		const changed = Object.entries(task.solution).flatMap(([file, content]) => (content === null ? [] : [file]));
+		const formatted = await $`node_modules/.bin/oxfmt ${changed}`.cwd(root).nothrow().quiet();
+		expect(formatted.exitCode).toBe(0);
+		const child = Bun.spawn(["bun", path.resolve("e2e/tasks.ts"), task.id, root], { stdout: "pipe", stderr: "pipe" });
+		const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+		expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+	});
+
 const evaluatorCases = [
 	{
 		name: "inferred average return type",
