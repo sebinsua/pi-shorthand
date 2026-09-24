@@ -451,6 +451,7 @@ static void syscall_entry(pid_t pid, struct ptrace_syscall_info *info) {
         uint64_t flags = a[0];
         if (nr == SYS_clone3) {
             errno = 0; flags = ptrace(PTRACE_PEEKDATA, pid, (void *)(uintptr_t)a[0], 0);
+            if (errno == ESRCH) return;
             if (errno) die("clone flags unavailable");
         }
         if (flags & CLONE_UNTRACED) die("CLONE_UNTRACED is unsupported");
@@ -473,6 +474,7 @@ static void syscall_entry(pid_t pid, struct ptrace_syscall_info *info) {
         if (a[3] < 24) die("unsupported openat2 argument size");
         errno = 0;
         unsigned long resolve = ptrace(PTRACE_PEEKDATA, pid, (void *)(uintptr_t)(a[2] + 16), 0);
+        if (errno == ESRCH) return;
         if (errno || resolve) die("openat2 resolve modes are unsupported");
         path_access(pid, a[0], a[1], 1, OBSERVE_CONTENTS); break;
     }
@@ -661,18 +663,25 @@ int main(int argc, char **argv) {
         }
         if (!WIFSTOPPED(status)) die("unexpected process state");
         int event = (unsigned)status >> 16, signal = WSTOPSIG(status);
+        /* A stopped thread that SIGKILL or a sibling's exec retires reports ESRCH: its syscall never runs, and
+         * wait reports its death next, so there is nothing to observe and nothing to resume. */
         if (event == PTRACE_EVENT_SECCOMP) {
             struct ptrace_syscall_info info;
-            if (ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info) < 0 || info.op != PTRACE_SYSCALL_INFO_SECCOMP)
+            if (ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info) < 0) {
+                if (errno == ESRCH) continue;
                 die("syscall information unavailable");
+            }
+            if (info.op != PTRACE_SYSCALL_INFO_SECCOMP) die("syscall information unavailable");
             unresolved_external_permission = 0;
             syscall_entry(pid, &info);
             if (unresolved_external_permission) task(pid)->checking_permission = 1;
             signal = 0;
         } else if (signal == (SIGTRAP|0x80) && task(pid)->checking_permission) {
             struct ptrace_syscall_info info;
-            if (ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info) < 0)
+            if (ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info) < 0) {
+                if (errno == ESRCH) continue;
                 die("unresolved external path result unavailable");
+            }
             if (info.op == PTRACE_SYSCALL_INFO_EXIT) {
                 if (info.exit.rval != -EACCES && info.exit.rval != -EPERM)
                     die("unresolved external path was accessed");
