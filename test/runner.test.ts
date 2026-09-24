@@ -2379,6 +2379,26 @@ while (performance.now() - started < 1500) sg.find("call($A)", "src");`,
 		expect(result.helperMs).toBeGreaterThan(1000);
 	});
 
+	test("sg.move updates the imports of a declaration it moves to another file", async () => {
+		const repo = await makeRepo({
+			"src/a.ts": 'import { helper } from "./util";\nexport function moveMe() { return helper(); }\n',
+			"src/util.ts": "export const helper = () => 1;\n",
+			"src/b.ts": 'import { moveMe } from "./a";\nexport const b = moveMe();\n',
+		});
+		const result = await run(
+			repo,
+			`sg.move(sg.one("export function moveMe() { $$$BODY }", "src/a.ts"), { endOf: sg.file("src/lib/moved.ts") });`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "src/lib/moved.ts")).text()).toBe(
+			'import { helper } from "../util";\nexport function moveMe() { return helper(); }\n',
+		);
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(
+			'import { moveMe } from "./lib/moved";\nexport const b = moveMe();\n',
+		);
+	});
+
 	test("sg matches a standalone class method pattern as a method", async () => {
 		const source =
 			"class C {\n  format(x: number): string { return String(x); }\n  other(x: number): string { return String(x); }\n}\n";

@@ -34,6 +34,22 @@ alone. `refactor.renameFile` moves the file and updates imports and exports that
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
 rules, updated paths and failure conditions.
 
+## Move a declaration to another file
+
+`sg.move` a top-level declaration to the top level of another JS/TS file, and imports follow it:
+
+```ts
+sg.move(sg.one("export function parseUser($$$ARGS) { $$$BODY }", "src/api.ts"), {
+	endOf: sg.file("src/users/parse.ts"),
+});
+```
+
+The target imports what the declaration uses, exporting helpers from the source when needed; the
+source imports it back if it still uses it; and files importing it from the source import it from the
+target. Default exports, overloads, namespace imports that use it and dynamic imports of the source are
+refused before anything is written. Imports through `tsconfig` path aliases or package names are not
+updated.
+
 ## Insert before or after a statement
 
 Validate an order immediately before saving it:
@@ -104,8 +120,8 @@ Use repository-relative paths. Changes apply on successful exit by default; the 
 diff, preserves existing UTF-8 BOMs and uniform line endings across write methods, then uses a
 detected project formatter. Counters and console summaries aren't required.
 
-This page covers renames, file moves and call-site migrations. Read
+This page covers renames, file and declaration moves, and call-site migrations. Read
 [advanced-refactors.md](advanced-refactors.md) only to extract code into a new function or file,
-insert, move or remove statements, use GritQL or the native ast-grep API, or edit languages other
+insert, move or remove other statements, use GritQL or the native ast-grep API, or edit languages other
 than JS/TS. The bundled TypeScript 7 package has no legacy compiler API; use the supplied structural
 tools instead.

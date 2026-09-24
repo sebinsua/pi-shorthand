@@ -15,7 +15,7 @@ the file, as well as relative module paths inside the moved file, then performs 
 must exist, the destination must not exist, and both paths must remain inside the repository.
 
 Await each operation; when it resolves, all of its edits are complete. Use `sg.move` below for
-moving syntax between files; it does not repair imports or bindings.
+moving syntax between files; moving a top-level declaration also updates imports (see SKILL.md).
 
 ## Extract existing source
 
@@ -77,7 +77,8 @@ To copy, use `sg.insert(source.text, destination)`. `sg.move(source, destination
 accepts an optional `(text) => string` returning non-empty replacement text.
 
 **Rematch placement targets after each edit**; use array removal for matches from one search. Adjacent comments stay in
-place, and interior whitespace is preserved. Imports and bindings aren't repaired. If placement
+place, and interior whitespace is preserved. Moving a top-level declaration to the top level of another
+file updates imports as described in SKILL.md; other moves leave imports and bindings alone. If placement
 rejects joined statement boundaries, add explicit semicolons.
 
 ## Rule objects

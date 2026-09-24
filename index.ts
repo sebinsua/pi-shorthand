@@ -47,6 +47,7 @@ Common operations:
 - A rewrite callback receives a match and returns text, a native node.replace(text) edit, or null to skip. Return native edits to apply them. Pass selected arrays together for independent edits; select again after changing their file.
 - await refactor.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
 - await refactor.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
+- sg.move(declaration, { endOf: sg.file(path) }) moves a top-level declaration to another file and updates imports that follow it.
 
 See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax, use GritQL or edit other languages. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
 

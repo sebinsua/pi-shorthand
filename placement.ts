@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { editingFiles } from "./file-outcomes.ts";
+import { planImports } from "./move-imports.ts";
 
 export interface Match {
 	file: string;
@@ -309,11 +310,33 @@ function insertNodes(text: string, destination: Destination): void {
 	apply([{ saved, edits: [edit] }]);
 }
 
-export function move(match: Match, destination: Destination, transform?: (text: string) => string): void {
-	return editingFiles([match.file, ...destinationFiles(destination)], () => moveNodes(match, destination, transform));
+export interface MoveOptions {
+	/** JS/TS files that may mention any of the names; those importing a moved declaration are updated. */
+	filesMentioning?: (names: string[]) => string[];
 }
 
-function moveNodes(match: Match, destination: Destination, transform?: (text: string) => string): void {
+/**
+ * Moves a statement. Moving a top-level declaration to the top level of another file also updates imports:
+ * the target imports what the declaration uses, the source imports it back if still needed, and files
+ * importing it from the source import it from the target.
+ */
+export function move(
+	match: Match,
+	destination: Destination,
+	transform?: (text: string) => string,
+	options: MoveOptions = {},
+): void {
+	return editingFiles([match.file, ...destinationFiles(destination)], () =>
+		moveNodes(match, destination, transform, options),
+	);
+}
+
+function moveNodes(
+	match: Match,
+	destination: Destination,
+	transform: ((text: string) => string) | undefined,
+	options: MoveOptions,
+): void {
 	const source = snapshot(match);
 	const deletion = removal(source);
 	const text = transform ? transform(source.node.text()) : source.node.text();
@@ -332,10 +355,45 @@ function moveNodes(match: Match, destination: Destination, transform?: (text: st
 		}
 		apply([{ saved: source, edits: [deletion, target.edit] }]);
 	} else {
-		apply([
-			{ saved: source, edits: [deletion] },
-			{ saved: target.saved, edits: [target.edit] },
-		]);
+		const sourceRoot = source.node.getRoot().root();
+		const targetRoot = target.saved.node.getRoot().root();
+		const plan =
+			source.node.parent()?.kind() === "program" && target.edit.parent.kind() === "program"
+				? planImports({
+						sourceFile: source.file,
+						node: source.node,
+						movedText: text,
+						targetFile: target.saved.file,
+						targetRoot,
+						filesMentioning: options.filesMentioning ?? (() => []),
+					})
+				: null;
+		const placed = { ...target.edit };
+		const targetEdits: Edit[] = [];
+		for (const edit of plan?.target ?? []) {
+			// Edits at the declaration's insertion point are combined with it: imports inserted there come
+			// first, and a rewritten statement starting there follows it.
+			if (placed.start === placed.end && edit.start === placed.start) {
+				placed.text = edit.start === edit.end ? edit.text + placed.text : placed.text + edit.text;
+				placed.end = edit.end;
+			} else targetEdits.push({ ...edit, parent: targetRoot });
+		}
+		const importers = plan?.importers ?? [];
+		editingFiles(
+			importers.map((importer) => importer.file),
+			() =>
+				apply([
+					{
+						saved: source,
+						edits: [deletion, ...(plan?.source ?? []).map((edit) => ({ ...edit, parent: sourceRoot }))],
+					},
+					{ saved: target.saved, edits: [placed, ...targetEdits] },
+					...importers.map((importer) => ({
+						saved: { file: importer.file, source: importer.source, existed: true, node: importer.root },
+						edits: importer.edits.map((edit) => ({ ...edit, parent: importer.root })),
+					})),
+				]),
+		);
 	}
 }
 

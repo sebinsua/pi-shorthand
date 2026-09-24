@@ -288,6 +288,38 @@ function selectScope(helper: string, inputs: (string | FileTarget)[], select: (i
 	];
 }
 
+/** JS/TS files Git sees that contain any of these names as a word, for updating their imports. */
+function filesMentioning(names: string[]): string[] {
+	if (!names.length) return [];
+	const output = git(
+		[
+			"-C",
+			repositoryRoot,
+			"grep",
+			"-l",
+			"-z",
+			"-w",
+			"-F",
+			"--untracked",
+			...names.flatMap((name) => ["-e", name]),
+			"--",
+			"*.ts",
+			"*.tsx",
+			"*.mts",
+			"*.cts",
+			"*.js",
+			"*.jsx",
+			"*.mjs",
+			"*.cjs",
+		],
+		[1],
+	);
+	return output
+		.split("\0")
+		.filter(Boolean)
+		.map((file) => resolve(repositoryRoot, file));
+}
+
 /** A scope for a warning: short scopes in full, long ones as a count and the first few paths. */
 function describeScope(scope: FileScope): string {
 	const paths = (Array.isArray(scope) ? scope : [scope]).map((entry) =>
@@ -703,7 +735,7 @@ const globals = {
 		move: (...args: Parameters<typeof move>) => {
 			const [match, destination, transform] = args;
 			const own = transform && ((text: string) => programCode(() => transform(text)));
-			return logged("sg.move", args, () => move(match, destination, own));
+			return logged("sg.move", args, () => move(match, destination, own, { filesMentioning }));
 		},
 		remove: (...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args)),
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
