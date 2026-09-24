@@ -94,17 +94,20 @@ static void capture(const char *file, char kind) {
     if (*relative == '/') relative++;
     request(kind, *relative ? relative : ".", "");
 }
-static void trace_string(pid_t pid, uint64_t address, char result[PATH_MAX]) {
+/* Returns 0 when the stopped thread is gone (ESRCH): SIGKILL or a sibling's exec retired it, so the syscall it
+ * stopped in never executes and there is nothing to observe. */
+static int trace_string(pid_t pid, uint64_t address, char result[PATH_MAX]) {
     for (size_t offset = 0; offset < PATH_MAX;) {
         uintptr_t location = address + offset;
         size_t skip = location % sizeof(long);
         errno = 0;
         long word = ptrace(PTRACE_PEEKDATA, pid, (void *)(location - skip), 0);
+        if (errno == ESRCH) return 0;
         if (errno) die("cannot inspect syscall path");
         size_t count = sizeof(word) - skip;
         if (count > PATH_MAX - offset) count = PATH_MAX - offset;
         memcpy(result + offset, (char *)&word + skip, count);
-        if (memchr((char *)&word + skip, 0, count)) return;
+        if (memchr((char *)&word + skip, 0, count)) return 1;
         offset += count;
     }
     die("overlong syscall path");
@@ -267,8 +270,7 @@ static void resolve_name(pid_t pid, int fd, const char *input, int follow, char 
 }
 static void resolve_path(pid_t pid, int fd, uint64_t address, int follow, char result[PATH_MAX]) {
     char input[PATH_MAX];
-    if (!address) { result[0] = 0; return; }
-    trace_string(pid, address, input);
+    if (!address || !trace_string(pid, address, input)) { result[0] = 0; return; }
     resolve_name(pid, fd, input, follow, result);
 }
 
