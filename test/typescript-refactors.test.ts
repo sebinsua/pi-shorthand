@@ -1,10 +1,13 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { MessageConnection } from "vscode-jsonrpc/node";
 import { withTypeScriptServer } from "../lsp-client.ts";
 import { rename, renameFile } from "../typescript-refactors.ts";
+
+// Each test starts a TypeScript language server, which can take seconds on a cold or slow machine.
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 afterEach(async () => {
