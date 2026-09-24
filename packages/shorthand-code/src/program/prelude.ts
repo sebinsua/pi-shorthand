@@ -166,7 +166,8 @@ function git(args: string[], allowedExitCodes: number[] = []): string {
 	const result = Bun.spawnSync(["git", ...args], { env: process.env });
 	if (result.exitCode !== 0 && !allowedExitCodes.includes(result.exitCode)) {
 		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
-		throw new Error(`git ${args[0]} failed (exit ${result.exitCode}): ${diagnostic || "no diagnostics"}`);
+		const command = args[0] === "-C" ? args[2] : args[0]; // named after the subcommand, not its directory
+		throw new Error(`git ${command} failed (exit ${result.exitCode}): ${diagnostic || "no diagnostics"}`);
 	}
 	return result.stdout.toString();
 }
@@ -185,9 +186,22 @@ function gitPath(input: string): string {
 	return normalized;
 }
 
-/** Tracked or non-ignored untracked files, as Git lists them, relative to the repository root. */
+/**
+ * Tracked or non-ignored untracked files, as Git lists them, relative to the repository root. The pathspec is
+ * repository-relative too, so Git runs from the root even after the program changes directory.
+ */
 function listGitFiles(pathspec = "."): string[] {
-	const output = git(["ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard", "--", pathspec]);
+	const output = git([
+		"-C",
+		repositoryRoot,
+		"ls-files",
+		"-z",
+		"--cached",
+		"--others",
+		"--exclude-standard",
+		"--",
+		pathspec,
+	]);
 	return [...new Set(output.split("\0"))].filter(Boolean);
 }
 
@@ -356,7 +370,9 @@ function sourceFiles(helper: string, files: FileScope): string[] {
 			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
 	);
 	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${describeScope(files)}`);
-	return parseable;
+	// Named from the program's working directory, like every other path it reads and writes, so a program that
+	// changes directory still reads, writes and reports the file it selected. At the root this is the path itself.
+	return parseable.map((file) => relative(process.cwd(), resolve(repositoryRoot, file)));
 }
 
 /**
@@ -522,7 +538,7 @@ const rewriteOutputs = new Map<string, { text: string; ranges: [number, number][
 function recordRewriteOutput(file: string, before: string, after: string, all: readonly Edit[]): void {
 	// A replacement identical to what it replaced produced nothing, so later rewrites may still match there.
 	const edits = all.filter((edit) => edit.insertedText !== before.slice(edit.startPos, edit.endPos));
-	const key = resolve(repositoryRoot, file);
+	const key = resolve(file);
 	const previous = rewriteOutputs.get(key);
 	const ranges: [number, number][] = [];
 	let shift = 0;
@@ -543,7 +559,7 @@ function recordRewriteOutput(file: string, before: string, after: string, all: r
 
 /** Pattern matches that lie inside text an earlier sg.rewrite produced in this file, which is still unchanged. */
 function insideEarlierOutput(file: string, source: string, matches: readonly SgMatch[]): Set<SgMatch> {
-	const recorded = rewriteOutputs.get(resolve(repositoryRoot, file));
+	const recorded = rewriteOutputs.get(resolve(file));
 	if (!recorded || recorded.text !== source) return new Set();
 	return new Set(
 		matches.filter((match) => {
@@ -611,7 +627,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		explainedSkips = true;
 		const example = skipped[0]!;
 		console.error(
-			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(resolve(repositoryRoot, example.file))}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite.`,
+			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(example.file)}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite.`,
 		);
 	}
 	return count;

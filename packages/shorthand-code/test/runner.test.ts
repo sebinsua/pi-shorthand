@@ -2217,6 +2217,32 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("newApi(1);\nnewApi(2);\nkeepApi(3);\n");
 	});
 
+	test("sg resolves scopes from a subdirectory without doubling the directory", async () => {
+		const repo = await makeRepo({
+			"src/a.ts": "one(1);\ntwo(1);\n",
+			"src/b.ts": "three(2);\nfour(2);\n",
+			"src/src/a.ts": "one(99);\ntwo(99);\nthree(99);\n",
+			"outside.ts": "one(3);\nfour(3);\n",
+		});
+		const result = await run(
+			repo,
+			`
+			process.chdir("src");
+			sg.rewrite("one($X)", "explicit($X)", "a.ts");
+			sg.rewrite("two($X)", "targeted($X)", sg.file("a.ts"));
+			sg.rewrite("three($X)", "globbed($X)", "*.ts");
+			sg.rewrite("four($X)", "directory($X)", ".");
+			console.log(sg.one("explicit($X)", "a.ts").file);
+		`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output.trim()).toBe("a.ts");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("explicit(1);\ntargeted(1);\n");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe("globbed(2);\ndirectory(2);\n");
+		expect(await Bun.file(path.join(repo, "src/src/a.ts")).text()).toBe("one(99);\ntwo(99);\nthree(99);\n");
+		expect(await Bun.file(path.join(repo, "outside.ts")).text()).toBe("one(3);\nfour(3);\n");
+	});
+
 	test("a failure after importing TypeScript 7 explains that the classic compiler API is gone", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(
