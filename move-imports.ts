@@ -141,6 +141,12 @@ function moduleName(statement: SgNode): string | undefined {
 	return source?.text().slice(1, -1);
 }
 
+/** A statement's import attributes, such as ` with { type: "json" }`, which must survive any rewrite of it. */
+function attributesOf(statement: SgNode): string {
+	const attributes = statement.children().find((child) => child.kind() === "import_attribute");
+	return attributes ? ` ${attributes.text()}` : "";
+}
+
 function quoteOf(statement: SgNode): string {
 	return statement.field("source")?.text()[0] ?? '"';
 }
@@ -296,7 +302,8 @@ function specifierFor(from: string, to: string, style: Style): string {
 	let path = relative(dirname(canonical(from)), canonical(to)).replaceAll("\\", "/");
 	if (!path.startsWith(".")) path = `./${path}`;
 	const extension = extname(to);
-	if (style === "ts") return path;
+	// Only scripts resolve without their extension; JSON, stylesheets and other assets keep it.
+	if (style === "ts" || !EXTENSIONS.includes(extension)) return path;
 	const stem = path.slice(0, -extension.length);
 	return style === "js" ? stem + (JS_FOR_SOURCE[extension] ?? extension) : stem;
 }
@@ -355,17 +362,21 @@ function importStatement(
 	specifiers: { text: string; typeOnly: boolean }[],
 	module: string,
 	quote: string,
+	attributes = "",
 ): string {
 	const allTypes = specifiers.every((specifier) => specifier.typeOnly);
 	const texts = specifiers.map((specifier) => {
 		const bare = specifier.text.replace(/^type\s+/, "");
 		return !allTypes && specifier.typeOnly ? `type ${bare}` : bare;
 	});
-	return `${keyword} ${namedClause(texts, allTypes)} from ${quote}${module}${quote};`;
+	return `${keyword} ${namedClause(texts, allTypes)} from ${quote}${module}${quote}${attributes};`;
 }
 
-/** Rebuild an import or re-export without some named specifiers; empty when nothing is left. */
-function withoutSpecifiers(statement: SgNode, remove: Set<string>): string {
+/**
+ * Rebuild an import or re-export without the bindings `drop` picks by imported and local name (a default or
+ * namespace import has no imported name); empty when nothing is left.
+ */
+function withoutSpecifiers(statement: SgNode, drop: (imported: string, local: string) => boolean): string {
 	const keyword = statement.kind() === "import_statement" ? "import" : "export";
 	const allTypes = typeOnlyStatement(statement);
 	const clause = statement
@@ -374,17 +385,20 @@ function withoutSpecifiers(statement: SgNode, remove: Set<string>): string {
 	const parts: string[] = [];
 	const named: string[] = [];
 	const collect = (list: SgNode) => {
-		for (const specifier of list.namedChildren())
-			if (!remove.has(specifier.field("name")!.text())) named.push(specifier.text());
+		for (const specifier of list.namedChildren()) {
+			const imported = specifier.field("name")!.text();
+			if (!drop(imported, (specifier.field("alias") ?? specifier.field("name"))!.text())) named.push(specifier.text());
+		}
 	};
 	if (clause?.kind() === "export_clause") collect(clause);
 	for (const part of clause?.kind() === "import_clause" ? clause.namedChildren() : []) {
 		if (part.kind() === "named_imports") collect(part);
-		else parts.push(part.text());
+		else if (!drop("", part.kind() === "namespace_import" ? part.namedChildren().at(-1)!.text() : part.text()))
+			parts.push(part.text());
 	}
 	if (named.length) parts.push(`{ ${named.join(", ")} }`);
 	if (!parts.length) return "";
-	return `${keyword} ${allTypes ? "type " : ""}${parts.join(", ")} from ${statement.field("source")!.text()};`;
+	return `${keyword} ${allTypes ? "type " : ""}${parts.join(", ")} from ${statement.field("source")!.text()}${attributesOf(statement)};`;
 }
 
 /** Where new imports go: after the last import, or at the start after a shebang and directives. */
@@ -431,11 +445,21 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	const target = topLevel(targetRoot);
 	const sourceEdits: TextEdit[] = [];
 	const targetEdits: TextEdit[] = [];
-	const targetImports = new Map<string, { quote: string; specifiers: { text: string; typeOnly: boolean }[] }>();
-	const addTargetImport = (module: string, quote: string, specifier: { text: string; typeOnly: boolean }) => {
-		const entry = targetImports.get(module) ?? { quote, specifiers: [] };
+	// Keyed by module and attributes: the same module imported with and without attributes are distinct imports.
+	const targetImports = new Map<
+		string,
+		{ module: string; attributes: string; quote: string; specifiers: { text: string; typeOnly: boolean }[] }
+	>();
+	const addTargetImport = (
+		module: string,
+		quote: string,
+		specifier: { text: string; typeOnly: boolean },
+		attributes = "",
+	) => {
+		const key = `${module}\0${attributes}`;
+		const entry = targetImports.get(key) ?? { module, attributes, quote, specifiers: [] };
 		entry.specifiers.push(specifier);
-		targetImports.set(module, entry);
+		targetImports.set(key, entry);
 	};
 	const targetLines: string[] = [];
 	const style = (root: SgNode, fallback: SgNode) => {
@@ -460,7 +484,11 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	}
 	for (const [statement, removed] of nowLocal) {
 		const { start, end } = statement.range();
-		targetEdits.push({ start: start.index, end: end.index, text: withoutSpecifiers(statement, removed) });
+		targetEdits.push({
+			start: start.index,
+			end: end.index,
+			text: withoutSpecifiers(statement, (imported) => removed.has(imported)),
+		});
 	}
 
 	// Dependencies: copy the source's imports, and import (exporting if needed) the source's own declarations.
@@ -491,8 +519,13 @@ export function planImports(input: MoveInput): ImportPlan | null {
 					? specifierFor(targetFile, resolved, styleOf(binding.module))
 					: binding.module;
 			const quote = quoteOf(binding.statement);
-			if (binding.kind === "named") addTargetImport(module, quote, { text: binding.text, typeOnly: binding.typeOnly });
-			else targetLines.push(`import ${binding.typeOnly ? "type " : ""}${binding.text} from ${quote}${module}${quote};`);
+			const attributes = attributesOf(binding.statement);
+			if (binding.kind === "named")
+				addTargetImport(module, quote, { text: binding.text, typeOnly: binding.typeOnly }, attributes);
+			else
+				targetLines.push(
+					`import ${binding.typeOnly ? "type " : ""}${binding.text} from ${quote}${module}${quote}${attributes};`,
+				);
 		} else if (local) {
 			if (existing || target.declarations.has(name)) {
 				if (existing?.kind === "named" && existing.imported === name && importedFromSource(existing)) continue;
@@ -512,16 +545,33 @@ export function planImports(input: MoveInput): ImportPlan | null {
 		const module = specifierFor(targetFile, sourceFile, style(targetRoot, sourceRoot));
 		for (const specifier of fromSource) addTargetImport(module, '"', specifier);
 	}
-	for (const [module, { quote, specifiers }] of targetImports)
-		targetLines.push(importStatement("import", specifiers, module, quote));
+	for (const { module, attributes, quote, specifiers } of targetImports.values())
+		targetLines.push(importStatement("import", specifiers, module, quote, attributes));
 	if (targetLines.length) targetEdits.push(importInsertion(targetRoot, targetText, targetLines));
+
+	// Imports only the declaration used leave with it; a statement left with no bindings goes with its line.
+	const sourceNewline = sourceText.includes("\r\n") ? "\r\n" : "\n";
+	const unused = input.analysis.importsOnlyItUses;
+	for (const statement of new Set(
+		sourceBindings.filter((binding) => unused.has(binding.local)).map((binding) => binding.statement),
+	)) {
+		const { start, end } = statement.range();
+		const text = withoutSpecifiers(statement, (_, local) => unused.has(local));
+		const lineEnd = sourceText.startsWith(sourceNewline, end.index) ? end.index + sourceNewline.length : end.index;
+		sourceEdits.push({ start: start.index, end: text ? end.index : lineEnd, text });
+	}
 
 	// The source imports the declaration back if code left there still uses it.
 	const stillUsed = input.analysis.usedInSource;
 	if (stillUsed) {
 		const module = specifierFor(sourceFile, targetFile, style(sourceRoot, targetRoot));
 		const specifiers = moved.names.map((name) => ({ text: name, typeOnly: moved.types.has(name) }));
-		sourceEdits.push(importInsertion(sourceRoot, sourceText, [importStatement("import", specifiers, module, '"')]));
+		const insertion = importInsertion(sourceRoot, sourceText, [importStatement("import", specifiers, module, '"')]);
+		// Inserted after the last import: if that import is being rewritten, the new line joins its replacement.
+		const rewritten = sourceEdits.find((edit) => edit.start < insertion.start && insertion.start <= edit.end);
+		if (!rewritten) sourceEdits.push(insertion);
+		else if (rewritten.text) rewritten.text += insertion.text;
+		else rewritten.text = insertion.text.slice(sourceNewline.length) + sourceNewline;
 	}
 
 	// Importers of an exported declaration are repointed at the target. A module loaded with import() or
@@ -595,7 +645,9 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				edits.push({
 					start: start.index,
 					end: end.index,
-					text: withoutSpecifiers(statement, new Set(specifiers.map((specifier) => specifier.field("name")!.text()))),
+					text: withoutSpecifiers(statement, (imported) =>
+						specifiers.some((specifier) => specifier.field("name")!.text() === imported),
+					),
 				});
 			}
 			if (!targetModule || (!imports.length && !reexports.length)) continue;

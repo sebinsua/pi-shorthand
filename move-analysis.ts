@@ -11,6 +11,8 @@ import { getTouchingPropertyName, SyntaxKind, type Node, type SourceFile } from 
 export interface MoveAnalysis {
 	/** Names the declaration refers to that are bound outside it: imports, the file's other declarations and globals. */
 	dependencies: Set<string>;
+	/** Local names of the source file's imports that nothing but the declaration uses, so they leave with it. */
+	importsOnlyItUses: Set<string>;
 	/** Code left in the source file still refers to the declaration. */
 	usedInSource: boolean;
 	/** Other files that refer to the declaration, by importing or re-exporting it. */
@@ -54,7 +56,7 @@ export async function analyzeMove({ root, file, node, names, files }: MoveAnalys
 		for (const project of snapshot.getProjects())
 			if (await project.program.getSourceFile(file).catch(() => undefined)) projects.push(project);
 		return {
-			dependencies: await dependencies(home, sourceFile, node),
+			...(await dependencies(home, sourceFile, node)),
 			...(await references(projects, sourceFile, node, names)),
 		};
 	} finally {
@@ -62,9 +64,24 @@ export async function analyzeMove({ root, file, node, names, files }: MoveAnalys
 	}
 }
 
-/** Names in `node` whose symbol is declared outside it, or that resolve to nothing. */
-async function dependencies(project: Project, sourceFile: SourceFile, node: SgNode): Promise<Set<string>> {
+/**
+ * Names in `node` whose symbol is declared outside it, or that resolve to nothing; and of those, the source
+ * file's imports that nothing outside `node` uses.
+ */
+async function dependencies(
+	project: Project,
+	sourceFile: SourceFile,
+	node: SgNode,
+): Promise<Pick<MoveAnalysis, "dependencies" | "importsOnlyItUses">> {
 	const { start, end } = node.range();
+	const inside = (reference: Node) => reference.getStart(sourceFile) >= start.index && reference.end <= end.index;
+	const onlyUsedInside = async (symbol: Symbol) => {
+		for (const handle of await project.checker.getReferencesToSymbolInFile(sourceFile.fileName, symbol)) {
+			const reference = await handle.resolve(project);
+			if (reference && !inside(reference) && !withinImport(reference)) return false;
+		}
+		return true;
+	};
 	const within = async (symbol: Symbol) => {
 		if (!symbol.declarations.length) return false;
 		for (const declaration of symbol.declarations) {
@@ -80,6 +97,7 @@ async function dependencies(project: Project, sourceFile: SourceFile, node: SgNo
 		identifiers.map((identifier) => identifier.range().start.index),
 	);
 	const names = new Set<string>();
+	const importsOnlyItUses = new Set<string>();
 	for (const [index, identifier] of identifiers.entries()) {
 		const name = identifier.text();
 		if (names.has(name)) continue;
@@ -92,9 +110,23 @@ async function dependencies(project: Project, sourceFile: SourceFile, node: SgNo
 						getTouchingPropertyName(sourceFile, identifier.range().start.index),
 					)
 				: symbols[index];
-		if (!symbol || !(await within(symbol))) names.add(name);
+		if (symbol && (await within(symbol))) continue;
+		names.add(name);
+		const imported =
+			symbol &&
+			symbol.flags & SymbolFlags.Alias &&
+			symbol.declarations.every((declaration) => declaration.path === sourceFile.path);
+		if (imported && (await onlyUsedInside(symbol))) importsOnlyItUses.add(name);
 	}
-	return names;
+	return { dependencies: names, importsOnlyItUses };
+}
+
+/** A node inside an import declaration, such as the binding an import introduces. */
+function withinImport(node: Node): boolean {
+	for (let current: Node | undefined = node; current; current = current.parent)
+		if (current.kind === SyntaxKind.ImportDeclaration || current.kind === SyntaxKind.ImportEqualsDeclaration)
+			return true;
+	return false;
 }
 
 async function references(

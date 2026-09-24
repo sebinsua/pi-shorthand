@@ -7,8 +7,9 @@ session, checks the result independently, and keeps evidence for human review.
 
 Latest single run per cell: `openai-codex/gpt-5.6-sol`, high reasoning, `baseline` against `code` with the
 skill. Fixtures include `oxfmt`, which shorthand runs on the files it changes; the `options-migration` row at
-10 files is the only one run since. Every run verified with zero drift. Repeat runs of one task have differed by up to 92s, so small gaps
-are noise.
+10 files and `move-declaration` are the only ones run since. Every run verified with zero drift except stock `move-declaration`, which
+repointed the `src/utils` barrel's importers instead of re-exporting the moved function from it. Repeat runs of
+one task have differed by up to 92s, so small gaps are noise.
 
 | Task                    | Prompt  | Files |   Stock | Shorthand |
 | ----------------------- | ------- | ----: | ------: | --------: |
@@ -18,6 +19,7 @@ are noise.
 | `options-migration`     | outcome |   100 |    140s |  **107s** |
 | `move-module`           | brief   |   100 |     87s |   **52s** |
 | `move-module`           | outcome |   100 |     57s |   **47s** |
+| `move-declaration`      | outcome |    40 |  failed |   **39s** |
 | `logger-migration`      | brief   |   100 | **60s** |       79s |
 | `logger-migration`      | outcome |   100 |    115s |   **79s** |
 | `rename-symbol`         | brief   |    10 |     76s |   **35s** |
@@ -141,7 +143,8 @@ snippet and workflow guidelines. `minimal` wraps registration with an API-only d
 guidelines; it preserves implementation and parameter schema. It does not modify the shipped extension.
 
 `--skills none|shorthand` also accepts a list. `shorthand` explicitly makes the existing skill available; it does
-not force the model to read it. The baseline always appears once, without shorthand documentation or skill.
+not force the model to read it. The baseline runs only when `--setups` includes `baseline`, and then once,
+without shorthand documentation or skill.
 Other conditions are the product of setup, revision, documentation, and skill choices. Their order rotates on
 each repetition. With two conditions this alternates the order; a full cycle requires as many repetitions as
 conditions. Keep the initial matrix small.

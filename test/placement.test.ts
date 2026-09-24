@@ -104,6 +104,12 @@ test("remove preserves adjacent comments", () => {
 	expect(statements(path)).toEqual(["// keep this", "// and this", "b();"]);
 });
 
+test("a statement on lines of its own is removed with its line, indentation and all", () => {
+	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
+	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);
+	expect(readFileSync(path, "utf8")).toBe("function f() {\n\ta();\n}\nsecond(); \r\n");
+});
+
 test("batch removal groups multiple matches in each file", () => {
 	const first = fixture("// keep\na();\nb();\nc();\n");
 	const second = fixture("a();\nb();\n");

@@ -125,10 +125,17 @@ interface Edit {
 	text: string;
 }
 
+/** Removes a statement, and the line break after it when it has whole lines to itself. */
 function removal(saved: Snapshot): Edit {
 	statement(saved.node);
 	const { start, end } = saved.node.range();
-	return { parent: saved.node.parent()!, start: start.index, end: end.index, text: "" };
+	const { source } = saved;
+	const lineStart = source.lastIndexOf("\n", start.index - 1) + 1;
+	const newline = source.startsWith("\r\n", end.index) ? 2 : source.startsWith("\n", end.index) ? 1 : 0;
+	const wholeLines = !source.slice(lineStart, start.index).trim() && newline > 0;
+	return wholeLines
+		? { parent: saved.node.parent()!, start: lineStart, end: end.index + newline, text: "" }
+		: { parent: saved.node.parent()!, start: start.index, end: end.index, text: "" };
 }
 
 function placement(text: string, destination: Destination) {

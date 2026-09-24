@@ -378,6 +378,71 @@ test("specifiers are relative to the real files when the repository is reached t
 	await typeCheck(real);
 });
 
+test("imports only the moved declaration used leave the source with it", async () => {
+	const root = project({
+		"src/locale.ts": 'export const LOCALE = "en";\nexport const REGION = "GB";\n',
+		"src/util.ts": "export const helper = (n: number) => n + 1;\n",
+		"src/types.ts": "export type Shape = { kind: string };\n",
+		"src/a.ts": [
+			'import { LOCALE, REGION } from "./locale";',
+			'import { helper } from "./util";',
+			'import type { Shape } from "./types";',
+			"",
+			"export function moveMe(s: Shape) {",
+			"\treturn LOCALE + helper(1) + s.kind;",
+			"}",
+			"export const region = REGION;",
+			"export function other() {",
+			"\tconst helper = 2;",
+			"\treturn helper;",
+			"}",
+			'export const keep = moveMe({ kind: "k" });',
+			"",
+		].join("\n"),
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), everyFile(root));
+
+	expect(read(root, "src/a.ts")).toBe(
+		[
+			'import { REGION } from "./locale";',
+			'import { moveMe } from "./moved";',
+			"",
+			"export const region = REGION;",
+			"export function other() {",
+			"\tconst helper = 2;",
+			"\treturn helper;",
+			"}",
+			'export const keep = moveMe({ kind: "k" });',
+			"",
+		].join("\n"),
+	);
+	await typeCheck(root);
+});
+
+test("import attributes survive in the source and are copied with the imports the target needs", async () => {
+	const root = project({
+		"src/data.json": '{ "a": 1, "b": 2 }\n',
+		"src/a.ts": [
+			'import data, { a } from "./data.json" with { type: "json" };',
+			"export function moveMe() {",
+			"\treturn a;",
+			"}",
+			"export const b = data.b;",
+			"",
+		].join("\n"),
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), everyFile(root));
+
+	expect(read(root, "src/a.ts")).toBe(
+		'import data from "./data.json" with { type: "json" };\nexport const b = data.b;\n',
+	);
+	expect(read(root, "src/moved.ts")).toBe(
+		'import { a } from "./data.json" with { type: "json" };\nexport function moveMe() {\n\treturn a;\n}\n',
+	);
+});
+
 test("moving works without a tsconfig", async () => {
 	const root = project({
 		"src/a.ts": "export function moveMe() { return 1; }\n",
