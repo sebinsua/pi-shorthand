@@ -2309,41 +2309,56 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		]);
 	});
 
-	test("sg.rewrite warns when it matches what an earlier rewrite produced", async () => {
+	test("sg.rewrite by pattern skips what an earlier rewrite produced, whatever the order", async () => {
 		const source =
 			'export const mascot = "😀"; request("/a", undefined, 750);\nrequest("/b", 3);\nrequest("/c", 2, 500);\n';
+		const migrated =
+			'export const mascot = "😀"; request("/a", { timeoutMs: 750 });\nrequest("/b", { retries: 3 });\nrequest("/c", { retries: 2, timeoutMs: 500 });\n';
 		const cases = [
-			// The benchmark's order: the new two-argument call is rewritten again.
+			// The benchmark's order: without skipping, the new two-argument calls would be rewritten again.
 			{
 				program: THREE_THEN_TWO,
-				warns:
-					/matched 2 places that an earlier sg\.rewrite produced, e\.g\. src\/a\.ts:1 request\("\/a", \{ timeoutMs: 750 \}\)/,
+				skips:
+					/skipped 2 places inside text an earlier sg\.rewrite produced, e\.g\. src\/a\.ts:1 request\("\/a", \{ timeoutMs: 750 \}\)\. Rewrites apply one after another/,
+				result: migrated,
 			},
 			// Two-argument calls first: later patterns cannot match earlier output.
-			{ program: TWO_THEN_THREE, warns: null },
-			// Wrapping earlier output in a larger node is intended.
-			{ program: `${TWO_THEN_THREE}\nsg.rewrite("request($$$ARGS);", "void request($$$ARGS);", "src");`, warns: null },
+			{ program: TWO_THEN_THREE, skips: null, result: migrated },
+			// Wrapping earlier output in a larger node is intended and still applies.
+			{
+				program: `${TWO_THEN_THREE}\nsg.rewrite("request($$$ARGS);", "void request($$$ARGS);", "src");`,
+				skips: null,
+				result: migrated.replaceAll("request(", "void request("),
+			},
 		];
-		for (const { program, warns } of cases) {
+		for (const { program, skips, result: expected } of cases) {
 			const repo = await makeRepo({ "src/a.ts": source });
 			const result = await run(repo, program);
 			expect(result.exitCode).toBe(0);
-			if (warns) expect(result.output).toMatch(warns);
+			if (skips) expect(result.output).toMatch(skips);
 			else expect(result.output).not.toContain("earlier sg.rewrite produced");
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(expected);
 		}
 	});
 
-	test("sg.rewrite follows earlier output through later edits to the same file", async () => {
+	test("sg.rewrite follows earlier output through later edits, and a selection still rewrites it", async () => {
 		const repo = await makeRepo({ "src/a.ts": 'const m = "😀"; old(1);\nkeep(2);\nold(3);\n' });
 		const result = await run(
 			repo,
 			`sg.rewrite("old($A)", "next($A, { from: $A })", "src");
 sg.rewrite("keep($A)", "kept($A, $A, $A)", "src");
-sg.rewrite("next($A, $B)", "last($A)", "src");`,
+sg.rewrite("next($A, $B)", "last($A)", "src");
+sg.rewrite("next($A, $B)", "again($A)", "src");
+console.log("selected", sg.rewrite(sg.find("next($A, $B)", "src"), "last($A)"));`,
 		);
 
 		expect(result.output).toMatch(
-			/matched 2 places that an earlier sg\.rewrite produced, e\.g\. src\/a\.ts:1 next\(1, \{ from: 1 \}\)/,
+			/skipped 2 places inside text an earlier sg\.rewrite produced, e\.g\. src\/a\.ts:1 next\(1, \{ from: 1 \}\)/,
+		);
+		expect(result.output).toContain("selected 2");
+		expect(result.output.match(/earlier sg\.rewrite produced/g)).toHaveLength(1);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
+			'const m = "😀"; last(1);\nkept(2, 2, 2);\nlast(3);\n',
 		);
 	});
 

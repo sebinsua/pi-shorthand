@@ -430,11 +430,7 @@ type RewriteArgs =
 	| [pattern: string | NapiConfig, replacement: Replacement, files?: FileScope]
 	| [matches: SgMatch | readonly SgMatch[], replacement: Replacement];
 
-/**
- * `patterned`: the matches come from a pattern, not a selection the program made, so matching an earlier
- * rewrite's output is probably unintended.
- */
-function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, file: string, patterned = false): number {
+function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, file: string): number {
 	const edits: Edit[] = [];
 	let count = 0;
 	for (const match of matches) {
@@ -463,7 +459,6 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 	const sources = new Map<string, string | null>();
 	for (const match of matches) getMatchSnapshot(match, sources, rewriteStaleAdvice);
 	const source = matches[0].node.getRoot().root().text();
-	if (patterned) warnAboutRematchedOutput(file, source, matches);
 	const output = matches[0].node.getRoot().root().commitEdits(edits);
 	recordRewriteOutput(file, source, output, ordered);
 	writeFileSync(file, output);
@@ -473,6 +468,8 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 // Where earlier sg.rewrite calls put their replacements, per file, while the file still holds exactly what
 // the last rewrite wrote. Rewrites apply one after another, so a later pattern can match an earlier result:
 // rewriting request(u, undefined, t) to request(u, { timeoutMs: t }) creates a new two-argument call.
+// Pattern rewrites skip such places; selections the program makes itself are always rewritten.
+let explainedSkips = false;
 const rewriteOutputs = new Map<string, { text: string; ranges: [number, number][] }>();
 
 function recordRewriteOutput(file: string, before: string, after: string, edits: readonly Edit[]): void {
@@ -495,17 +492,15 @@ function recordRewriteOutput(file: string, before: string, after: string, edits:
 	rewriteOutputs.set(key, { text: after, ranges });
 }
 
-function warnAboutRematchedOutput(file: string, source: string, matches: readonly SgMatch[]): void {
+/** Pattern matches that lie inside text an earlier sg.rewrite produced in this file, which is still unchanged. */
+function insideEarlierOutput(file: string, source: string, matches: readonly SgMatch[]): Set<SgMatch> {
 	const recorded = rewriteOutputs.get(resolve(repositoryRoot, file));
-	if (!recorded || recorded.text !== source) return;
-	const rematched = matches.filter((match) => {
-		const { start, end } = match.node.range();
-		return recorded.ranges.some(([from, to]) => start.index >= from && end.index <= to);
-	});
-	if (rematched.length === 0) return;
-	const example = rematched[0]!;
-	console.error(
-		`warning: sg.rewrite matched ${rematched.length} place${rematched.length === 1 ? "" : "s"} that an earlier sg.rewrite produced, e.g. ${gitPath(resolve(repositoryRoot, file))}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another: handle every shape in one callback, or order them so later patterns cannot match earlier output.`,
+	if (!recorded || recorded.text !== source) return new Set();
+	return new Set(
+		matches.filter((match) => {
+			const { start, end } = match.node.range();
+			return recorded.ranges.some(([from, to]) => start.index >= from && end.index <= to);
+		}),
 	);
 }
 
@@ -541,6 +536,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	const scope = files ?? ".";
 	let count = 0,
 		matched = 0;
+	const skipped: SgMatch[] = [];
 	for (const file of sourceFiles("sg.rewrite", scope)) {
 		count += editingFiles([file], () => {
 			const parsed = parseFile(file);
@@ -549,11 +545,25 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 				toMatch(file, node, parsed.source, pattern),
 			);
 			matched += matches.length;
-			return applyRewrites(matches, replacement, file, true);
+			const earlier = insideEarlierOutput(file, parsed.source, matches);
+			skipped.push(...earlier);
+			return applyRewrites(
+				matches.filter((match) => !earlier.has(match)),
+				replacement,
+				file,
+			);
 		});
 	}
 	if (matched === 0) {
 		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(scope)}`);
+	}
+	// The explanation applies to every later rewrite too, so it is given once per program.
+	if (skipped.length > 0 && !explainedSkips) {
+		explainedSkips = true;
+		const example = skipped[0]!;
+		console.error(
+			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(resolve(repositoryRoot, example.file))}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite.`,
+		);
 	}
 	return count;
 }

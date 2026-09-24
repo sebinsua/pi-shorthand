@@ -70,8 +70,8 @@ sg.rewrite("connect($URL, $RETRIES)", (m) => {
 ```
 
 A callback returns text to replace the whole match, a native edit for part of it, or `null` to skip.
-Rewrites apply one after another, so a later pattern can match an earlier result: handle several call
-shapes in one callback on `request($URL, $$$ARGS)` rather than one rewrite per shape.
+Rewrites apply one after another. A pattern rewrite skips places an earlier rewrite produced, so one
+rewrite per call shape is safe in any order; select them with `sg.find` to rewrite them again.
 **`node.replace()` constructs an edit; return it from the callback so `sg.rewrite` applies it.**
 
 ## Replace an implementation while keeping its signature
