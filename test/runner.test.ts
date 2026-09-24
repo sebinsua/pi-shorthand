@@ -2391,6 +2391,20 @@ while (performance.now() - started < 1500) sg.find("call($A)", "src");`,
 		expect(result.helperMs).toBeGreaterThan(1000);
 	});
 
+	test("refactor.move refuses when a file loads the source with import() split across lines", async () => {
+		const repo = await makeRepo({
+			"src/a.ts": "export function moveMe() { return 1; }\n",
+			"src/b.ts": 'export const load = () =>\n\timport\n\t\t("./a");\n',
+		});
+		const result = await run(repo, `await refactor.move({ file: "src/a.ts", symbol: "moveMe", to: "src/moved.ts" });`, {
+			timeoutMs: 15_000,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("loads");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("export function moveMe() { return 1; }\n");
+	});
+
 	test("path parameters also accept sg.file targets", async () => {
 		const repo = await makeRepo({
 			"tsconfig.json": JSON.stringify({ include: ["src"] }),

@@ -351,7 +351,8 @@ function filesLoadingModules(): string[] {
 			"-E",
 			"--untracked",
 			"-e",
-			"(import|require)[[:space:]]*\\(",
+			// The call may continue on the next line or after a comment: `import\n("./a")`.
+			"(^|[^[:alnum:]_$])(import|require)[[:space:]]*(\\(|/[*/]|$)",
 			"--",
 			"*.ts",
 			"*.tsx",
