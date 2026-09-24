@@ -2341,6 +2341,18 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		}
 	});
 
+	test("sg.rewrite does not treat an unchanged replacement as earlier output", async () => {
+		const repo = await makeRepo({ "src/a.ts": "f(1);\nf(2);\n" });
+		const result = await run(
+			repo,
+			`sg.rewrite("f($A)", (m) => (m.A === "1" ? "g(1)" : m.text), "src");
+sg.rewrite("f($A)", "h($A)", "src");`,
+		);
+
+		expect(result.output).not.toContain("earlier sg.rewrite produced");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("g(1);\nh(2);\n");
+	});
+
 	test("sg.rewrite follows earlier output through later edits, and a selection still rewrites it", async () => {
 		const repo = await makeRepo({ "src/a.ts": 'const m = "😀"; old(1);\nkeep(2);\nold(3);\n' });
 		const result = await run(

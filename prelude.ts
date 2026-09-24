@@ -539,7 +539,9 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 let explainedSkips = false;
 const rewriteOutputs = new Map<string, { text: string; ranges: [number, number][] }>();
 
-function recordRewriteOutput(file: string, before: string, after: string, edits: readonly Edit[]): void {
+function recordRewriteOutput(file: string, before: string, after: string, all: readonly Edit[]): void {
+	// A replacement identical to what it replaced produced nothing, so later rewrites may still match there.
+	const edits = all.filter((edit) => edit.insertedText !== before.slice(edit.startPos, edit.endPos));
 	const key = resolve(repositoryRoot, file);
 	const previous = rewriteOutputs.get(key);
 	const ranges: [number, number][] = [];
