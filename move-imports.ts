@@ -281,8 +281,19 @@ function fileStyle(root: SgNode): Style {
 
 const JS_FOR_SOURCE: Record<string, string> = { ".ts": ".js", ".tsx": ".js", ".mts": ".mjs", ".cts": ".cjs" };
 
+/**
+ * A file's path with symlinks resolved, including a file that does not exist yet, through its nearest
+ * existing directory. Resolved imports are real paths, so a path through a symlink, such as macOS's /var for
+ * /private/var, must be resolved the same way before relative specifiers are computed between them.
+ */
+function canonical(file: string): string {
+	if (existsSync(file)) return realpathSync(file);
+	const parent = dirname(file);
+	return parent === file ? file : resolve(canonical(parent), file.slice(parent.length + 1));
+}
+
 function specifierFor(from: string, to: string, style: Style): string {
-	let path = relative(dirname(from), to).replaceAll("\\", "/");
+	let path = relative(dirname(canonical(from)), canonical(to)).replaceAll("\\", "/");
 	if (!path.startsWith(".")) path = `./${path}`;
 	const extension = extname(to);
 	if (style === "ts") return path;

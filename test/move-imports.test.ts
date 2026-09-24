@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { $ } from "bun";
@@ -350,6 +359,23 @@ test("a destructuring declaration's importers and remaining uses are updated", a
 	expect(read(root, "src/a.ts")).toContain('import { moveMe } from "./moved";');
 	expect(read(root, "src/use.ts")).toBe('import { moveMe } from "./moved";\nexport const u = moveMe;\n');
 	await typeCheck(root);
+});
+
+test("specifiers are relative to the real files when the repository is reached through a symlink", async () => {
+	const real = project({
+		"src/util.ts": "export const helper = () => 1;\n",
+		"src/a.ts": 'import { helper } from "./util";\nexport function moveMe() { return helper(); }\n',
+		"src/b.ts": 'import { moveMe } from "./a";\nexport const b = moveMe();\n',
+	});
+	const root = `${real}-link`;
+	symlinkSync(real, root);
+	roots.push(root);
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/lib/moved.ts"), everyFile(root));
+
+	expect(read(real, "src/lib/moved.ts")).toStartWith('import { helper } from "../util";\n');
+	expect(read(real, "src/b.ts")).toBe('import { moveMe } from "./lib/moved";\nexport const b = moveMe();\n');
+	await typeCheck(real);
 });
 
 test("moving works without a tsconfig", async () => {

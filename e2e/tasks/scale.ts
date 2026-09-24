@@ -573,7 +573,101 @@ export function ${call}() {
 	},
 };
 
-export const scaleFamilies: Family[] = [renameSymbol, optionsMigration, moveModule, loggerMigration];
+/** A module that still exports `name`, by declaration or export list, as a leftover re-export shim would. */
+const stillExports = (file: string, name: string): Check => ({
+	file,
+	label: `${file} no longer exports ${name}`,
+	holds: (text) =>
+		text !== undefined && !new RegExp(`export(?:async)?function${name}\\b|export\\{[^}]*\\b${name}\\b`).test(text),
+});
+
+const moveDeclaration: Family = {
+	id: "move-declaration",
+	revision: "scale-v1",
+	category: "move",
+	build(size) {
+		const from = "src/utils/date.ts";
+		const to = "src/shared/time/format.ts";
+		const formatRange = `export function formatRange(start: number, end: number): string {\n  return \`\${formatDate(start)}..\${formatDate(end)}\`;\n}\n`;
+		const before: Record<string, string> = {
+			[from]: dateSource("./locale") + formatRange,
+			"src/utils/locale.ts": 'export const LOCALE = "en-GB";\n',
+			"src/utils/index.ts": 'export * from "./date";\nexport * from "./locale";\n',
+			"src/legacy/date.ts":
+				'export function formatDate(epochDay: number): string {\n  return "legacy:" + epochDay;\n}\n',
+			"src/legacy/report.ts": 'import { formatDate } from "./date";\nexport const report = () => formatDate(1);\n',
+		};
+		const after: Record<string, string | null> = {
+			[from]: `import { formatDate } from "../shared/time/format";\n${formatRange}`,
+			[to]: dateSource("../../utils/locale"),
+			"src/utils/index.ts":
+				'export * from "./date";\nexport { formatDate } from "../shared/time/format";\nexport * from "./locale";\n',
+		};
+		const sites: Check[] = [
+			stillExports(from, "formatDate"),
+			resolvesTo(from, to),
+			resolvesTo(to, "src/utils/locale.ts"),
+			resolvesTo("src/utils/index.ts", to),
+		];
+		const decoys: Check[] = [contains("src/legacy/report.ts", 'from "./date"')];
+		const cases: Case[] = [
+			{ file: "src/utils/index.ts", call: "formatDate", args: [7], expected: "en-GB:7" },
+			{ file: from, call: "formatRange", args: [1, 2], expected: "en-GB:1..en-GB:2" },
+		];
+		for (let i = 0; i < size; i++) {
+			const file = consumer(i);
+			const call = `feature${i}`;
+			const day = key(i, 1);
+			const kind = i % 6;
+			const date = specifier(file, from);
+			const moved = specifier(file, to);
+			const body = (use: string) => `export function ${call}() {\n  return ${use};\n}\n`;
+			const text = (target: string) =>
+				[
+					`import { formatDate } from "${target}";\n${body(`formatDate(${day})`)}`,
+					`import { formatDate as fd } from "${target}";\nimport { formatRange } from "${date}";\n${body(`fd(${day}) + " " + formatRange(${day}, ${day + 1})`)}`,
+					`export { formatDate as ${call} } from "${target}";\n`,
+					`import { formatDate } from "${specifier(file, "src/utils/index.ts")}";\n${body(`formatDate(${day})`)}`,
+					`import { formatDate } from "${specifier(file, "src/legacy/date.ts")}";\n${body(`formatDate(${day})`)}`,
+					`import { formatRange } from "${date}";\n${body(`formatRange(${day}, ${day + 1})`)}`,
+				][kind]!;
+			// Kind 1 starts with both names in one import from utils/date; only formatDate moves.
+			before[file] =
+				kind === 1
+					? `import { formatDate as fd, formatRange } from "${date}";\n${body(`fd(${day}) + " " + formatRange(${day}, ${day + 1})`)}`
+					: text(date);
+			if (kind <= 2) {
+				after[file] = text(moved);
+				sites.push(resolvesTo(file, to));
+			}
+			if (kind === 1) decoys.push(resolvesTo(file, from));
+			if (kind === 3) decoys.push(resolvesTo(file, "src/utils/index.ts"));
+			if (kind === 4) decoys.push(resolvesTo(file, "src/legacy/date.ts"));
+			if (kind === 5) decoys.push(contains(file, `import { formatRange } from "${date}"`));
+			const range = `en-GB:${day}..en-GB:${day + 1}`;
+			cases.push({
+				file,
+				call,
+				args: kind === 2 ? [day] : [],
+				expected: [`en-GB:${day}`, `en-GB:${day} ${range}`, `en-GB:${day}`, `en-GB:${day}`, `legacy:${day}`, range][
+					kind
+				],
+			});
+		}
+		const direct = count(size, 6, 0, 1, 2);
+		return {
+			before,
+			after,
+			sites,
+			decoys,
+			cases,
+			prompt: `Move formatDate out of ${from} into a new module, ${to}, and update everything that depends on it. formatRange stays in ${from}. Preserve behaviour.`,
+			brief: `Move the \`formatDate\` function from ${from} to a new file ${to}, taking the LOCALE import it needs. \`formatRange\` stays in ${from} and imports formatDate from the new file; ${from} must no longer export formatDate. Keep src/utils/index.ts exporting formatDate. Update the imports and re-exports of formatDate in the ${direct} files under src/features that take it from utils/date directly, including aliased ones; their formatRange imports keep pointing at utils/date. Files importing the src/utils barrel keep that import. Do not change src/legacy/date.ts or its importers. Make no other changes; run \`npm run check\` afterwards.`,
+		};
+	},
+};
+
+export const scaleFamilies: Family[] = [renameSymbol, optionsMigration, moveModule, moveDeclaration, loggerMigration];
 
 function scaleTask(family: Family, size: number): Task {
 	const fixture = family.build(size);
