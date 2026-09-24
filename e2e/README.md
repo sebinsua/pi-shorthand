@@ -6,7 +6,8 @@ session, checks the result independently, and keeps evidence for human review.
 ## Results
 
 Latest single run per cell: `openai-codex/gpt-5.6-sol`, high reasoning, `baseline` against `code` with the
-skill. Every run verified with zero drift. Repeat runs of one task have differed by up to 92s, so small gaps
+skill. Fixtures include `oxfmt`, which shorthand runs on the files it changes; the `options-migration` row at
+10 files is the only one run since. Every run verified with zero drift. Repeat runs of one task have differed by up to 92s, so small gaps
 are noise.
 
 | Task                    | Prompt  | Files |   Stock | Shorthand |
@@ -20,7 +21,7 @@ are noise.
 | `logger-migration`      | brief   |   100 | **60s** |       79s |
 | `logger-migration`      | outcome |   100 |    115s |   **79s** |
 | `rename-symbol`         | brief   |    10 |     76s |   **35s** |
-| `options-migration`     | brief   |    10 | **41s** |       71s |
+| `options-migration`     | brief   |    10 | **50s** |       63s |
 | `empty-average` (pilot) | outcome |     1 |     24s |       24s |
 
 The pilot and guidance suites verified every task in both conditions, with shorthand 9–76% slower.
