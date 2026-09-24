@@ -2399,6 +2399,28 @@ while (performance.now() - started < 1500) sg.find("call($A)", "src");`,
 		);
 	});
 
+	test("path parameters also accept sg.file targets", async () => {
+		const repo = await makeRepo({
+			"tsconfig.json": JSON.stringify({ include: ["src"] }),
+			"src/a.ts": "export function run() { return 1; }\n",
+			"src/b.ts": 'import { run } from "./a";\nexport const b = run();\n',
+		});
+		const result = await run(
+			repo,
+			`edit({ path: sg.file("src/b.ts"), oldText: "run();", newText: "run() + 1;" });
+console.log(grep("run", [sg.file("src/a.ts")]).length);
+await refactor.rename({ file: sg.file("src/a.ts"), symbol: "run", to: "start" });
+await refactor.renameFile({ from: sg.file("src/a.ts"), to: sg.file("src/lib/a.ts") });`,
+			{ timeoutMs: 15_000 },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(
+			'import { start } from "./lib/a";\nexport const b = start() + 1;\n',
+		);
+	});
+
 	test("sg matches a standalone class method pattern as a method", async () => {
 		const source =
 			"class C {\n  format(x: number): string { return String(x); }\n  other(x: number): string { return String(x); }\n}\n";

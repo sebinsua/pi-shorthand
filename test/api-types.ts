@@ -12,8 +12,11 @@ export async function supportedProgram() {
 	sg.rewrite("run($A)", (match) => match.A.toUpperCase(), target);
 	sg.insert("initialize();", { endOf: target });
 	grit("`run($a)` => `go($a)`", [target, "src/**/*.ts"]);
-	await refactor.rename({ file: target, symbol: "run", to: "start" });
-	await refactor.renameFile({ from: "src/other.ts", to: sg.file("src/start.ts") });
+	await refactor.rename({ file: "src/app.ts", symbol: "run", to: "start" });
+	await refactor.renameFile({ from: "src/other.ts", to: "src/start.ts" });
+	// Paths are typed as strings; file targets are accepted at runtime but not advertised.
+	// @ts-expect-error A file target is not part of the documented path type.
+	edit({ path: target, oldText: "a", newText: "b" });
 	// @ts-expect-error A semantic rename requires the new name.
 	await refactor.rename({ file: "src/app.ts", symbol: "run" });
 	// @ts-expect-error A file rename requires the destination.

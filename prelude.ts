@@ -132,7 +132,8 @@ function glob(pattern: string, where: string | { cwd?: string } = "."): string[]
  * Search files git sees. A string is matched literally; a RegExp is matched as a Perl-compatible
  * regular expression, which is close to JavaScript's syntax.
  */
-function grep(pattern: string | RegExp, paths: string | string[] = ".") {
+function grep(pattern: string | RegExp, scope: string | string[] = ".") {
+	const paths = [scope].flat().map((path) => pathArgument("grep", path));
 	let flags: string[];
 	if (typeof pattern === "string") {
 		flags = ["-F", "-e", pattern];
@@ -140,7 +141,7 @@ function grep(pattern: string | RegExp, paths: string | string[] = ".") {
 		flags = ["-P", "-e", pattern.source];
 		if (pattern.flags.includes("i")) flags.push("-i");
 	}
-	const output = git(["grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...[paths].flat()], [1]);
+	const output = git(["grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...paths], [1]);
 
 	const matches = [];
 	let offset = 0;
@@ -346,12 +347,14 @@ function sourceFiles(helper: string, files: FileScope): string[] {
 	return parseable;
 }
 
-type TypeScriptFile = string | FileTarget;
-
-function typeScriptFile(helper: string, file: TypeScriptFile): string {
-	if (typeof file === "string") return file;
-	if (!isFileTarget(file)) throw new TypeError(`${helper}: file must be a path or sg.file() target`);
-	return getMatchSnapshot(file).file;
+/**
+ * A file path argument. Helpers are documented and typed as taking paths, but also accept an sg.file()
+ * target in their place, since that is an easy mistake to make and its meaning is unambiguous.
+ */
+function pathArgument(helper: string, path: unknown): string {
+	if (typeof path === "string") return path;
+	if (isFileTarget(path)) return getMatchSnapshot(path).file;
+	throw new TypeError(`${helper}: expected a file path string`);
 }
 
 function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
@@ -692,8 +695,10 @@ function normalizeEditLineEndings(text: string): string {
 }
 
 /** Replace exactly one literal occurrence, tolerating line endings. Synchronous; await is safe. */
-function editText({ path, oldText, newText }: { path: string; oldText: string; newText: string }): void {
-	if (typeof path !== "string" || typeof oldText !== "string" || typeof newText !== "string")
+function editText(options: { path: string; oldText: string; newText: string }): void {
+	const { oldText, newText } = options;
+	const path = pathArgument("edit", options.path);
+	if (typeof oldText !== "string" || typeof newText !== "string")
 		throw new Error("edit expects { path, oldText, newText } strings");
 	if (!oldText) throw new Error("edit: oldText must not be empty; use Bun.write to create a file");
 	const source = readFileSync(path, "utf8");
@@ -742,19 +747,19 @@ const globals = {
 	},
 	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
 	refactor: {
-		rename: (options: RenameOptions<TypeScriptFile>) =>
+		rename: (options: RenameOptions) =>
 			logged("refactor.rename", [options], () => {
 				const prepared = {
 					...options,
-					file: typeScriptFile("refactor.rename", options.file),
+					file: pathArgument("refactor.rename", options.file),
 				};
 				return import("./typescript-refactors.ts").then(({ rename }) => rename(repositoryRoot, prepared));
 			}),
-		renameFile: (options: RenameFileOptions<TypeScriptFile>) =>
+		renameFile: (options: RenameFileOptions) =>
 			logged("refactor.renameFile", [options], () => {
 				const prepared = {
-					from: typeScriptFile("refactor.renameFile", options.from),
-					to: typeScriptFile("refactor.renameFile", options.to),
+					from: pathArgument("refactor.renameFile", options.from),
+					to: pathArgument("refactor.renameFile", options.to),
 				};
 				return import("./typescript-refactors.ts").then(({ renameFile }) => renameFile(repositoryRoot, prepared));
 			}),
