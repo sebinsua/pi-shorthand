@@ -307,69 +307,31 @@ function selectScope(helper: string, inputs: (string | FileTarget)[], select: (i
 	];
 }
 
-/** JS/TS files Git sees that contain any of these names as a word, for updating their imports. */
-function filesMentioning(names: string[]): string[] {
-	if (!names.length) return [];
-	const output = git(
-		[
-			"-C",
-			repositoryRoot,
-			"grep",
-			"-l",
-			"-z",
-			"-w",
-			"-F",
-			"--untracked",
-			...names.flatMap((name) => ["-e", name]),
-			"--",
-			"*.ts",
-			"*.tsx",
-			"*.mts",
-			"*.cts",
-			"*.js",
-			"*.jsx",
-			"*.mjs",
-			"*.cjs",
-		],
-		[1],
-	);
-	return output
+const SCRIPTS = ["*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs", "*.cjs"];
+
+/** JS/TS files Git sees, tracked or new. */
+function scriptFiles(): string[] {
+	return git(["-C", repositoryRoot, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...SCRIPTS])
+		.split("\0")
+		.filter(Boolean)
+		.map((file) => resolve(repositoryRoot, file));
+}
+
+/** JS/TS files Git sees with a line matching an extended regular expression. */
+function scriptFilesMatching(pattern: string): string[] {
+	return git(["-C", repositoryRoot, "grep", "-l", "-z", "-E", "--untracked", "-e", pattern, "--", ...SCRIPTS], [1])
 		.split("\0")
 		.filter(Boolean)
 		.map((file) => resolve(repositoryRoot, file));
 }
 
 /** JS/TS files Git sees that call import() or require(). */
-function filesLoadingModules(): string[] {
-	const output = git(
-		[
-			"-C",
-			repositoryRoot,
-			"grep",
-			"-l",
-			"-z",
-			"-E",
-			"--untracked",
-			"-e",
-			// The call may continue on the next line or after a comment: `import\n("./a")`.
-			"(^|[^[:alnum:]_$])(import|require)[[:space:]]*(\\(|/[*/]|$)",
-			"--",
-			"*.ts",
-			"*.tsx",
-			"*.mts",
-			"*.cts",
-			"*.js",
-			"*.jsx",
-			"*.mjs",
-			"*.cjs",
-		],
-		[1],
-	);
-	return output
-		.split("\0")
-		.filter(Boolean)
-		.map((file) => resolve(repositoryRoot, file));
-}
+const filesLoadingModules = () =>
+	// The call may continue on the next line or after a comment: `import\n("./a")`.
+	scriptFilesMatching("(^|[^[:alnum:]_$])(import|require)[[:space:]]*(\\(|/[*/]|$)");
+
+/** JS/TS files Git sees that may re-export a module wholesale, with `export *`, which may span lines. */
+const filesReexportingAll = () => scriptFilesMatching("(^|[^[:alnum:]_$])export[[:space:]]*(\\*|/[*/]|$)");
 
 /** A scope for a warning: short scopes in full, long ones as a count and the first few paths. */
 function describeScope(scope: FileScope): string {
@@ -813,7 +775,12 @@ const globals = {
 				const to = explicitPath(pathArgument("refactor.move", options.to));
 				if (typeof options.symbol !== "string" || !options.symbol)
 					throw new TypeError("refactor.move expects { file, symbol, to } with a symbol name");
-				moveDeclaration(from, options.symbol, to, { mentioning: filesMentioning, loadingModules: filesLoadingModules });
+				await moveDeclaration(from, options.symbol, to, {
+					root: repositoryRoot,
+					scripts: scriptFiles,
+					loadingModules: filesLoadingModules,
+					reexportingAll: filesReexportingAll,
+				});
 			}),
 		renameFile: (options: RenameFileOptions) =>
 			logged("refactor.renameFile", [options], () => {

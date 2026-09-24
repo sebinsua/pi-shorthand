@@ -1,0 +1,159 @@
+/**
+ * What moving a top-level declaration affects, as TypeScript 7's checker sees it: the names the declaration
+ * depends on, whether the rest of its file still uses it, and which files refer to it. move-imports.ts turns
+ * this into edits. The checker comes from TypeScript's unstable API, so the typescript version is pinned.
+ */
+import { realpathSync } from "node:fs";
+import type { SgNode } from "@ast-grep/napi";
+import { API, SymbolFlags, type Project, type Symbol } from "typescript/unstable/async";
+import { getTouchingPropertyName, SyntaxKind, type Node, type SourceFile } from "typescript/unstable/ast";
+
+export interface MoveAnalysis {
+	/** Names the declaration refers to that are bound outside it: imports, the file's other declarations and globals. */
+	dependencies: Set<string>;
+	/** Code left in the source file still refers to the declaration. */
+	usedInSource: boolean;
+	/** Other files that refer to the declaration, by importing or re-exporting it. */
+	referencing: string[];
+	/** Files that use the declaration as a property of the module object: `ns.name`, `ns["name"]`, `{ name } = ns`. */
+	usedThroughModule: string[];
+}
+
+export interface MoveAnalysisInput {
+	root: string;
+	file: string;
+	/** The top-level statement being moved. */
+	node: SgNode;
+	/** The names it declares. */
+	names: string[];
+	/** Every JS/TS file in the repository, so that each lands in a TypeScript project. */
+	files: string[];
+}
+
+const REFERENCES = ["identifier", "type_identifier", "shorthand_property_identifier"];
+/** Where a declaration names what it declares, including `{ name }` in a destructuring declaration. */
+const DECLARED = ["identifier", "type_identifier", "shorthand_property_identifier_pattern"];
+
+const real = (file: string) => {
+	try {
+		return realpathSync(file);
+	} catch {
+		return file;
+	}
+};
+
+export async function analyzeMove({ root, file, node, names, files }: MoveAnalysisInput): Promise<MoveAnalysis> {
+	const api = new API({ cwd: root });
+	try {
+		const snapshot = await api.updateSnapshot({ openFiles: [...new Set([file, ...files])] });
+		const home = await snapshot.getDefaultProjectForFile(file);
+		const sourceFile = await home?.program.getSourceFile(file);
+		if (!home || !sourceFile) throw new Error(`refactor.move: TypeScript has no project containing ${file}`);
+		// A file in another project, such as another workspace package, imports the source through its own program.
+		const projects: Project[] = [];
+		for (const project of snapshot.getProjects())
+			if (await project.program.getSourceFile(file).catch(() => undefined)) projects.push(project);
+		return {
+			dependencies: await dependencies(home, sourceFile, node),
+			...(await references(projects, sourceFile, node, names)),
+		};
+	} finally {
+		await api.close();
+	}
+}
+
+/** Names in `node` whose symbol is declared outside it, or that resolve to nothing. */
+async function dependencies(project: Project, sourceFile: SourceFile, node: SgNode): Promise<Set<string>> {
+	const { start, end } = node.range();
+	const within = async (symbol: Symbol) => {
+		if (!symbol.declarations.length) return false;
+		for (const declaration of symbol.declarations) {
+			if (declaration.path !== sourceFile.path) return false;
+			const resolved = await declaration.resolve(project);
+			if (!resolved || resolved.getStart(sourceFile) < start.index || resolved.end > end.index) return false;
+		}
+		return true;
+	};
+	const identifiers = node.findAll({ rule: { any: REFERENCES.map((kind) => ({ kind })) } });
+	const symbols = await project.checker.getSymbolAtPosition(
+		sourceFile.fileName,
+		identifiers.map((identifier) => identifier.range().start.index),
+	);
+	const names = new Set<string>();
+	for (const [index, identifier] of identifiers.entries()) {
+		const name = identifier.text();
+		if (names.has(name)) continue;
+		// `{ name }` declares a property; the value it reads is whatever `name` means there.
+		const symbol =
+			identifier.kind() === "shorthand_property_identifier"
+				? await project.checker.resolveName(
+						name,
+						SymbolFlags.Value,
+						getTouchingPropertyName(sourceFile, identifier.range().start.index),
+					)
+				: symbols[index];
+		if (!symbol || !(await within(symbol))) names.add(name);
+	}
+	return names;
+}
+
+async function references(
+	projects: Project[],
+	sourceFile: SourceFile,
+	node: SgNode,
+	names: string[],
+): Promise<Pick<MoveAnalysis, "usedInSource" | "referencing" | "usedThroughModule">> {
+	const { start, end } = node.range();
+	const source = real(sourceFile.fileName);
+	const seen = new Set<string>();
+	const referencing = new Set<string>();
+	const usedThroughModule = new Set<string>();
+	let usedInSource = false;
+	for (const project of projects) {
+		const own = (await project.program.getSourceFile(sourceFile.fileName))!;
+		for (const name of names) {
+			// The first mention of a declared name in its declaration is where it is declared.
+			const declared = node.find({
+				rule: { any: DECLARED.map((kind) => ({ kind, regex: `^${name.replaceAll("$", "\\$")}$` })) },
+			});
+			if (!declared) continue;
+			const position = declared.range().start.index;
+			const entries = await project.checker.getReferencedSymbolsForNode(
+				getTouchingPropertyName(own, position),
+				position,
+			);
+			for (const handle of entries.flatMap((entry) => entry.references)) {
+				const key = `${handle.path}:${handle.index}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				const reference = await handle.resolve(project);
+				if (!reference) continue;
+				const file = real(reference.getSourceFile().fileName);
+				if (file === source) {
+					if (reference.end <= start.index || reference.getStart() >= end.index) usedInSource = true;
+					continue;
+				}
+				referencing.add(file);
+				if (throughModule(reference)) usedThroughModule.add(file);
+			}
+		}
+	}
+	return { usedInSource, referencing: [...referencing], usedThroughModule: [...usedThroughModule] };
+}
+
+/** A reference that reads the declaration off a module object rather than binding it by name. */
+function throughModule(reference: Node): boolean {
+	const parent = reference.parent as Node & Record<string, unknown>;
+	switch (parent.kind) {
+		case SyntaxKind.PropertyAccessExpression:
+			return parent.name === reference;
+		case SyntaxKind.ElementAccessExpression:
+			return parent.argumentExpression === reference;
+		case SyntaxKind.QualifiedName:
+			return parent.right === reference;
+		case SyntaxKind.BindingElement:
+			return true;
+		default:
+			return false;
+	}
+}

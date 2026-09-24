@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { editingFiles } from "./file-outcomes.ts";
-import { planImports, topLevelDeclaration } from "./move-imports.ts";
+import { analyzeMove, type MoveAnalysis } from "./move-analysis.ts";
+import { declaredNames, planImports, topLevelDeclaration } from "./move-imports.ts";
 
 export interface Match {
 	file: string;
@@ -314,30 +315,44 @@ export function move(match: Match, destination: Destination, transform?: (text: 
 	return editingFiles([match.file, ...destinationFiles(destination)], () => moveNodes(match, destination, transform));
 }
 
+/** What refactor.move needs from the repository besides the moved declaration. */
+export interface MoveFiles {
+	root: string;
+	/** Every JS/TS file Git sees. */
+	scripts: () => string[];
+	/** Files that may load modules dynamically, with import() or require(). */
+	loadingModules: () => string[];
+	/** Files that may re-export a module wholesale, with `export *`. */
+	reexportingAll: () => string[];
+}
+
 /**
  * Moves the top-level declaration of `symbol` in `from` to the end of `to`, updating imports: the target
  * imports what the declaration uses, the source imports it back if still needed, and files importing it
- * from the source import it from the target. `filesMentioning` lists JS/TS files that may contain the names.
+ * from the source import it from the target. TypeScript's checker decides what the declaration uses and who
+ * refers to it.
  */
-export function moveDeclaration(
-	from: string,
-	symbol: string,
-	to: string,
-	files: { mentioning: (names: string[]) => string[]; loadingModules: () => string[] },
-): void {
+export async function moveDeclaration(from: string, symbol: string, to: string, files: MoveFiles): Promise<void> {
 	const lang = scriptLanguage(from);
 	if (!lang || !scriptLanguage(to)) throw new Error("refactor.move requires JS/TS files");
 	const source = readFileSync(from, "utf8");
 	const node = topLevelDeclaration(parse(lang, source).root(), symbol, from);
+	const analysis = await analyzeMove({
+		root: files.root,
+		file: from,
+		node,
+		names: declaredNames(node),
+		files: files.scripts(),
+	});
 	const match = remember({ file: from, text: node.text(), node }, source);
-	return editingFiles([from, to], () => moveNodes(match, { endOf: file(to) }, undefined, files));
+	return editingFiles([from, to], () => moveNodes(match, { endOf: file(to) }, undefined, { ...files, analysis }));
 }
 
 function moveNodes(
 	match: Match,
 	destination: Destination,
 	transform?: (text: string) => string,
-	files?: { mentioning: (names: string[]) => string[]; loadingModules: () => string[] },
+	files?: MoveFiles & { analysis: MoveAnalysis },
 ): void {
 	const source = snapshot(match);
 	const deletion = removal(source);
@@ -366,8 +381,9 @@ function moveNodes(
 						node: source.node,
 						targetFile: target.saved.file,
 						targetRoot,
-						filesMentioning: files.mentioning,
+						analysis: files.analysis,
 						filesLoadingModules: files.loadingModules,
+						filesReexportingAll: files.reexportingAll,
 					})
 				: null;
 		const placed = { ...target.edit };

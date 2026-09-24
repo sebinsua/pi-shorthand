@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { $ } from "bun";
 import { Lang, parse } from "@ast-grep/napi";
-import { file, move, moveDeclaration, remember } from "../placement.ts";
+import { file, move, moveDeclaration, remember, type MoveFiles } from "../placement.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -44,16 +44,26 @@ function declaration(root: string, path: string, pattern: string) {
 	return remember({ file: absolute, text: statement.text(), node: statement }, source);
 }
 
-/** Every source file under src, as a stand-in for Git's searches. */
-const everyFile = (root: string) => {
+/** Every source file under src, as a stand-in for Git's listings and searches. */
+const everyFile = (root: string): MoveFiles => {
 	const all = () =>
 		(readdirSync(join(root, "src"), { recursive: true }) as string[])
 			.filter((path) => path.endsWith(".ts"))
 			.map((path) => resolve(root, "src", path));
-	return { mentioning: all, loadingModules: all };
+	return { root, scripts: all, loadingModules: all, reexportingAll: all };
 };
 
 const read = (root: string, path: string) => readFileSync(join(root, path), "utf8");
+
+/**
+ * The error a move rejects with. Awaited directly: Bun's `expect(promise).rejects` services the TypeScript
+ * API's pipe only about once a second, which makes each request take that long.
+ */
+const rejection = (moving: Promise<void>) =>
+	moving.then(
+		() => undefined,
+		(error: unknown) => error,
+	);
 
 async function typeCheck(root: string) {
 	const tsc = resolve(import.meta.dir, "../node_modules/.bin/tsc");
@@ -83,7 +93,7 @@ test("moving a declaration updates its dependencies, the source and every kind o
 		"src/index.ts": 'export * from "./a";\n',
 	});
 
-	moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved/target.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved/target.ts"), everyFile(root));
 
 	expect(read(root, "src/moved/target.ts")).toBe(
 		[
@@ -118,7 +128,7 @@ test("new specifiers keep each file's .js style and quotes, and a moved type sta
 		"src/target.ts": "import { unit } from './shapes.js';\nexport const u = unit;\n",
 	});
 
-	moveDeclaration(join(root, "src/shapes.ts"), "Shape", join(root, "src/target.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/shapes.ts"), "Shape", join(root, "src/target.ts"), everyFile(root));
 
 	expect(read(root, "src/use.ts")).toBe(
 		"import type { Shape } from './target.js';\nexport const s: Shape = { kind: 'x' };\n",
@@ -134,7 +144,7 @@ test("a declaration the target already imports from the source becomes local the
 		"src/target.ts": 'import { limit, other } from "./a";\nexport const both = () => limit + other;\n',
 	});
 
-	moveDeclaration(join(root, "src/a.ts"), "limit", join(root, "src/target.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/a.ts"), "limit", join(root, "src/target.ts"), everyFile(root));
 
 	expect(read(root, "src/target.ts")).toBe(
 		'import { other } from "./a";\nexport const both = () => limit + other;\nexport const limit = 3;\n',
@@ -156,6 +166,24 @@ test.each([
 		{
 			"src/a.ts": "export function moveMe() {}\n",
 			"src/b.ts": 'import * as a from "./a";\na.moveMe();\n',
+		},
+		"moveMe",
+		"namespace import",
+	],
+	[
+		"a destructured namespace import",
+		{
+			"src/a.ts": "export function moveMe() {}\n",
+			"src/b.ts": 'import * as a from "./a";\nconst { moveMe } = a;\nmoveMe();\n',
+		},
+		"moveMe",
+		"namespace import",
+	],
+	[
+		"a namespace import indexed by a string",
+		{
+			"src/a.ts": "export function moveMe() {}\n",
+			"src/b.ts": 'import * as a from "./a";\na["moveMe"]();\n',
 		},
 		"moveMe",
 		"namespace import",
@@ -196,13 +224,14 @@ test.each([
 		"read",
 		"fetch is a global",
 	],
-])("refuses %s before writing anything", (_, files, symbol, message) => {
+])("refuses %s before writing anything", async (_, files, symbol, message) => {
 	const root = project({ "src/target.ts": "export {};\n", ...files });
 	const before = Object.fromEntries(Object.keys(files).map((path) => [path, read(root, path)]));
 	const targetBefore = read(root, "src/target.ts");
-	expect(() => moveDeclaration(join(root, "src/a.ts"), symbol, join(root, "src/target.ts"), everyFile(root))).toThrow(
-		message,
+	const error = await rejection(
+		moveDeclaration(join(root, "src/a.ts"), symbol, join(root, "src/target.ts"), everyFile(root)),
 	);
+	expect(String(error)).toContain(message);
 	for (const [path, text] of Object.entries(before)) expect(read(root, path)).toBe(text);
 	expect(read(root, "src/target.ts")).toBe(targetBefore);
 });
@@ -213,7 +242,7 @@ test("importers through a tsconfig path alias keep using the alias", async () =>
 		"src/app.ts": 'import { parseUser } from "@app/api";\nexport const user = parseUser("Ada");\n',
 	});
 
-	moveDeclaration(join(root, "src/api.ts"), "parseUser", join(root, "src/users/parse.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/api.ts"), "parseUser", join(root, "src/users/parse.ts"), everyFile(root));
 
 	expect(read(root, "src/app.ts")).toBe(
 		'import { parseUser } from "@app/users/parse";\nexport const user = parseUser("Ada");\n',
@@ -224,7 +253,7 @@ test("importers through a tsconfig path alias keep using the alias", async () =>
 test("a declaration the source still uses is exported from the target", async () => {
 	const root = project({ "src/a.ts": "const limit = 3;\nexport const twice = limit * 2;\n" });
 
-	moveDeclaration(join(root, "src/a.ts"), "limit", join(root, "src/limits.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/a.ts"), "limit", join(root, "src/limits.ts"), everyFile(root));
 
 	expect(read(root, "src/limits.ts")).toBe("export const limit = 3;\n");
 	expect(read(root, "src/a.ts")).toContain('import { limit } from "./limits";');
@@ -238,10 +267,101 @@ test("a nested local that shares an import's name does not hide the import's oth
 			'import { helper } from "./util";\nexport function run(n: number) {\n\tconst inner = () => { const helper = 0; return helper; };\n\treturn helper(n) + inner();\n}\n',
 	});
 
-	moveDeclaration(join(root, "src/a.ts"), "run", join(root, "src/run.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/a.ts"), "run", join(root, "src/run.ts"), everyFile(root));
 
 	expect(read(root, "src/run.ts")).toStartWith('import { helper } from "./util";\n');
 	await typeCheck(root);
+});
+
+test("a barrel that re-exports the source wholesale also re-exports the moved declaration", async () => {
+	const root = project({
+		"src/a.ts": "export function moveMe() { return 1; }\nexport const other = 2;\n",
+		"src/barrel.ts": 'export * from "./a";\n',
+		"src/use.ts": 'import { moveMe as mm, other } from "./barrel";\nexport const u = mm() + other;\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), everyFile(root));
+
+	expect(read(root, "src/barrel.ts")).toBe('export * from "./a";\nexport { moveMe } from "./moved";\n');
+	expect(read(root, "src/use.ts")).toBe(
+		'import { moveMe as mm, other } from "./barrel";\nexport const u = mm() + other;\n',
+	);
+	await typeCheck(root);
+});
+
+test("dependencies follow TypeScript's scoping: hoisted vars, shorthand properties and shadowed imports", async () => {
+	const root = project({
+		"src/util.ts": "export const helper = (n: number) => n + 1;\nexport const scale = 2;\n",
+		"src/a.ts": [
+			'import { helper, scale } from "./util";',
+			"export function run(n: number) {",
+			"\tfor (var i = 0; i < 1; i++) { var last: number | undefined = i; }",
+			"\tconst shadow = () => { const scale = 0; return scale; };",
+			"\tconst o = { helper };",
+			"\treturn o.helper(n) + (last ?? 0) + shadow();",
+			"}",
+			"",
+		].join("\n"),
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "run", join(root, "src/run.ts"), everyFile(root));
+
+	expect(read(root, "src/run.ts")).toStartWith('import { helper } from "./util";\nexport function run');
+	await typeCheck(root);
+});
+
+test("a file only a different, same-named symbol appears in is left alone", async () => {
+	const root = project({
+		"src/a.ts": "export function moveMe() { return 1; }\n",
+		"src/b.ts": 'import { moveMe } from "./a";\nexport const b = moveMe();\n',
+		"src/other.ts": 'import * as a from "./a";\nfunction moveMe() { return a; }\nexport const o = moveMe();\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toBe('import { moveMe } from "./moved";\nexport const b = moveMe();\n');
+	expect(read(root, "src/other.ts")).toBe(
+		'import * as a from "./a";\nfunction moveMe() { return a; }\nexport const o = moveMe();\n',
+	);
+});
+
+test("importers in another TypeScript project are updated too", async () => {
+	const root = project({
+		"src/a.ts": "export function moveMe() { return 1; }\n",
+		"app/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ["."] }),
+		"app/main.ts": 'import { moveMe } from "../src/a";\nexport const m = moveMe();\n',
+	});
+	const files = everyFile(root);
+	const scripts = () => [...files.scripts(), join(root, "app/main.ts")];
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), { ...files, scripts });
+
+	expect(read(root, "app/main.ts")).toBe('import { moveMe } from "../src/moved";\nexport const m = moveMe();\n');
+});
+
+test("a destructuring declaration's importers and remaining uses are updated", async () => {
+	const root = project({
+		"src/a.ts": "export const { moveMe } = { moveMe: 1 };\nexport const val = moveMe;\n",
+		"src/use.ts": 'import { moveMe } from "./a";\nexport const u = moveMe;\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), everyFile(root));
+
+	expect(read(root, "src/a.ts")).toContain('import { moveMe } from "./moved";');
+	expect(read(root, "src/use.ts")).toBe('import { moveMe } from "./moved";\nexport const u = moveMe;\n');
+	await typeCheck(root);
+});
+
+test("moving works without a tsconfig", async () => {
+	const root = project({
+		"src/a.ts": "export function moveMe() { return 1; }\n",
+		"src/b.ts": 'import { moveMe } from "./a";\nexport const b = moveMe();\n',
+	});
+	rmSync(join(root, "tsconfig.json"));
+
+	await moveDeclaration(join(root, "src/a.ts"), "moveMe", join(root, "src/moved.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toBe('import { moveMe } from "./moved";\nexport const b = moveMe();\n');
 });
 
 test("sg.move places syntax without changing imports", () => {
@@ -255,9 +375,8 @@ test("sg.move places syntax without changing imports", () => {
 	expect(read(root, "src/b.ts")).toBe('import { f } from "./a";\nf();\n');
 });
 
-test("a declaration must exist once at the top level", () => {
+test("a declaration must exist once at the top level", async () => {
 	const root = project({ "src/a.ts": "export function f() {}\nfunction g() { const h = 1; }\n" });
-	expect(() => moveDeclaration(join(root, "src/a.ts"), "h", join(root, "src/b.ts"), everyFile(root))).toThrow(
-		"found no top-level declaration of h",
-	);
+	const error = await rejection(moveDeclaration(join(root, "src/a.ts"), "h", join(root, "src/b.ts"), everyFile(root)));
+	expect(String(error)).toContain("found no top-level declaration of h");
 });
