@@ -1,7 +1,7 @@
 {
 	"name": "pi-shorthand",
-	"version": "0.7.1",
-	"description": "Pi tool for editing repositories with Bun programs, text edits and structural transformations.",
+	"version": "0.8.0",
+	"description": "Pi tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.",
 	"keywords": [
 		"ast-grep",
 		"bun",
