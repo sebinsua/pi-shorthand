@@ -28,9 +28,6 @@ one task have differed by up to 92s, so small gaps are noise.
 
 The pilot and guidance suites verified every task in both conditions, with shorthand 9–76% slower.
 
-Known backend issue: a combined GritQL `sequential` query panicked in the installed CLI; two separate queries
-work.
-
 ## Layout
 
 | Path                                             | Contents                                                              |
@@ -234,7 +231,7 @@ results directory; do not combine them blindly with new experiments. Use a fresh
 
 ## Local reference edits and recovery
 
-[reference-programs](reference-programs) holds human-authored ast-grep, GritQL, `refactor` and source-text
+[reference-programs](reference-programs) holds human-authored ast-grep, `refactor` and source-text
 programs, named `<task-id>-<approach>.ts.txt`; scale references run at 100 files. Run
 `bun e2e/reference-edits.ts` (`--only` selects some) to execute them, or `bun e2e/replay-edit-errors.ts` to
 replay two observed API failures and their corrections. Both use temporary repositories and the real overlay

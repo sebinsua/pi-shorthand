@@ -7,7 +7,6 @@ declare global {
 	const glob: ShorthandGlobals["glob"];
 	const grep: ShorthandGlobals["grep"];
 	const sg: ShorthandGlobals["sg"];
-	const grit: ShorthandGlobals["grit"];
 	const refactor: ShorthandGlobals["refactor"];
 }
 

@@ -93,6 +93,8 @@ sg.find(
 	{ rule: { pattern: "console.log($$$A)", not: { inside: { kind: "function_declaration", stopBy: "end" } } } },
 	"src",
 );
+// constraints restrict what a capture may match
+sg.rewrite({ rule: { pattern: "$F($X)" }, constraints: { F: { regex: "^(oldApi|legacyApi)$" } } }, "newApi($X)", "src");
 ```
 
 `kind` names come from tree-sitter (`function_declaration`, `call_expression`, `import_statement`,
@@ -113,35 +115,6 @@ await Bun.write("src/app.ts", root.commitEdits(edits));
 The bundled TypeScript 7 package does not expose the legacy compiler API (`createSourceFile`,
 `ScriptTarget`); changing import syntax won't make it available.
 
-## GritQL and other languages
-
-Code goes in backticks. `$x` captures a node, `=>` rewrites, and `where` adds conditions.
-
-```ts
-grit("`oldApi($args)`", "src", { dryRun: true }); // find: [{ file, matches }]
-grit("`console.log($m)` => `logger.info($m)`", "src"); // rewrite in place
-grit("`$f($x)` where { $f <: `oldApi` }", "src", { dryRun: true }); // conditions
-grit("`print($x)` => `log($x)`", "src", { lang: "python" }); // other languages
-```
-
-It defaults to JavaScript/TypeScript. Other languages include python, go, rust, java, ruby, css,
-json and yaml.
-
-Paths accept files, directories, globs, `sg.file()` targets or mixed arrays.
-
-Worth knowing:
-
-- Each `grit` call takes about a second to start. That time does not count toward the program's
-  timeout.
-- A rewrite can drop a statement's trailing semicolon. Check the diff, or use `sg.rewrite` for
-  simple JS/TS rewrites.
-
-The bundled ast-grep CLI also supports other languages:
-
-```ts
-await $`ast-grep run -p 'print($A)' -r 'log($A)' -l python -U src`;
-```
-
 ## File discovery and commands
 
 ```ts
@@ -150,7 +123,7 @@ grep("oldApi(", "src"); // [{ file, line, text }]; accepts a RegExp too
 const files = await $`git ls-files`.text();
 ```
 
-`glob`, `grep`, `sg` and `grit` are synchronous. Bun's `$` needs `await`; interpolated values are
+`glob`, `grep` and `sg` are synchronous. Bun's `$` needs `await`; interpolated values are
 quoted as single arguments, and arrays become multiple arguments. These globals and bundled CLIs
 belong to `code`, not necessarily ordinary shell calls. `node:fs` and ordinary Bun APIs also work.
 
@@ -162,12 +135,12 @@ path is inaccessible on macOS. On both platforms, host paths outside the workspa
 Writes to `.git` are blocked.
 
 The default timeout is two seconds; request more for longer transformations. Time inside helpers
-(`edit`, `glob`, `grep`, `sg`, `grit`, `refactor`) does not count toward it, up to 60 extra seconds per run.
+(`edit`, `glob`, `grep`, `sg`, `refactor`) does not count toward it, up to 60 extra seconds per run.
 By default, rollback happens per file: files involved in failed or interrupted edits are discarded,
 while the others are retained, including after exceptions. Unattributed failures
 (such as failed checks) preserve completed edits and report the failure. A failed file loses all
-its edits from this run, even if the error is caught. Multi-file operations such as moves and a
-single Grit invocation share one outcome. Arbitrary shell failures cannot identify failed closed
+its edits from this run, even if the error is caught. Multi-file operations such as moves share
+one outcome. Arbitrary shell failures cannot identify failed closed
 files. Open writers are inspected before failure exits and timeout termination; inspection failures
 or crashes that bypass exit handling retain nothing. Cancellation still discards everything.
 Use `rollback: "all"` when the whole change must be atomic.

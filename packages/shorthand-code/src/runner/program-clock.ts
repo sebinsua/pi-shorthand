@@ -1,5 +1,5 @@
 /**
- * Program time for the timeout. Shorthand's helpers (edit, glob, grep, sg, grit, refactor) do work that scales
+ * Program time for the timeout. Shorthand's helpers (edit, glob, grep, sg, refactor) do work that scales
  * with the repository, such as parsing every file in scope or starting a language server, so time inside
  * them pauses the clock. The pause is capped: a helper that never returns still times out, at most
  * `allowanceMs` after the program's own timeout.

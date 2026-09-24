@@ -1,3 +1,0 @@
-const files = ["api.ts", "view.ts"];
-grit('`function $name($args) { $body }` where { $args => `$args, headers?: HeadersInit` }', files);
-grit('or { `fetch($url)` => `fetch($url, { headers })`, `readProject($id)` => `readProject($id, headers)`, `readOwner($id)` => `readOwner($id, headers)` }', files);

@@ -11,7 +11,7 @@ export async function supportedProgram() {
 	sg.one("run($A)", [target, "src/other.ts"]);
 	sg.rewrite("run($A)", (match) => match.A.toUpperCase(), target);
 	sg.insert("initialize();", { endOf: target });
-	grit("`run($a)` => `go($a)`", [target, "src/**/*.ts"]);
+	sg.find({ rule: { pattern: "$F($A)" }, constraints: { F: { regex: "^run$" } } }, "src/**/*.ts");
 	await refactor.rename({ file: "src/app.ts", symbol: "run", to: "start" });
 	await refactor.renameFile({ from: "src/other.ts", to: "src/start.ts" });
 	await refactor.move({ file: "src/app.ts", symbol: "start", to: "src/start.ts" });

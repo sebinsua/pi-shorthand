@@ -1,6 +1,6 @@
 ---
 name: shorthand
-description: Edit repository files with Bun programs using plain text edits or structural matching. Covers renames, file and declaration moves, and call-site migrations; the advanced guide covers extracting code, moving syntax, GritQL and other languages.
+description: Edit repository files with Bun programs using plain text edits or structural matching. Covers renames, file and declaration moves, and call-site migrations; the advanced guide covers extracting code, moving syntax and rule objects.
 ---
 
 # Shorthand
@@ -113,6 +113,5 @@ detected project formatter. Counters and console summaries aren't required.
 
 This page covers renames, file and declaration moves, and call-site migrations. Read
 [advanced-refactors.md](advanced-refactors.md) only to extract code into a new function or file,
-insert, move or remove other statements, use GritQL or the native ast-grep API, or edit languages other
-than JS/TS. The bundled TypeScript 7 package has no legacy compiler API; use the supplied structural
-tools instead.
+insert, move or remove other statements, or use rule objects or the native ast-grep API. The bundled
+TypeScript 7 package has no legacy compiler API; use the supplied structural tools instead.

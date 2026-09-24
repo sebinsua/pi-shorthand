@@ -13,6 +13,5 @@ docker run --rm --privileged --tmpfs /tmp:exec -v "$PWD":/src:ro debian:trixie s
 	# --no-same-owner: owned by root here, or git refuses the copy ("dubious ownership") during install.
 	mkdir /work && cd /src && tar --exclude=node_modules --exclude=e2e/results -cf - . | tar --no-same-owner -xf - -C /work
 	cd /work && npm ci >/dev/null
-	npm run setup:grit
 	npm test
 '

@@ -1919,14 +1919,14 @@ describe.skipIf(!hasOverlay)("automatic formatting", () => {
 		["Node", '(await import("node:fs")).writeFileSync("a.ts", "newApi();\\nadded();\\n");'],
 		["edit", 'edit({ path: "a.ts", oldText: "oldApi();", newText: "newApi();\\nadded();" });'],
 		["ast-grep", 'sg.rewrite("oldApi();", "newApi();\\nadded();", "a.ts");'],
-		["Grit", 'grit("`oldApi()` => `newApi()`", "a.ts");'],
 	]) {
 		test(`shared text preservation covers ${writer} writes without a formatter`, async () => {
 			const repo = await makeRepo({ "a.ts": "\uFEFFoldApi();\r\n" });
 			const result = await run(repo, program, {}, { PI_SHORTHAND_FORMAT: "0" });
 			expect(result.exitCode).toBe(0);
-			const expected = writer === "Grit" ? "\uFEFFnewApi();\r\n" : "\uFEFFnewApi();\r\nadded();\r\n";
-			expect(await Bun.file(path.join(repo, "a.ts")).bytes()).toEqual(new TextEncoder().encode(expected));
+			expect(await Bun.file(path.join(repo, "a.ts")).bytes()).toEqual(
+				new TextEncoder().encode("\uFEFFnewApi();\r\nadded();\r\n"),
+			);
 		});
 	}
 
@@ -2130,52 +2130,6 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		]);
 	});
 
-	test("grit rejects partial output on failure and malformed successful JSONL", async () => {
-		for (const malformed of [false, true]) {
-			const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
-			const body = malformed
-				? "printf 'not-json\\n'"
-				: 'printf \'%s\\n\' \'{"original":{"sourceFile":"src/a.ts","ranges":[{}]}}\'; echo grit exploded >&2; exit 2';
-			const result = await run(
-				repo,
-				`const fs = await import("node:fs/promises");
-				await fs.mkdir("fake");
-				await Bun.write("fake/grit", ${JSON.stringify("#!/bin/sh\n")} + ${JSON.stringify(body)} + "\\n");
-				await fs.chmod("fake/grit", 0o755);
-				process.env.PATH = process.cwd() + "/fake:" + process.env.PATH;
-				grit("pattern", "src");`,
-			);
-
-			expect(result.exitCode).toBe(1);
-			expect(result.output).toContain(
-				malformed ? "grit returned malformed JSONL" : "grit failed (exit 2): grit exploded",
-			);
-		}
-	});
-
-	test.each(["exit 2", "printf 'not-json\\n'"])(
-		'rollback "file" isolates a failed Grit invocation: %s',
-		async (failure) => {
-			const repo = await makeRepo({ ...FILES, ".gitignore": "fake/\n" });
-			const command = `#!/bin/sh\necho partial > src/b.ts\n${failure}\n`;
-			const result = await run(
-				repo,
-				`
-				await Bun.write("src/a.ts", "finished");
-				await Bun.write("fake/grit", ${JSON.stringify(command)});
-				await (await import("node:fs/promises")).chmod("fake/grit", 0o755);
-				process.env.PATH = process.cwd() + "/fake:" + process.env.PATH;
-				grit("pattern", "src/b.ts");
-			`,
-				{ rollback: "file" },
-			);
-			expect(result.exitCode, result.output).toBe(1);
-			expect(result.applied).toEqual(["src/a.ts"]);
-			expect(result.rolledBack).toEqual(["src/b.ts"]);
-			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(FILES["src/b.ts"]);
-		},
-	);
-
 	test("sg validates every scope before any file is edited", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(
@@ -2253,47 +2207,14 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(result.changes).toEqual([]);
 	});
 
-	test("grit resolves scopes from a subdirectory without doubling the directory", async () => {
-		const repo = await makeRepo({
-			"src/a.ts": "oldApi(1);\n",
-			"src/b.ts": "oldApi(2);\n",
-			"src/src/a.ts": "oldApi(99);\n",
-			"outside.ts": "oldApi(3);\n",
-		});
+	test("sg rewrites with a rule object whose constraints restrict a capture", async () => {
+		const repo = await makeRepo({ "a.ts": "oldApi(1);\nlegacyApi(2);\nkeepApi(3);\n" });
 		const result = await run(
 			repo,
-			`
-			process.chdir("src");
-			grit("\`oldApi($x)\` => \`explicit($x)\`", "a.ts");
-			grit("\`oldApi($x)\` => \`globbed($x)\`", "*.ts");
-			grit("\`explicit($x)\` => \`targeted($x)\`", sg.file("a.ts"));
-			grit("\`globbed($x)\` => \`directory($x)\`", ".");
-		`,
-			{ timeoutMs: 15_000 },
+			`sg.rewrite({ rule: { pattern: "$F($X)" }, constraints: { F: { regex: "^(oldApi|legacyApi)$" } } }, "newApi($X)", "a.ts");`,
 		);
 		expect(result.exitCode, result.output).toBe(0);
-		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toContain("targeted(1)");
-		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("directory(2)");
-		expect(await Bun.file(path.join(repo, "src/src/a.ts")).text()).toBe("oldApi(99);\n");
-		expect(await Bun.file(path.join(repo, "outside.ts")).text()).toBe("oldApi(3);\n");
-	});
-
-	test("grit expands globs, accepts file targets and never falls back to all files on an empty scope", async () => {
-		const repo = await makeRepo({ "a.ts": "oldApi(1);\n", "b.ts": "oldApi(2);\n", "other.js": "oldApi(3);\n" });
-		const result = await run(
-			repo,
-			`
-			grit("\`oldApi($x)\` => \`newApi($x)\`", "*.ts");
-			grit("\`newApi($x)\` => \`done($x)\`", sg.file("a.ts"));
-			console.log(JSON.stringify(grit("\`oldApi($x)\` => \`wrong($x)\`", "missing-*.ts")));
-		`,
-			{ timeoutMs: 15_000 },
-		);
-		expect(result.exitCode, result.output).toBe(0);
-		expect(result.output).toContain("warning: grit found no files");
-		expect(await Bun.file(path.join(repo, "a.ts")).text()).toContain("done(1)");
-		expect(await Bun.file(path.join(repo, "b.ts")).text()).toContain("newApi(2)");
-		expect(await Bun.file(path.join(repo, "other.js")).text()).toBe("oldApi(3);\n");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("newApi(1);\nnewApi(2);\nkeepApi(3);\n");
 	});
 
 	test("a failure after importing TypeScript 7 explains that the classic compiler API is gone", async () => {

@@ -12,11 +12,10 @@ Install [Bun](https://bun.sh) 1.4 or later, which runs the programs:
 curl -fsSL https://bun.sh/install | bash
 ```
 
-Then install pi-shorthand and initialize Grit:
+Then install pi-shorthand:
 
 ```sh
 pi install npm:pi-shorthand
-npx @getgrit/cli init --global
 ```
 
 On macOS, install clang and AgentFS:

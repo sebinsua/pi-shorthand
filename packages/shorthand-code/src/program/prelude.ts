@@ -1,6 +1,6 @@
 /**
  * Preloaded into every `code` program. On top of ordinary Bun and Node it adds these globals:
- * $ (Bun shell), edit, glob, grep, sg (ast-grep), grit (GritQL) and refactor (renames and file moves).
+ * $ (Bun shell), edit, glob, grep, sg (ast-grep) and refactor (renames and file moves).
  *
  * sg is ast-grep's own JavaScript API plus file-backed search, rewrite and placement helpers.
  * Programs can also import "@ast-grep/napi" directly.
@@ -642,68 +642,6 @@ function toMatch(file: string, node: SgNode, source: string, pattern: string | N
 	return remember({ ...vars, file, line: node.range().start.line + 1, text: node.text(), vars, node }, source);
 }
 
-// ── GritQL ────────────────────────────────────────────────────────────────────────
-
-/**
- * Apply a GritQL pattern in place (or only match it, with dryRun). Returns the files it matched.
- * e.g. grit("`console.log($x)` => `logger.info($x)`", "src")
- */
-function grit(pattern: string, paths: FileScope = ".", options: { lang?: string; dryRun?: boolean } = {}) {
-	const selected = scopeFiles("grit", paths, (input) => {
-		const normalized = gitPath(input);
-		return statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false }) ? [normalized] : selectFiles(input);
-	});
-	if (selected.length === 0) {
-		console.error(`warning: grit found no files in ${describeScope(paths)}`);
-		return [];
-	}
-	const flags = ["--force", "--jsonl"];
-	if (options.dryRun) flags.push("--dry-run");
-	if (options.lang) flags.push("--language", options.lang);
-
-	const targets = selected.map((file) => resolve(repositoryRoot, file));
-
-	if (options.dryRun) return applyGrit(pattern, flags, targets);
-	const affected = targets.flatMap((file) =>
-		statSync(file).isDirectory() ? selectFiles(file).map((entry) => resolve(repositoryRoot, entry)) : [file],
-	);
-	return editingFiles(affected, () => applyGrit(pattern, flags, targets));
-}
-
-function applyGrit(pattern: string, flags: string[], targets: string[]) {
-	const result = Bun.spawnSync(["grit", "apply", ...flags, pattern, ...targets], { env: process.env });
-	if (result.exitCode !== 0) {
-		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
-		throw new Error(`grit failed (exit ${result.exitCode}): ${diagnostic || "no diagnostics"}`);
-	}
-
-	const files = [];
-	for (const line of result.stdout.toString().split("\n").filter(Boolean)) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			throw new Error(`grit returned malformed JSONL: ${JSON.stringify(line.slice(0, 200))}`);
-		}
-		if (typeof parsed !== "object" || parsed === null) {
-			throw new Error(`grit returned malformed match data: ${JSON.stringify(line.slice(0, 200))}`);
-		}
-		const record = parsed as Record<string, unknown>;
-		const matched = record.original ?? record; // rewrites nest the match under "original"
-		if (typeof matched !== "object" || matched === null) {
-			throw new Error(`grit returned malformed match data: ${JSON.stringify(line.slice(0, 200))}`);
-		}
-		const match = matched as Record<string, unknown>;
-		if (match.sourceFile !== undefined) {
-			if (typeof match.sourceFile !== "string" || !Array.isArray(match.ranges)) {
-				throw new Error(`grit returned malformed match data: ${JSON.stringify(line.slice(0, 200))}`);
-			}
-			files.push({ file: match.sourceFile, matches: match.ranges.length });
-		}
-	}
-	return files;
-}
-
 function normalizeEditLineEndings(text: string): string {
 	return text.replace(/\r\n?/g, "\n");
 }
@@ -759,7 +697,6 @@ const globals = {
 		remove: (...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args)),
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
-	grit: (...args: Parameters<typeof grit>) => logged("grit", args, () => grit(...args)),
 	refactor: {
 		rename: (options: RenameOptions) =>
 			logged("refactor.rename", [options], () => {
