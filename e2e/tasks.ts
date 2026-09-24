@@ -29,7 +29,7 @@ export function taskById(id: string): Task {
 export async function applySolution(task: Task, root: string): Promise<void> {
 	for (const [file, content] of Object.entries(task.solution)) {
 		const target = path.join(root, file);
-		if (content === null) await rm(target);
+		if (content === null) await rm(target, { force: true });
 		else {
 			await mkdir(path.dirname(target), { recursive: true });
 			await writeFile(target, content);

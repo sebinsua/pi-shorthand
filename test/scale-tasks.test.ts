@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { $ } from "bun";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { applySolution, materializeTask, taskById } from "../e2e/tasks.ts";
@@ -97,4 +98,13 @@ test("a migrated logger call counts however its arguments are written", async ()
 	);
 	expect(await task.drift!(root)).toMatchObject({ missed: [], overmatched: [], unrelated: [] });
 	await task.verify(root);
+});
+
+test("a module moved with git mv is not reported as an unrelated change", async () => {
+	const task = taskById("move-module-10");
+	const root = await fixture(task.id);
+	await mkdir(path.join(root, "src/shared/time"), { recursive: true });
+	await $`git mv src/utils/date.ts src/shared/time/date.ts`.cwd(root).quiet();
+	await applySolution(task, root);
+	expect(await task.drift!(root)).toMatchObject({ missed: [], overmatched: [], unrelated: [] });
 });

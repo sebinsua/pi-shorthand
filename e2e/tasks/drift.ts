@@ -91,8 +91,16 @@ export async function measureDrift(
 async function unrelatedChanges(root: string, expected: Set<string>): Promise<string[]> {
 	const status = await $`git status --porcelain=v1 -z --untracked-files=all`.cwd(root).quiet().text();
 	const result: string[] = [];
-	for (const entry of status.split("\0").filter(Boolean)) {
-		const file = entry.slice(3);
+	const fields = status.split("\0");
+	const files: string[] = [];
+	for (let index = 0; index < fields.length; index++) {
+		const entry = fields[index]!;
+		if (!entry) continue;
+		files.push(entry.slice(3));
+		// A rename or copy, as from `git mv`, is followed by its original path as a separate field.
+		if (/^[RC]/.test(entry)) files.push(fields[++index]!);
+	}
+	for (const file of files) {
 		if (expected.has(file)) continue;
 		const before = await $`git show HEAD:${file}`.cwd(root).quiet().nothrow();
 		const after = await readFile(path.join(root, file), "utf8").catch(() => undefined);
