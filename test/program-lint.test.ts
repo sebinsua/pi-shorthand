@@ -57,7 +57,7 @@ test("the TypeScript API hint needs a TypeScript import, a TypeError and TypeScr
 	const program = 'import ts from "typescript";\nts.createSourceFile("a.ts", "", 99);';
 	const error = "TypeError: ts.createSourceFile is not a function";
 	expect(typeScriptApiHint(program, error, "7.0.2")).toEqual([
-		expect.stringContaining("7.0.2 here, which has no compiler API"),
+		expect.stringContaining("7.0.2 here, which no longer has the classic compiler API"),
 	]);
 	expect(typeScriptApiHint(program, error, "5.9.3")).toEqual([]);
 	expect(typeScriptApiHint(program, "Error: missing file", "7.0.2")).toEqual([]);

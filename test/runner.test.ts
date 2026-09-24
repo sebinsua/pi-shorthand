@@ -2296,7 +2296,7 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "other.js")).text()).toBe("oldApi(3);\n");
 	});
 
-	test("a failure after importing TypeScript 7 explains that it has no compiler API", async () => {
+	test("a failure after importing TypeScript 7 explains that the classic compiler API is gone", async () => {
 		const repo = await makeRepo(FILES);
 		const result = await run(
 			repo,
@@ -2305,7 +2305,7 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.warnings).toEqual([
-			expect.stringMatching(/^typescript resolves to 7\.[\d.]+ here, which has no compiler API/),
+			expect.stringMatching(/^typescript resolves to 7\.[\d.]+ here, which no longer has the classic compiler API/),
 		]);
 	});
 
