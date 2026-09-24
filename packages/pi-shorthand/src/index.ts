@@ -1,0 +1,153 @@
+/**
+ * The `code` tool: the model writes one Bun program that makes a multi-step change to the repository.
+ * Its writes go to a copy-on-write overlay; if it succeeds, they're applied and the diff is returned.
+ */
+
+import * as path from "node:path";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import {
+	DEFAULT_TIMEOUT_SECONDS,
+	type Diagnostics,
+	type RunResult,
+	RunnerError,
+	diagnosticLines,
+	runFailed,
+	runWithBun,
+	textForModel,
+} from "shorthand-code";
+import { callLine, resultLines, unstructuredResultText } from "./display.ts";
+
+const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
+
+Common operations:
+- edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
+- await Bun.file(path).text(); await Bun.write(path, text)
+- sg.rewrite(pattern, replacement, files?) discovers and rewrites matching code; omit files for the working directory. $X captures one node; $$$X captures a sequence.
+- sg.one(pattern, files?) selects exactly one match; sg.find returns an array. sg.rewrite also accepts a selected match or array without a file scope.
+- A rewrite callback receives a match and returns text, a native node.replace(text) edit, or null to skip. Return native edits to apply them. Pass selected arrays together for independent edits; select again after changing their file.
+- await refactor.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
+- await refactor.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
+- await refactor.move({ file, symbol, to }) moves a top-level declaration to another file and updates the imports that follow it.
+
+See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax, use GritQL or edit other languages. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
+
+export default function (pi: ExtensionAPI) {
+	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
+	// rather than throwing, since a thrown error loses them.)
+	pi.on("tool_result", async (event) => {
+		const run = event.details as RunResult | undefined;
+		if (event.toolName === "code" && run && runFailed(run)) return { isError: true };
+	});
+
+	pi.registerTool({
+		name: "code",
+		label: "Code",
+		description: DESCRIPTION,
+		promptSnippet:
+			"Make multi-file, repetitive or rename/move changes with one Bun program; a small change to one file is quicker as a direct edit. Run verification separately afterward",
+
+		parameters: Type.Object({
+			title: Type.String({ description: "A few words describing the change, shown to the user" }),
+			program: Type.String({ description: "TypeScript program run with Bun (top-level await allowed)" }),
+			cwd: Type.Optional(
+				Type.String({
+					description:
+						"Working directory for the program; relative to Pi's working directory, or an absolute path. Defaults to Pi's working directory. Must be inside a git worktree.",
+				}),
+			),
+			rollback: Type.Optional(
+				StringEnum(["all", "file"] as const, {
+					description:
+						'On failure: "file" (default) rolls back failed or interrupted file edits and retains the others; "all" applies nothing',
+				}),
+			),
+			timeout: Type.Optional(
+				Type.Number({
+					description: "Seconds of program time before it is killed (default 2); time inside helpers is excluded",
+				}),
+			),
+		}),
+
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			// While it runs, show how long it's been going and the latest reported step.
+			const startedAt = Date.now();
+			let latest: string | undefined;
+			const progress = setInterval(() => {
+				const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)} s`;
+				onUpdate?.({
+					content: [{ type: "text", text: "running" }],
+					details: { progress: latest ? `${elapsed} · ${latest}` : elapsed },
+				});
+			}, 500);
+
+			let result: RunResult;
+			try {
+				result = await runWithBun(
+					{
+						cwd: path.resolve(ctx.cwd, params.cwd ?? "."),
+						program: params.program,
+						timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
+						rollback: params.rollback ?? "file",
+					},
+					signal,
+					(step) => (latest = step),
+				);
+			} catch (error) {
+				if (!(error instanceof RunnerError)) throw error;
+				return {
+					isError: true,
+					content: [{ type: "text" as const, text: [error.message, ...diagnosticLines(error.diagnostics)].join("\n") }],
+					details: { infrastructureError: error.message, diagnostics: error.diagnostics },
+				};
+			} finally {
+				clearInterval(progress);
+			}
+			return {
+				content: [
+					{
+						type: "text",
+						text: textForModel(result, { name: `pi-shorthand-${toolCallId}`, truncateHead, truncateTail }),
+					},
+				],
+				details: result,
+			};
+		},
+
+		renderCall(args, theme) {
+			return new Text(callLine(args, theme), 0, 0);
+		},
+
+		renderResult(result, options, theme) {
+			return renderCodeResult(result, options, theme);
+		},
+	});
+}
+
+export function renderCodeResult(
+	result: { content: readonly unknown[]; details?: unknown },
+	{ expanded, isPartial }: { expanded: boolean; isPartial: boolean },
+	theme: Theme,
+): Text {
+	if (isPartial) {
+		const progress = (result.details as { progress?: string } | undefined)?.progress;
+		return new Text(theme.fg("muted", progress ? `running… ${progress}` : "running…"), 0, 0);
+	}
+	if (result.details && typeof result.details === "object" && "infrastructureError" in result.details) {
+		const failure = result.details as { infrastructureError: string; diagnostics: Diagnostics };
+		return new Text(
+			[
+				theme.fg("error", failure.infrastructureError),
+				"",
+				...diagnosticLines(failure.diagnostics).map((line) => theme.fg("muted", line)),
+			].join("\n"),
+			0,
+			0,
+		);
+	}
+	const run = result.details as RunResult | undefined;
+	if (!run) return new Text(theme.fg("error", unstructuredResultText(result.content)), 0, 0);
+	return new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
+}

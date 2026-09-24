@@ -1,2 +1,4 @@
 node_modules/
 e2e/results/
+# Copied from the root README when each package is packed.
+packages/*/README.md

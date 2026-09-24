@@ -1,0 +1,221 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { $ } from "bun";
+import {
+	aggregateRuns,
+	parseDrift,
+	copyFixture,
+	fixtureIdentity,
+	freezeExtension,
+	pairedOrder,
+	parseGitStatus,
+	processOutcome,
+	runVerification,
+	summarizeEvents,
+	type UsageTotals,
+} from "../harness.ts";
+
+const temporary: string[] = [];
+const usage = (cost: number): UsageTotals => ({
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+});
+
+afterEach(async () => {
+	await Promise.all(temporary.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe("event summaries", () => {
+	test("preserve usage categories and count failures from structured tool state", () => {
+		const events = [
+			{ type: "turn_start" },
+			{ type: "tool_execution_start", toolName: "code", toolCallId: "one" },
+			{
+				type: "tool_execution_end",
+				toolName: "code",
+				toolCallId: "one",
+				isError: false,
+				result: { content: [{ type: "text", text: "looks successful" }], details: { exitCode: 1, timedOut: false } },
+			},
+			{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					usage: {
+						input: 2,
+						output: 3,
+						cacheRead: 5,
+						cacheWrite: 7,
+						totalTokens: 17,
+						cost: { input: 0.2, output: 0.3, cacheRead: 0.5, cacheWrite: 0.7, total: 1.7 },
+					},
+				},
+			},
+		];
+
+		const summary = summarizeEvents(events);
+		expect(summary.failedCodeCalls).toBe(1);
+		expect(summary.toolOutcomes).toEqual([
+			{ toolCallId: "one", toolName: "code", failed: true, exitCode: 1, timedOut: false, conflicts: undefined },
+		]);
+		expect(summary.usage).toEqual({
+			input: 2,
+			output: 3,
+			cacheRead: 5,
+			cacheWrite: 7,
+			totalTokens: 17,
+			cost: { input: 0.2, output: 0.3, cacheRead: 0.5, cacheWrite: 0.7, total: 1.7 },
+		});
+	});
+});
+
+test("a Pi process failure retains its exit status and stderr", () => {
+	expect(processOutcome(23, "authentication failed\n", false, 0)).toEqual({
+		exitCode: 23,
+		stderr: "authentication failed\n",
+		exceededBudget: false,
+		invalidEventLines: 0,
+	});
+});
+
+test("verification is stopped when the remaining experiment budget expires", async () => {
+	const result = await runVerification("sleep 5", process.cwd(), 20);
+	expect(result.timedOut).toBe(true);
+	expect(result.passed).toBe(false);
+	expect(result.durationMs).toBeLessThan(1_000);
+});
+
+test("Git status preserves untracked additions and unusual filenames", () => {
+	expect(parseGitStatus(" M tracked.ts\0?? new file.ts\0?? line\nname.ts\0")).toEqual([
+		{ status: " M", path: "tracked.ts" },
+		{ status: "??", path: "new file.ts" },
+		{ status: "??", path: "line\nname.ts" },
+	]);
+});
+
+test("aggregate results charge failed attempts to verified completions", () => {
+	expect(
+		aggregateRuns(
+			[
+				{ verified: false, seconds: 2, usage: usage(1) },
+				{ verified: true, seconds: 4, usage: usage(2) },
+			],
+			60,
+		),
+	).toEqual({
+		attempts: 2,
+		verifiedCompletions: 1,
+		completionRate: 0.5,
+		budgetSeconds: 60,
+		totalCost: 3,
+		costPerVerifiedCompletion: 3,
+		meanLatencySeconds: 3,
+		meanToolCalls: 0,
+		meanOutputTokens: 0,
+		drift: null,
+	});
+});
+
+const drift = (missed: number) => ({
+	sites: 4,
+	missed: Array(missed).fill("site"),
+	decoys: 2,
+	overmatched: [],
+	unrelated: ["scratch.ts"],
+});
+
+test("aggregate results average tool calls, output tokens and drift", () => {
+	expect(
+		aggregateRuns(
+			[
+				{
+					verified: false,
+					seconds: 2,
+					usage: { ...usage(1), output: 100 },
+					tools: { read: 3, edit: 5 },
+					drift: drift(2),
+				},
+				{ verified: true, seconds: 4, usage: { ...usage(1), output: 300 }, tools: { code: 1 }, drift: drift(0) },
+			],
+			60,
+		),
+	).toMatchObject({
+		meanToolCalls: 4.5,
+		meanOutputTokens: 200,
+		drift: { attempts: 2, missed: 1, overmatched: 0, unrelated: 1 },
+	});
+});
+
+test("drift is read from the evaluator's output", () => {
+	expect(parseDrift('DRIFT {"missed":["a"]}\nBehavioural checks passed')).toEqual({ missed: ["a"] } as never);
+	expect(parseDrift("checks passed")).toBeNull();
+	expect(parseDrift(undefined)).toBeNull();
+});
+
+test("paired revisions are frozen separately from an identical dirty fixture", async () => {
+	const root = await mkdtemp(path.join(tmpdir(), "shorthand-e2e-test-"));
+	temporary.push(root);
+	const fixture = path.join(root, "fixture");
+	const baseline = path.join(root, "baseline-source");
+	const candidate = path.join(root, "candidate-source");
+	for (const directory of [fixture, baseline, candidate]) {
+		await mkdir(directory);
+		await $`git init -q`.cwd(directory);
+		await Bun.write(path.join(directory, "tracked.ts"), "original\n");
+		await Bun.write(path.join(directory, "deleted.ts"), "delete me\n");
+		await Bun.write(path.join(directory, ".gitignore"), "ignored.txt\n");
+		await mkdir(path.join(directory, "bin"));
+		await Bun.write(path.join(directory, "bin", "tool"), "#!/bin/sh\n");
+		await chmod(path.join(directory, "bin", "tool"), 0o755);
+		await $`git add .gitignore tracked.ts deleted.ts bin/tool`.cwd(directory);
+		await $`git -c user.name=Test -c user.email=test@example.com -c commit.gpgsign=false commit -qm initial`.cwd(
+			directory,
+		);
+	}
+	for (const directory of [fixture, baseline, candidate]) await rm(path.join(directory, "deleted.ts"));
+	await Bun.write(path.join(fixture, "tracked.ts"), "staged one\n");
+	await $`git add tracked.ts`.cwd(fixture);
+	await Bun.write(path.join(fixture, "tracked.ts"), "working tree\n");
+	await Bun.write(path.join(fixture, "untracked.ts"), "untracked\n");
+	await Bun.write(path.join(fixture, "ignored.txt"), "ignored one\n");
+	await Bun.write(path.join(baseline, "index.ts"), "baseline\n");
+	await Bun.write(path.join(candidate, "index.ts"), "candidate\n");
+
+	const identity = await fixtureIdentity(fixture);
+	const recordedFixture = path.join(root, "recorded-fixture");
+	const firstFixture = path.join(root, "first-fixture");
+	const secondFixture = path.join(root, "second-fixture");
+	await copyFixture(fixture, recordedFixture);
+	await Bun.write(path.join(fixture, "tracked.ts"), "staged two\n");
+	await $`git add tracked.ts`.cwd(fixture);
+	await Bun.write(path.join(fixture, "tracked.ts"), "working tree\n");
+	await Bun.write(path.join(fixture, "ignored.txt"), "ignored two\n");
+	await copyFixture(recordedFixture, firstFixture);
+	await copyFixture(recordedFixture, secondFixture);
+	const frozenBaseline = await freezeExtension(baseline, path.join(root, "frozen-baseline"), "baseline");
+	const frozenCandidate = await freezeExtension(candidate, path.join(root, "frozen-candidate"), "candidate");
+	await Bun.write(path.join(baseline, "index.ts"), "changed after freeze\n");
+
+	expect(identity.changes).toEqual([
+		{ status: " D", path: "deleted.ts" },
+		{ status: "MM", path: "tracked.ts" },
+		{ status: "??", path: "untracked.ts" },
+	]);
+	expect(await fixtureIdentity(firstFixture)).toEqual(identity);
+	expect(await fixtureIdentity(secondFixture)).toEqual(identity);
+	expect(await $`git show :tracked.ts`.cwd(firstFixture).text()).toBe("staged one\n");
+	expect(await Bun.file(path.join(secondFixture, "ignored.txt")).text()).toBe("ignored one\n");
+	expect(frozenBaseline.path).not.toBe(frozenCandidate.path);
+	expect(await Bun.file(path.join(frozenBaseline.path, "index.ts")).text()).toBe("baseline\n");
+	expect(await Bun.file(path.join(frozenCandidate.path, "index.ts")).text()).toBe("candidate\n");
+	expect(await lstat(path.join(frozenBaseline.path, "deleted.ts")).catch(() => null)).toBeNull();
+	expect((await lstat(path.join(frozenBaseline.path, "bin", "tool"))).mode & 0o111).toBe(0o111);
+	expect(pairedOrder(1)).toEqual(["baseline", "candidate"]);
+	expect(pairedOrder(2)).toEqual(["candidate", "baseline"]);
+});

@@ -1,0 +1,68 @@
+{
+	"name": "pi-shorthand",
+	"version": "0.8.0",
+	"description": "Pi tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.",
+	"keywords": [
+		"ast-grep",
+		"bun",
+		"code-mode",
+		"gritql",
+		"overlay",
+		"pi",
+		"pi-extension",
+		"pi-package"
+	],
+	"homepage": "https://github.com/sebinsua/pi-shorthand/tree/main/packages/pi-shorthand#readme",
+	"bugs": "https://github.com/sebinsua/pi-shorthand/issues",
+	"license": "MIT",
+	"author": "Seb Insua",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/sebinsua/pi-shorthand.git",
+		"directory": "packages/pi-shorthand"
+	},
+	"files": [
+		"src",
+		"skills",
+		"README.md"
+	],
+	"type": "module",
+	"scripts": {
+		"prepack": "cp ../../README.md README.md"
+	},
+	"dependencies": {
+		"shorthand-code": "0.8.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-ai": {
+			"optional": true
+		},
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		},
+		"@earendil-works/pi-tui": {
+			"optional": true
+		},
+		"typebox": {
+			"optional": true
+		}
+	},
+	"engines": {
+		"bun": ">=1.4"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		],
+		"skills": [
+			"./skills"
+		],
+		"image": "https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2"
+	}
+}

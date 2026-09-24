@@ -1,48 +1,21 @@
 {
-	"name": "pi-shorthand",
-	"version": "0.8.0",
-	"description": "Pi tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.",
-	"keywords": [
-		"ast-grep",
-		"bun",
-		"code-mode",
-		"gritql",
-		"overlay",
-		"pi",
-		"pi-extension",
-		"pi-package"
-	],
-	"homepage": "https://github.com/sebinsua/pi-shorthand#readme",
-	"bugs": "https://github.com/sebinsua/pi-shorthand/issues",
+	"name": "shorthand-workspace",
+	"private": true,
+	"description": "Workspace for shorthand-code and pi-shorthand.",
 	"license": "MIT",
-	"author": "Seb Insua",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/sebinsua/pi-shorthand.git"
-	},
-	"files": [
-		"*.c",
-		"*.ts",
-		"skills",
-		"README.md"
+	"workspaces": [
+		"packages/shorthand-code",
+		"packages/pi-shorthand"
 	],
 	"type": "module",
 	"scripts": {
-		"test": "bun test",
+		"test": "bun test ./packages/shorthand-code/test ./packages/pi-shorthand/test ./e2e/test",
 		"typecheck": "tsc -p .",
 		"lint": "oxlint --deny-warnings",
 		"format": "oxfmt",
 		"check": "tsc -p . && oxlint --deny-warnings && oxfmt --check",
 		"setup:grit": "grit init --global",
 		"prepare": "git config core.hooksPath .githooks 2>/dev/null || true"
-	},
-	"dependencies": {
-		"@ast-grep/cli": "^0.45.3",
-		"@ast-grep/napi": "^0.45.3",
-		"@getgrit/cli": "0.1.0-alpha.1743007075",
-		"diff": "^9.0.0",
-		"typescript": "7.0.2",
-		"vscode-jsonrpc": "^9.0.2"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": "^0.85.1",
@@ -52,35 +25,15 @@
 		"@types/node": "^26.6.1",
 		"oxfmt": "^0.68.0",
 		"oxlint": "^1.83.0",
-		"typebox": "^1.3.7"
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
-	},
-	"peerDependenciesMeta": {
-		"@earendil-works/pi-ai": {
-			"optional": true
-		},
-		"@earendil-works/pi-coding-agent": {
-			"optional": true
-		},
-		"@earendil-works/pi-tui": {
-			"optional": true
-		},
-		"typebox": {
-			"optional": true
-		}
+		"typebox": "^1.3.7",
+		"typescript": "7.0.2"
 	},
 	"pi": {
 		"extensions": [
-			"./index.ts"
+			"./packages/pi-shorthand/src/index.ts"
 		],
 		"skills": [
-			"./skills"
-		],
-		"image": "https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2"
+			"./packages/pi-shorthand/skills"
+		]
 	}
 }

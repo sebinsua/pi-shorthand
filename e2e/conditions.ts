@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -46,9 +46,19 @@ export function rotateConditions<T>(conditions: T[], repetition: number): T[] {
 	return [...conditions.slice(offset), ...conditions.slice(0, offset)];
 }
 
+/**
+ * The entry Pi would load, from package.json's `pi.extensions`. Older checkouts, which paired runs may compare
+ * against, kept it at the root as index.ts.
+ */
+async function extensionIndex(root: string): Promise<string> {
+	const manifest = await readFile(path.join(root, "package.json"), "utf8").catch(() => null);
+	const entry = manifest ? (JSON.parse(manifest) as { pi?: { extensions?: string[] } }).pi?.extensions?.[0] : undefined;
+	return path.join(root, entry ?? "index.ts");
+}
+
 /** Wrap registration rather than changing the shipped extension or its execution behaviour. */
 export async function extensionEntry(root: string, documentation: Documentation, destination: string): Promise<string> {
-	const entry = path.join(root, "index.ts");
+	const entry = await extensionIndex(root);
 	if (documentation === "shipped") return entry;
 	await mkdir(path.dirname(destination), { recursive: true });
 	await writeFile(

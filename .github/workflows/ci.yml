@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # The same Debian container with bubblewrap that `test/linux.sh` uses locally.
-      - run: ./test/linux.sh
+      # The same Debian container with bubblewrap that `scripts/test-linux.sh` uses locally.
+      - run: ./scripts/test-linux.sh
 
   test-macos:
     runs-on: macos-latest
@@ -38,4 +38,4 @@ jobs:
         run: |
           curl -fsSL https://agentfs.ai/install | AGENTFS_UNMANAGED_INSTALL="$HOME/agentfs" sh
           echo "$HOME/agentfs" >> "$GITHUB_PATH"
-      - run: bun test
+      - run: npm test

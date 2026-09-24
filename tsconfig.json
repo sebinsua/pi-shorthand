@@ -9,6 +9,6 @@
 		"skipLibCheck": true,
 		"types": ["bun", "node"]
 	},
-	"include": ["*.ts", "test/**/*.ts", "e2e/**/*.ts"],
+	"include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "e2e/**/*.ts"],
 	"exclude": ["node_modules", "e2e/results"]
 }

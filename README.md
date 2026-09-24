@@ -6,7 +6,13 @@ A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with 
 
 ## Install
 
-Install pi-shorthand and initialize Grit:
+Install [Bun](https://bun.sh) 1.4 or later, which runs the programs:
+
+```sh
+curl -fsSL https://bun.sh/install | bash
+```
+
+Then install pi-shorthand and initialize Grit:
 
 ```sh
 pi install npm:pi-shorthand
@@ -34,3 +40,7 @@ pi-shorthand gives Pi a programming environment instead of a patch format. This 
 Programs edit a private workspace, with host files outside the repository kept read-only. By default, a failure keeps completed files and rolls back failed or interrupted edits. Concurrent edits can cause a run to be rejected; conflict detection is best-effort, not an atomic commit.
 
 The `code` tool uses Pi's working directory by default. Pass `cwd` to target another checkout; relative paths are resolved from Pi's working directory. For example, when Pi starts in a bare worktree container, `cwd: "child"` targets its `child` worktree. The chosen directory must be inside a Git worktree.
+
+## Without Pi
+
+The engine is published separately as `shorthand-code`, with a `shorthand` command that runs a program from a file or stdin and prints the same result. See `shorthand --help`.

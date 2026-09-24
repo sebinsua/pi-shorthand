@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { runWithBun } from "../index.ts";
+import { runWithBun } from "shorthand-code";
 import { allTasks, materializeTask } from "./tasks.ts";
 import { runVerification } from "./harness.ts";
 import { saveChanges } from "./artifacts.ts";

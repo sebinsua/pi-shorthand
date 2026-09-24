@@ -6,7 +6,7 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import type { RunResult } from "../runner.ts";
+import type { RunResult } from "../packages/shorthand-code/src/runner/runner.ts";
 
 const entries = Number(process.env.SHORTHAND_SCALING_ENTRIES ?? 115000);
 const bytes = Number(process.env.SHORTHAND_SCALING_BYTES ?? 11133);
@@ -15,7 +15,7 @@ if (![entries, bytes, repetitions].every((n) => Number.isSafeInteger(n) && n > 0
 	throw new Error("Scaling fixture parameters must be positive integers");
 const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "shorthand-scaling-")));
 const repo = path.join(temporary, "repo");
-const runner = path.resolve(import.meta.dir, "../runner.ts");
+const runner = path.resolve(import.meta.dir, "../packages/shorthand-code/src/runner/runner.ts");
 await fs.mkdir(repo);
 const samples: Record<string, RunResult[]> = { small: [], large: [] };
 const summarize = (runs: RunResult[]) =>
