@@ -215,12 +215,29 @@ function withSharedListing<T>(select: () => T): T {
 	}
 }
 
+let tracked: { stamp: string; files: Set<string> } | undefined;
+let indexPath: string | undefined;
+
+/** Files Git tracks, listed once and again only after the index changes, e.g. from `git add` in the program. */
+function trackedFiles(): Set<string> {
+	indexPath ??= resolve(repositoryRoot, git(["-C", repositoryRoot, "rev-parse", "--git-path", "index"]).trim());
+	const index = statSync(indexPath, { throwIfNoEntry: false });
+	const stamp = index ? `${index.ino}:${index.size}:${index.mtimeMs}` : "";
+	if (tracked?.stamp !== stamp) {
+		const listed = git(["-C", repositoryRoot, "ls-files", "-z", "--cached"]).split("\0").filter(Boolean);
+		tracked = { stamp, files: new Set(listed) };
+	}
+	return tracked.files;
+}
+
 /** Select a Git-visible file, directory, or glob and return repository-relative paths. */
 function selectFiles(input: string): string[] {
 	const normalized = gitPath(input);
 	const stats = statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false });
 	const pathspec = stats?.isFile() || stats?.isDirectory();
 	if (!sharedListing) {
+		// A program often names files one at a time; a tracked one needs no git process to be selected.
+		if (stats?.isFile() && trackedFiles().has(normalized)) return [normalized];
 		if (pathspec) return gitFiles(normalized);
 		const matcher = new Glob(normalized);
 		return gitFiles().filter((file) => matcher.match(file));

@@ -2738,6 +2738,23 @@ sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
 		]);
 	});
 
+	test("a single named file is selected as Git sees it", async () => {
+		const repo = await makeRepo({
+			".gitignore": "src/ignored.ts\n",
+			"src/tracked.ts": "oldApi(1);\n",
+			"src/deleted.ts": "oldApi(2);\n",
+			"src/ignored.ts": "oldApi(3);\n",
+		});
+		const result = await run(
+			repo,
+			`await Bun.file("src/deleted.ts").delete();
+const files = ["src/tracked.ts", "src/deleted.ts", "src/ignored.ts"];
+console.log(JSON.stringify(files.map((file) => sg.find("oldApi($A)", file).length)));`,
+		);
+
+		expect(JSON.parse(result.output.trim().split("\n").at(-1)!)).toEqual([1, 0, 0]);
+	});
+
 	test("a list of scopes selects the same files as each scope on its own", async () => {
 		const repo = await makeRepo({
 			".gitignore": "src/ignored.ts\n",
