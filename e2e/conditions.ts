@@ -7,18 +7,20 @@ export type Setup = (typeof setups)[number];
 export type Documentation = "shipped" | "minimal";
 
 /** API facts only: no batching advice, workflow examples, or skill referral. */
-export const minimalDescription = `Execute a TypeScript program with Bun in an isolated repository copy. Top-level await and Bun/Node APIs are available. Use relative repository paths. Successful writes are applied transactionally and returned as a diff; failures return the error and candidate diff. Only tracked and non-ignored files are applied. Writes to .git are blocked.
+export const minimalDescription = `Execute a TypeScript program with Bun in an isolated repository workspace. Top-level await and Bun/Node APIs are available. Use relative repository paths. Successful writes are applied transactionally and returned as a diff; failures return the error and candidate diff. Only tracked and non-ignored files are applied. Writes to .git are blocked.
 Synchronous globals:
+edit({path, oldText, newText}) replaces exactly one literal occurrence.
 glob(pattern, dir?) -> string[]
 grep(stringOrRegExp, paths?) -> {file, line, text}[]; strings match literally.
 sg.find(pattern, files?) -> {file, line, text, vars}[]; files accepts paths, directories, globs or lists (JS/TS). $X matches one node; $$$X matches zero or more.
-sg.rewrite(pattern, templateOrFunction, files?) -> number; templates interpolate captures; callbacks receive match with captures directly on it (m.X), returning replacement text or null.
+sg.rewrite(pattern, templateOrFunction, files?) -> number; templates interpolate captures; callbacks receive match with captures directly on it (m.X), returning replacement text or null. A pattern rewrite skips places an earlier rewrite produced.
 sg.one(pattern, files?) requires one match; sg.file(path) selects a JS/TS file root, including new files.
 sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). Destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. Statements/declarations only. Containers are file roots or matched statement blocks. Matches must be refreshed after editing their file. move's optional function transforms text.
 sg also exposes ast-grep's native API, including parse and Lang. Importing @ast-grep/napi is supported.
 grit(pattern, paths?, {lang?, dryRun?}) -> {file, matches}[].
+Asynchronous refactors: refactor.rename({file, symbol, to}), refactor.renameFile({from, to}) and refactor.move({file, symbol, to}) update references and imports across the project.
 $ is Bun's asynchronous shell and requires await; ast-grep, grit and git CLIs are available.
-timeout is in seconds (default 2). rollback="all" applies nothing on failure. rollback="file" can retain files closed before a timeout if writer inspection succeeds; other failures apply nothing.`;
+timeout is in seconds of program time (default 2); time inside helpers is excluded, up to 60 extra seconds. On failure, rollback="file" (default) rolls back failed or interrupted file edits and keeps the others; rollback="all" applies nothing.`;
 
 export function parseSetups(value: string): Setup[] {
 	const result = value.split(",");

@@ -5,20 +5,36 @@ session, checks the result independently, and keeps evidence for human review.
 
 ## Findings so far
 
-- **Pass rate never separated the conditions.** In every pilot and guidance study, stock Pi and shorthand both
-  verified every task. Those fixtures are too small for editing mechanics to matter.
-- **Shorthand was slower in every stock comparison**, by 9–76%. Part of this is reading the skill before the
-  first edit; with the tool optional, agents often chose stock `edit` instead.
-- **The skill changed strategy more than speed.** Without it, sessions were faster but lost source reuse and
-  syntax-aware migration.
-- **The scale references found a `refactor.rename` bug, now fixed.** At 100 files, renaming at the declaration rewrote
-  a barrel to `export { formatPrice as formatAmount }`, so barrel importers kept the old name. The server now
-  renames without aliases, and object literal shorthands keep their keys. All four scale references (TypeScript
-  server, ast-grep and GritQL) pass at 100 files with zero drift.
+- **The pilot and guidance studies could not separate the tools.** Stock Pi and shorthand verified every task,
+  and shorthand was 9–76% slower: its advantages do not show on a few small edits.
+- **At repository scale, shorthand wins where a helper does the analysis.** Single runs at 100 files, with
+  `openai-codex/gpt-5.6-sol` at high reasoning, every run verified with zero drift:
+
+  | Task, prompt                     |   Stock | Shorthand |
+  | -------------------------------- | ------: | --------: |
+  | `rename-symbol-100`, brief       |    142s |   **55s** |
+  | `rename-symbol-100`, outcome     |    129s |   **43s** |
+  | `options-migration-100`, brief   |    203s |  **114s** |
+  | `options-migration-100`, outcome |    140s |  **107s** |
+  | `move-module-100`, brief         |     87s |   **52s** |
+  | `move-module-100`, outcome       |     57s |   **47s** |
+  | `logger-migration-100`, brief    | **73s** |       91s |
+  | `logger-migration-100`, outcome  | **98s** |      136s |
+
+  The shorthand logger run with the outcome prompt was first marked failed by an evaluator that accepted only
+  one spelling of a migrated call; its saved result passes the corrected evaluator. At 100 files stock Pi also
+  writes a program, in Python through bash; shorthand's advantage is a better program. Stock is faster on the logger migration, which suits `sed` and a short script.
+
+- **Small edits cost nothing extra when the tool is optional.** On `empty-average` the model now picks a direct
+  edit (24s against stock's 24s). At 10 files a rename was 2.2× faster (35s against 76s), but a call migration
+  was slower (108s against 61s): the model chained one `sg.rewrite` per call shape and repaired the output by
+  hand. Pattern rewrites now skip places an earlier rewrite produced, so that run needs repeating.
+- **Most losses came from the tool, not the model, and were fixed:** a list of files started one git process per
+  file, the formatter searched configuration once per changed file, helper time counted towards the two-second
+  timeout, large diffs filled the model's context, the model read the advanced guide for ordinary tasks, and
+  macOS AppleDouble files appeared in directory listings.
 - **Known backend issue:** a combined GritQL `sequential` query panicked in the installed CLI; two separate
   queries work.
-- **Open question:** whether shorthand wins when a change fans out across many files, or when the prompt is a
-  precise brief. The [scale suite](#scale-suite) tests this.
 
 ## Layout
 
@@ -222,8 +238,8 @@ results directory; do not combine them blindly with new experiments. Use a fresh
 
 ## Local reference edits and recovery
 
-[reference-programs](reference-programs) holds human-authored ast-grep, GritQL, TypeScript-server and
-source-text programs, named `<task-id>-<approach>.ts.txt`; scale references run at 100 files. Run
+[reference-programs](reference-programs) holds human-authored ast-grep, GritQL, `refactor` and source-text
+programs, named `<task-id>-<approach>.ts.txt`; scale references run at 100 files. Run
 `bun e2e/reference-edits.ts` (`--only` selects some) to execute them, or `bun e2e/replay-edit-errors.ts` to
 replay two observed API failures and their corrections. Both use temporary repositories and the real overlay
 backend, evaluate independently afterwards, and never call a model.
