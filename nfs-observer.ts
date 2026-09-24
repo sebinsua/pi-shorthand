@@ -188,6 +188,11 @@ export class NfsObserver {
 			await this.journal.observeRename(from[0], to[0]);
 			return (response) => {
 				if (response.u32() !== 0) return;
+				const moved = (old: string) => old === from[0] || old.startsWith(`${from[0]}/`);
+				for (const old of [...this.appleDouble].filter(moved)) {
+					this.appleDouble.delete(old);
+					this.appleDouble.add(to[0] + old.slice(from[0].length));
+				}
 				for (const aliases of this.handles.values()) {
 					// Snapshot before mutating: newly inserted aliases must not be visited again.
 					const previousAliases = [...aliases];
@@ -219,6 +224,7 @@ export class NfsObserver {
 				// Keep the reply up to the first entry, then every entry that is not hidden.
 				const kept: Buffer[] = [reply.subarray(0, response.position)];
 				let hidden = false;
+				let last: Buffer | undefined;
 				for (let start = response.position; response.bool(); start = response.position) {
 					response.take(8); // fileid
 					const bytes = response.opaque(255);
@@ -236,12 +242,21 @@ export class NfsObserver {
 							this.register(response.opaque(64), files);
 						}
 					}
+					const entry = reply.subarray(start, response.position);
 					const listed = directories.map((dir) => path.posix.join(dir, name));
-					if (listed.some((file) => this.appleDouble.has(file))) hidden = true;
-					else kept.push(reply.subarray(start, response.position));
+					if (listed.some((file) => this.appleDouble.has(file))) {
+						hidden = true;
+						last = entry;
+					} else {
+						kept.push(entry);
+						last = undefined;
+					}
 				}
 				const end = response.position - 4; // the "no more entries" marker
-				response.bool(); // EOF
+				const eof = response.bool();
+				// The client continues a listing from the cookie of the last entry it received, so a page that is
+				// not the last one keeps its final entry even when that entry would be hidden.
+				if (last && !eof) kept.push(last);
 				return hidden ? Buffer.concat([...kept, reply.subarray(end)]) : undefined;
 			};
 		}

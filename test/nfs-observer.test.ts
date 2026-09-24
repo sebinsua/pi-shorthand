@@ -186,11 +186,11 @@ test("XDR rejects truncated padding, oversized values and invalid booleans", () 
 });
 
 /** A READDIRPLUS reply body listing names, each with a handle, followed by EOF. */
-function listing(names: string[]): Buffer {
+function listing(names: string[], eof = true): Buffer {
 	return Buffer.concat([
 		words(0, 0, 0, 0),
 		...names.flatMap((name, i) => [words(1, 0, i + 10), opaque(name), words(0, i + 1, 0, 1), opaque(`h-${name}`)]),
-		words(0, 1),
+		words(0, eof ? 1 : 0),
 	]);
 }
 
@@ -209,7 +209,7 @@ function listedNames(message: Buffer): string[] {
 		reader.postAttributes();
 		if (reader.bool()) reader.opaque(64);
 	}
-	expect(reader.bool()).toBe(true);
+	reader.bool();
 	expect(reader.position).toBe(message.length);
 	return names;
 }
@@ -249,4 +249,34 @@ test("a listing without hidden files is forwarded unchanged", async () => {
 	const { observer } = await fixture();
 	const listed = await observer.before(call(17, opaque(rootHandle)));
 	expect(await listed(reply(listing(["input"])))).toBeUndefined();
+});
+
+test("a page that is not the last keeps its final entry so the client can continue", async () => {
+	const { observer } = await fixture({ kept: "kept\n" });
+	await lookup(observer, "input", inputHandle);
+	await lookup(observer, "kept", Buffer.from("kept-handle"));
+	await create(observer, "._input");
+	await create(observer, "._kept");
+
+	const page = await observer.before(call(17, opaque(rootHandle)));
+	const rewritten = await page(reply(listing(["._input", "input", "._kept"], false)));
+	expect(listedNames(rewritten as Buffer)).toEqual(["input", "._kept"]);
+	const last = await observer.before(call(17, opaque(rootHandle)));
+	expect(listedNames((await last(reply(listing(["kept", "._kept"])))) as Buffer)).toEqual(["kept"]);
+});
+
+test("hidden AppleDouble files stay hidden after their directory is renamed", async () => {
+	const { observer } = await fixture({ "dir/file": "file\n" });
+	const dirHandle = Buffer.from("dir-handle");
+	await lookup(observer, "dir", dirHandle);
+	const inDir = (name: string) => Buffer.concat([opaque(dirHandle), opaque(name)]);
+	const found = await observer.before(call(3, inDir("file")));
+	await found(reply(Buffer.concat([words(0), opaque("file-handle"), words(0, 0)])));
+	const created = await observer.before(call(8, inDir("._file")));
+	await created(reply(Buffer.concat([words(0, 1), opaque("sidecar-handle"), words(0, 0, 0)])));
+
+	const renamed = await observer.before(call(14, Buffer.concat([child("dir"), child("moved")])));
+	await renamed(reply(words(0)));
+	const listed = await observer.before(call(17, opaque(dirHandle)));
+	expect(listedNames((await listed(reply(listing(["file", "._file"])))) as Buffer)).toEqual(["file"]);
 });
