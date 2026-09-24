@@ -1,6 +1,6 @@
 ---
 name: shorthand
-description: Edit repository files with Bun programs using plain text edits or structural matching. Covers renames, file moves and call-site migrations; the advanced guide covers extracting code, moving syntax, GritQL and other languages.
+description: Edit repository files with Bun programs using plain text edits or structural matching. Covers renames, file and declaration moves, and call-site migrations; the advanced guide covers extracting code, moving syntax, GritQL and other languages.
 ---
 
 # Shorthand
@@ -20,13 +20,14 @@ surrounding text to distinguish repeated occurrences. Replacement text is litera
 Line-ending differences are accepted when matching.
 `edit` calls are synchronous and can be combined in one program; later calls see earlier changes.
 
-## Semantic TypeScript refactors
+## Refactors
 
-Use the TypeScript language server to rename symbols or move files across the project:
+Rename symbols, move files, or move a declaration to another file, updating the project to match:
 
 ```ts
 await refactor.rename({ file: "src/users.ts", symbol: "parseUser", to: "decodeUser" });
 await refactor.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
+await refactor.move({ file: "src/api.ts", symbol: "parseUser", to: "src/users/parse.ts" });
 ```
 
 `refactor.rename` requires the declaration name to be unique in its file and leaves unrelated symbols
@@ -34,21 +35,11 @@ alone. `refactor.renameFile` moves the file and updates imports and exports that
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
 rules, updated paths and failure conditions.
 
-## Move a declaration to another file
-
-`sg.move` a top-level declaration to the top level of another JS/TS file, and imports follow it:
-
-```ts
-sg.move(sg.one("export function parseUser($$$ARGS) { $$$BODY }", "src/api.ts"), {
-	endOf: sg.file("src/users/parse.ts"),
-});
-```
-
-The target imports what the declaration uses, exporting helpers from the source when needed; the
-source imports it back if it still uses it; and files importing it from the source import it from the
-target. Default exports, overloads, namespace imports that use it and dynamic imports of the source are
-refused before anything is written. Imports through `tsconfig` path aliases or package names are not
-updated.
+`refactor.move` appends the top-level declaration of `symbol` to `to`, which may be a new file. The
+target imports what the declaration uses, exporting helpers from the source when needed; the source
+imports it back if it still uses it; and files importing it from the source import it from the target.
+Importers keep their style, including `tsconfig` path aliases. Default exports, overloads, namespace
+imports that use it and dynamic imports of the source are refused before anything is written.
 
 ## Insert before or after a statement
 

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { editingFiles } from "./file-outcomes.ts";
-import { planImports } from "./move-imports.ts";
+import { planImports, topLevelDeclaration } from "./move-imports.ts";
 
 export interface Match {
 	file: string;
@@ -310,32 +310,34 @@ function insertNodes(text: string, destination: Destination): void {
 	apply([{ saved, edits: [edit] }]);
 }
 
-export interface MoveOptions {
-	/** JS/TS files that may mention any of the names; those importing a moved declaration are updated. */
-	filesMentioning?: (names: string[]) => string[];
+export function move(match: Match, destination: Destination, transform?: (text: string) => string): void {
+	return editingFiles([match.file, ...destinationFiles(destination)], () => moveNodes(match, destination, transform));
 }
 
 /**
- * Moves a statement. Moving a top-level declaration to the top level of another file also updates imports:
- * the target imports what the declaration uses, the source imports it back if still needed, and files
- * importing it from the source import it from the target.
+ * Moves the top-level declaration of `symbol` in `from` to the end of `to`, updating imports: the target
+ * imports what the declaration uses, the source imports it back if still needed, and files importing it
+ * from the source import it from the target. `filesMentioning` lists JS/TS files that may contain the names.
  */
-export function move(
-	match: Match,
-	destination: Destination,
-	transform?: (text: string) => string,
-	options: MoveOptions = {},
+export function moveDeclaration(
+	from: string,
+	symbol: string,
+	to: string,
+	files: { mentioning: (names: string[]) => string[]; loadingModules: () => string[] },
 ): void {
-	return editingFiles([match.file, ...destinationFiles(destination)], () =>
-		moveNodes(match, destination, transform, options),
-	);
+	const lang = scriptLanguage(from);
+	if (!lang || !scriptLanguage(to)) throw new Error("refactor.move requires JS/TS files");
+	const source = readFileSync(from, "utf8");
+	const node = topLevelDeclaration(parse(lang, source).root(), symbol, from);
+	const match = remember({ file: from, text: node.text(), node }, source);
+	return editingFiles([from, to], () => moveNodes(match, { endOf: file(to) }, undefined, files));
 }
 
 function moveNodes(
 	match: Match,
 	destination: Destination,
-	transform: ((text: string) => string) | undefined,
-	options: MoveOptions,
+	transform?: (text: string) => string,
+	files?: { mentioning: (names: string[]) => string[]; loadingModules: () => string[] },
 ): void {
 	const source = snapshot(match);
 	const deletion = removal(source);
@@ -358,17 +360,19 @@ function moveNodes(
 		const sourceRoot = source.node.getRoot().root();
 		const targetRoot = target.saved.node.getRoot().root();
 		const plan =
-			source.node.parent()?.kind() === "program" && target.edit.parent.kind() === "program"
+			files && source.node.parent()?.kind() === "program" && target.edit.parent.kind() === "program"
 				? planImports({
 						sourceFile: source.file,
 						node: source.node,
-						movedText: text,
 						targetFile: target.saved.file,
 						targetRoot,
-						filesMentioning: options.filesMentioning ?? (() => []),
+						filesMentioning: files.mentioning,
+						filesLoadingModules: files.loadingModules,
 					})
 				: null;
 		const placed = { ...target.edit };
+		// The source still uses a declaration it did not export, so the target now has to export it.
+		if (plan?.exportMoved) placed.text = placed.text.replace(text, `export ${text}`);
 		const targetEdits: Edit[] = [];
 		for (const edit of plan?.target ?? []) {
 			// Edits at the declaration's insertion point are combined with it: imports inserted there come

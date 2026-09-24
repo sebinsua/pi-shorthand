@@ -20,6 +20,7 @@ import { $ as bunShell, Glob } from "bun";
 import { editingFiles, executionRoot, installFileOutcomeTracking } from "./file-outcomes.ts";
 import {
 	file as selectFile,
+	moveDeclaration,
 	getMatchSnapshot,
 	insert,
 	isFileTarget,
@@ -303,6 +304,37 @@ function filesMentioning(names: string[]): string[] {
 			"-F",
 			"--untracked",
 			...names.flatMap((name) => ["-e", name]),
+			"--",
+			"*.ts",
+			"*.tsx",
+			"*.mts",
+			"*.cts",
+			"*.js",
+			"*.jsx",
+			"*.mjs",
+			"*.cjs",
+		],
+		[1],
+	);
+	return output
+		.split("\0")
+		.filter(Boolean)
+		.map((file) => resolve(repositoryRoot, file));
+}
+
+/** JS/TS files Git sees that call import() or require(). */
+function filesLoadingModules(): string[] {
+	const output = git(
+		[
+			"-C",
+			repositoryRoot,
+			"grep",
+			"-l",
+			"-z",
+			"-E",
+			"--untracked",
+			"-e",
+			"(import|require)[[:space:]]*\\(",
 			"--",
 			"*.ts",
 			"*.tsx",
@@ -740,7 +772,7 @@ const globals = {
 		move: (...args: Parameters<typeof move>) => {
 			const [match, destination, transform] = args;
 			const own = transform && ((text: string) => programCode(() => transform(text)));
-			return logged("sg.move", args, () => move(match, destination, own, { filesMentioning }));
+			return logged("sg.move", args, () => move(match, destination, own));
 		},
 		remove: (...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args)),
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
@@ -754,6 +786,14 @@ const globals = {
 					file: pathArgument("refactor.rename", options.file),
 				};
 				return import("./typescript-refactors.ts").then(({ rename }) => rename(repositoryRoot, prepared));
+			}),
+		move: (options: { file: string; symbol: string; to: string }) =>
+			logged("refactor.move", [options], async () => {
+				const from = explicitPath(pathArgument("refactor.move", options.file));
+				const to = explicitPath(pathArgument("refactor.move", options.to));
+				if (typeof options.symbol !== "string" || !options.symbol)
+					throw new TypeError("refactor.move expects { file, symbol, to } with a symbol name");
+				moveDeclaration(from, options.symbol, to, { mentioning: filesMentioning, loadingModules: filesLoadingModules });
 			}),
 		renameFile: (options: RenameFileOptions) =>
 			logged("refactor.renameFile", [options], () => {

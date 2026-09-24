@@ -2379,26 +2379,6 @@ while (performance.now() - started < 1500) sg.find("call($A)", "src");`,
 		expect(result.helperMs).toBeGreaterThan(1000);
 	});
 
-	test("sg.move updates the imports of a declaration it moves to another file", async () => {
-		const repo = await makeRepo({
-			"src/a.ts": 'import { helper } from "./util";\nexport function moveMe() { return helper(); }\n',
-			"src/util.ts": "export const helper = () => 1;\n",
-			"src/b.ts": 'import { moveMe } from "./a";\nexport const b = moveMe();\n',
-		});
-		const result = await run(
-			repo,
-			`sg.move(sg.one("export function moveMe() { $$$BODY }", "src/a.ts"), { endOf: sg.file("src/lib/moved.ts") });`,
-		);
-
-		expect(result.exitCode).toBe(0);
-		expect(await Bun.file(path.join(repo, "src/lib/moved.ts")).text()).toBe(
-			'import { helper } from "../util";\nexport function moveMe() { return helper(); }\n',
-		);
-		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(
-			'import { moveMe } from "./lib/moved";\nexport const b = moveMe();\n',
-		);
-	});
-
 	test("path parameters also accept sg.file targets", async () => {
 		const repo = await makeRepo({
 			"tsconfig.json": JSON.stringify({ include: ["src"] }),
@@ -2410,14 +2390,36 @@ while (performance.now() - started < 1500) sg.find("call($A)", "src");`,
 			`edit({ path: sg.file("src/b.ts"), oldText: "run();", newText: "run() + 1;" });
 console.log(grep("run", [sg.file("src/a.ts")]).length);
 await refactor.rename({ file: sg.file("src/a.ts"), symbol: "run", to: "start" });
-await refactor.renameFile({ from: sg.file("src/a.ts"), to: sg.file("src/lib/a.ts") });`,
+await refactor.move({ file: sg.file("src/a.ts"), symbol: "start", to: sg.file("src/start.ts") });
+await refactor.renameFile({ from: sg.file("src/start.ts"), to: sg.file("src/lib/start.ts") });`,
 			{ timeoutMs: 15_000 },
 		);
 
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("1");
 		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(
-			'import { start } from "./lib/a";\nexport const b = start() + 1;\n',
+			'import { start } from "./lib/start";\nexport const b = start() + 1;\n',
+		);
+		expect(await Bun.file(path.join(repo, "src/lib/start.ts")).text()).toBe("export function start() { return 1; }\n");
+	});
+
+	test("refactor.move moves a declaration to another file and updates its imports", async () => {
+		const repo = await makeRepo({
+			"src/a.ts": 'import { helper } from "./util";\nexport function moveMe() { return helper(); }\n',
+			"src/util.ts": "export const helper = () => 1;\n",
+			"src/b.ts": 'import { moveMe } from "./a";\nexport const b = moveMe();\n',
+		});
+		const result = await run(
+			repo,
+			`await refactor.move({ file: "src/a.ts", symbol: "moveMe", to: "src/lib/moved.ts" });`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "src/lib/moved.ts")).text()).toBe(
+			'import { helper } from "../util";\nexport function moveMe() { return helper(); }\n',
+		);
+		expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(
+			'import { moveMe } from "./lib/moved";\nexport const b = moveMe();\n',
 		);
 	});
 

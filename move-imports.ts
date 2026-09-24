@@ -3,7 +3,7 @@
  * scope bookkeeping, done from syntax: which names the declaration uses, which files import it, and what the
  * source file still needs. Cases syntax cannot settle soundly are refused before anything is written.
  */
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve } from "node:path";
 import { parse, type SgNode } from "@ast-grep/napi";
 import { scriptLanguage } from "./placement.ts";
@@ -25,16 +25,19 @@ export interface ImportPlan {
 	source: TextEdit[];
 	target: TextEdit[];
 	importers: FileEdits[];
+	/** The moved declaration is not exported but the source still uses it, so the target must export it. */
+	exportMoved: boolean;
 }
 
 export interface MoveInput {
 	sourceFile: string;
 	node: SgNode;
-	movedText: string;
 	targetFile: string;
 	targetRoot: SgNode;
 	/** Files that may mention any of these names: every JS/TS file Git sees would also do. */
 	filesMentioning: (names: string[]) => string[];
+	/** Files that may load modules dynamically, with import() or require(). */
+	filesLoadingModules: () => string[];
 }
 
 const DECLARATIONS = new Set([
@@ -55,7 +58,7 @@ const REFERENCES = new Set(["identifier", "type_identifier", "shorthand_property
 
 class MoveError extends Error {
 	constructor(message: string) {
-		super(`sg.move cannot update imports: ${message}`);
+		super(`refactor.move: ${message}`);
 	}
 }
 
@@ -89,6 +92,20 @@ function declaration(statement: SgNode): Declaration | null {
 	return { names, types, exported };
 }
 
+/** The one top-level statement of a file that declares `symbol`, for moving it by name. */
+export function topLevelDeclaration(root: SgNode, symbol: string, file: string): SgNode {
+	const found = root.children().filter((statement) => {
+		try {
+			return declaration(statement)?.names.includes(symbol);
+		} catch {
+			return statement.field("declaration")?.field("name")?.text() === symbol;
+		}
+	});
+	if (found.length === 0) throw new MoveError(`found no top-level declaration of ${symbol} in ${file}`);
+	if (found.length > 1) throw new MoveError(`${symbol} has overloads or merged declarations in ${file}`);
+	return found[0]!;
+}
+
 /** Names bound by a declaration pattern, leaving out default values and property keys. */
 function patternNames(pattern: SgNode | null): string[] {
 	if (!pattern) return [];
@@ -100,45 +117,88 @@ function patternNames(pattern: SgNode | null): string[] {
 	return pattern.namedChildren().flatMap((child) => patternNames(child));
 }
 
-/** Names declared anywhere inside a node: its own locals, parameters and type parameters. */
-function declaredInside(node: SgNode): Set<string> {
+const FUNCTIONS = new Set([
+	"function_declaration",
+	"function_expression",
+	"generator_function_declaration",
+	"generator_function",
+	"arrow_function",
+	"method_definition",
+]);
+const DECLARED_BY_NAME = new Set([
+	"function_declaration",
+	"generator_function_declaration",
+	"class_declaration",
+	"abstract_class_declaration",
+	"interface_declaration",
+	"type_alias_declaration",
+	"enum_declaration",
+]);
+
+/** Names a scope node declares for itself: parameters, type parameters, and declarations directly in a block. */
+function scopeNames(scope: SgNode): Set<string> {
 	const names = new Set<string>();
-	const visit = (current: SgNode) => {
-		const kind = current.kind();
-		if (kind === "variable_declarator") for (const name of patternNames(current.field("name"))) names.add(name);
-		if (kind === "required_parameter" || kind === "optional_parameter")
-			for (const name of patternNames(current.field("pattern") ?? current.namedChildren()[0] ?? null)) names.add(name);
-		if (kind === "arrow_function" && current.field("parameter")) names.add(current.field("parameter")!.text());
-		if (kind === "catch_clause") for (const name of patternNames(current.field("parameter"))) names.add(name);
-		if (kind === "for_in_statement") for (const name of patternNames(current.field("left"))) names.add(name);
-		if (
-			[
-				"function_declaration",
-				"function_expression",
-				"generator_function_declaration",
-				"class_declaration",
-				"class",
-				"type_parameter",
-				"interface_declaration",
-				"type_alias_declaration",
-				"enum_declaration",
-			].includes(String(kind))
-		) {
-			const name = current.field("name");
-			if (name) names.add(name.text());
-		}
-		for (const child of current.namedChildren()) visit(child);
-	};
-	visit(node);
+	const kind = String(scope.kind());
+	if (FUNCTIONS.has(kind) || kind === "class" || kind === "class_declaration" || DECLARED_BY_NAME.has(kind)) {
+		const parameters = scope.field("parameters");
+		for (const parameter of parameters?.namedChildren() ?? [])
+			for (const name of patternNames(parameter.field("pattern") ?? parameter.namedChildren()[0] ?? null))
+				names.add(name);
+		if (scope.field("parameter")) for (const name of patternNames(scope.field("parameter"))) names.add(name);
+		for (const parameter of scope.field("type_parameters")?.namedChildren() ?? [])
+			if (parameter.field("name")) names.add(parameter.field("name")!.text());
+		// A function or class expression can refer to its own name.
+		if ((kind === "function_expression" || kind === "class") && scope.field("name"))
+			names.add(scope.field("name")!.text());
+	}
+	if (kind === "catch_clause") for (const name of patternNames(scope.field("parameter"))) names.add(name);
+	if (kind === "for_in_statement") for (const name of patternNames(scope.field("left"))) names.add(name);
+	const statements =
+		kind === "statement_block" || kind === "class_body"
+			? scope.namedChildren()
+			: kind === "for_statement"
+				? [scope.field("initializer")]
+				: [];
+	for (const statement of statements) {
+		if (!statement) continue;
+		const inner = statement.kind() === "export_statement" ? statement.field("declaration") : statement;
+		if (!inner) continue;
+		if (inner.kind() === "lexical_declaration" || inner.kind() === "variable_declaration")
+			for (const declarator of inner.namedChildren())
+				if (declarator.kind() === "variable_declarator")
+					for (const name of patternNames(declarator.field("name"))) names.add(name);
+		if (DECLARED_BY_NAME.has(String(inner.kind())) && inner.field("name")) names.add(inner.field("name")!.text());
+	}
 	return names;
 }
 
-/** Names a node refers to that are not declared inside it: its dependencies, and globals. */
+/**
+ * Names a node refers to that no enclosing scope inside it declares: its dependencies, and globals. Each
+ * reference is checked against its own enclosing scopes, so a nested local that shares a name with an
+ * import does not hide the import's other uses.
+ */
 function freeNames(node: SgNode): string[] {
-	const inside = declaredInside(node);
+	const scopes = new Map<string, Set<string>>();
+	const declaredBy = (scope: SgNode) => {
+		const key = `${scope.kind()}:${scope.range().start.index}:${scope.range().end.index}`;
+		if (!scopes.has(key)) scopes.set(key, scopeNames(scope));
+		return scopes.get(key)!;
+	};
+	const { start, end } = node.range();
 	const names = new Set<string>();
-	for (const reference of node.findAll({ rule: { any: [...REFERENCES].map((kind) => ({ kind })) } }))
-		if (!inside.has(reference.text())) names.add(reference.text());
+	for (const reference of node.findAll({ rule: { any: [...REFERENCES].map((kind) => ({ kind })) } })) {
+		const name = reference.text();
+		let local = false;
+		for (const ancestor of reference.ancestors()) {
+			const range = ancestor.range();
+			if (range.start.index < start.index || range.end.index > end.index) break;
+			if (declaredBy(ancestor).has(name)) {
+				local = true;
+				break;
+			}
+		}
+		if (!local) names.add(name);
+	}
 	return [...names];
 }
 
@@ -252,9 +312,19 @@ const SOURCE_FOR_JS: Record<string, string[]> = {
 	".cjs": [".cts"],
 };
 
-/** The file a relative specifier resolves to, as module resolution in a bundler or TypeScript would find it. */
+/**
+ * The file a specifier resolves to. Relative specifiers are resolved here, including TypeScript's `.js`
+ * spelling of a `.ts` file; others go through Bun's resolver, which follows tsconfig `paths` and packages
+ * in node_modules, including workspace packages linked into the repository.
+ */
 export function resolveModule(from: string, specifier: string): string | undefined {
-	if (!specifier.startsWith(".")) return undefined;
+	if (!specifier.startsWith(".")) {
+		try {
+			return realpathSync(Bun.resolveSync(specifier, dirname(from)));
+		} catch {
+			return undefined;
+		}
+	}
 	const base = resolve(dirname(from), specifier);
 	const extension = extname(base);
 	const candidates = [
@@ -299,6 +369,46 @@ function specifierFor(from: string, to: string, style: Style): string {
 }
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const stem = (file: string) => file.slice(0, file.length - extname(file).length);
+
+/**
+ * A specifier for `target`, written like `old`, which pointed at `source`. A relative specifier stays
+ * relative. An alias or package specifier maps its ending onto the source path: "@app/api" for src/api.ts
+ * means "@app/" stands for src/, so src/users/parse.ts becomes "@app/users/parse". A candidate is used only
+ * if it resolves to the target; otherwise the relative path is used, which always does.
+ */
+function repoint(from: string, old: string, source: string, target: string): string {
+	const relativeSpecifier = specifierFor(from, target, styleOf(old));
+	if (old.startsWith(".")) return relativeSpecifier;
+	const words = stem(old).split("/");
+	const directories = stem(source).split("/");
+	let shared = 0;
+	while (
+		shared < words.length - 1 &&
+		shared < directories.length - 1 &&
+		words.at(-1 - shared) === directories.at(-1 - shared)
+	)
+		shared++;
+	if (shared === 0) return relativeSpecifier;
+	const prefix = words.slice(0, -shared).join("/");
+	const root = directories.slice(0, -shared).join("/");
+	const within = relative(root, stem(target)).replaceAll("\\", "/");
+	if (within.startsWith("..")) return relativeSpecifier;
+	const extension = styleOf(old) === "none" ? "" : extname(specifierFor(from, target, styleOf(old)));
+	const candidate = `${prefix}/${within}${extension}`;
+	// The resolver needs the file to exist; a new target is created empty for the check and removed again.
+	const created = !existsSync(target);
+	try {
+		if (created) {
+			mkdirSync(dirname(target), { recursive: true });
+			writeFileSync(target, "");
+		}
+		return resolveModule(from, candidate) === (created ? realpathSync(target) : target) ? candidate : relativeSpecifier;
+	} finally {
+		if (created) rmSync(target, { force: true });
+	}
+}
 
 function sameFile(a: string | undefined, b: string): boolean {
 	return a !== undefined && (existsSync(b) ? realpathSync(b) : resolve(b)) === a;
@@ -383,10 +493,7 @@ export function planImports(input: MoveInput): ImportPlan | null {
 		if (source.listed.has(name))
 			throw new MoveError(`${name} is exported by an export list in ${sourceFile}; export the declaration itself`);
 	}
-	const lang = scriptLanguage(targetFile);
-	const movedRoot = lang ? parse(lang, input.movedText).root() : null;
-	const movedNames = movedRoot?.children().flatMap((statement) => declaration(statement)?.names ?? []) ?? [];
-	const renamed = movedNames.join() !== moved.names.join();
+	const realTarget = existsSync(targetFile) ? realpathSync(targetFile) : resolve(targetFile);
 
 	const sourceBindings = importBindings(sourceRoot);
 	const targetBindings = importBindings(targetRoot);
@@ -414,14 +521,12 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			throw new MoveError(`${targetFile} imports ${binding.imported} as ${binding.local}`);
 		nowLocal.set(binding.statement, (nowLocal.get(binding.statement) ?? new Set()).add(binding.imported));
 	}
-	// Conflicts concern the names as they will be declared in the target, after any transform.
-	for (const name of movedNames) {
+	for (const name of names) {
 		if (target.declarations.has(name)) throw new MoveError(`${targetFile} already declares ${name}`);
 		const binding = targetBindings.find((candidate) => candidate.local === name);
 		if (binding && !(binding.kind === "named" && names.has(binding.imported) && importedFromSource(binding)))
 			throw new MoveError(`${targetFile} already imports a different ${name}`);
 	}
-	if (renamed && nowLocal.size) throw new MoveError(`the transform renames a declaration that ${targetFile} imports`);
 	for (const [statement, removed] of nowLocal) {
 		const { start, end } = statement.range();
 		targetEdits.push({ start: start.index, end: end.index, text: withoutSpecifiers(statement, removed) });
@@ -449,7 +554,11 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				if (!sameBinding) throw new MoveError(`${targetFile} already has a different ${name}`);
 				continue;
 			}
-			const module = resolved ? specifierFor(targetFile, resolved, styleOf(binding.module)) : binding.module;
+			// Relative specifiers are re-pointed from the target; aliases and packages mean the same from anywhere.
+			const module =
+				resolved && binding.module.startsWith(".")
+					? specifierFor(targetFile, resolved, styleOf(binding.module))
+					: binding.module;
 			const quote = quoteOf(binding.statement);
 			if (binding.kind === "named") addTargetImport(module, quote, { text: binding.text, typeOnly: binding.typeOnly });
 			else targetLines.push(`import ${binding.typeOnly ? "type " : ""}${binding.text} from ${quote}${module}${quote};`);
@@ -488,15 +597,28 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			return statement?.kind() !== "import_statement" && !(statement && moduleName(statement));
 		});
 	if (stillUsed) {
-		if (renamed) throw new MoveError(`the transform renames code that ${sourceFile} still uses`);
 		const module = specifierFor(sourceFile, targetFile, style(sourceRoot, targetRoot));
 		const specifiers = moved.names.map((name) => ({ text: name, typeOnly: moved.types.has(name) }));
 		sourceEdits.push(importInsertion(sourceRoot, sourceText, [importStatement("import", specifiers, module, '"')]));
 	}
 
-	// Importers of an exported declaration are repointed at the target.
+	// Importers of an exported declaration are repointed at the target. A module loaded with import() or
+	// require() is used as a whole object, which cannot be repointed name by name.
 	const importers: FileEdits[] = [];
 	if (moved.exported) {
+		for (const file of new Set(input.filesLoadingModules())) {
+			const fileLang = scriptLanguage(file);
+			if (!fileLang || sameFile(file, sourceFile)) continue;
+			for (const call of parse(fileLang, readFileSync(file, "utf8"))
+				.root()
+				.findAll({ rule: { kind: "call_expression" } })) {
+				const callee = call.field("function")?.text();
+				if (callee !== "import" && callee !== "require") continue;
+				const argument = call.field("arguments")?.namedChildren()[0];
+				if (argument?.kind() === "string" && sameFile(resolveModule(file, argument.text().slice(1, -1)), sourceFile))
+					throw new MoveError(`${file} loads ${sourceFile} with ${callee}()`);
+			}
+		}
 		for (const file of new Set(input.filesMentioning(moved.names))) {
 			if (sameFile(file, sourceFile) || sameFile(file, targetFile)) continue;
 			const fileLang = scriptLanguage(file);
@@ -512,12 +634,14 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			for (const statement of root.children()) {
 				const module = moduleName(statement);
 				if (!module || !sameFile(resolveModule(file, module), sourceFile)) continue;
-				targetModule ??= specifierFor(file, targetFile, styleOf(module));
+				targetModule ??= repoint(file, module, sourceFile, realTarget);
 				quote = quoteOf(statement);
 				const all = typeOnlyStatement(statement);
 				const clause = statement
 					.children()
 					.find((child) => ["import_clause", "export_clause"].includes(String(child.kind())));
+				if (statement.children().some((child) => child.kind() === "namespace_export"))
+					throw new MoveError(`${file} re-exports ${sourceFile} as a namespace`);
 				if (statement.kind() === "export_statement" && !clause) {
 					// `export * from source`: keep its other exports and re-export the moved ones explicitly.
 					for (const name of moved.names) reexports.push({ text: name, typeOnly: moved.types.has(name) });
@@ -543,7 +667,6 @@ export function planImports(input: MoveInput): ImportPlan | null {
 						throw new MoveError(`${file} uses ${local}.<name> through a namespace import`);
 				}
 				if (!specifiers.length) continue;
-				if (renamed) throw new MoveError(`the transform renames a declaration that ${file} imports`);
 				const list = statement.kind() === "import_statement" ? imports : reexports;
 				for (const specifier of specifiers)
 					list.push({
@@ -556,15 +679,6 @@ export function planImports(input: MoveInput): ImportPlan | null {
 					end: end.index,
 					text: withoutSpecifiers(statement, new Set(specifiers.map((specifier) => specifier.field("name")!.text()))),
 				});
-			}
-			for (const call of root.findAll({
-				rule: { kind: "call_expression", has: { field: "arguments", has: { kind: "string" } } },
-			})) {
-				const callee = call.field("function")?.text();
-				if (callee !== "import" && callee !== "require") continue;
-				const argument = call.field("arguments")!.namedChildren()[0];
-				if (argument?.kind() === "string" && sameFile(resolveModule(file, argument.text().slice(1, -1)), sourceFile))
-					throw new MoveError(`${file} loads ${sourceFile} with ${callee}()`);
 			}
 			if (!targetModule || (!imports.length && !reexports.length)) continue;
 			const lines = [
@@ -579,5 +693,5 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			importers.push({ file, source: text, root, edits });
 		}
 	}
-	return { source: sourceEdits, target: targetEdits, importers };
+	return { source: sourceEdits, target: targetEdits, importers, exportMoved: stillUsed && !moved.exported };
 }
