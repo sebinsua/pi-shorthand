@@ -14,24 +14,26 @@ session, checks the result independently, and keeps evidence for human review.
   | -------------------------------- | ------: | --------: |
   | `rename-symbol-100`, brief       |    142s |   **55s** |
   | `rename-symbol-100`, outcome     |    129s |   **43s** |
-  | `options-migration-100`, brief   |    111s |   **86s** |
+  | `options-migration-100`, brief   |    106s |   **75s** |
   | `options-migration-100`, outcome |    140s |  **107s** |
   | `move-module-100`, brief         |     87s |   **52s** |
   | `move-module-100`, outcome       |     57s |   **47s** |
-  | `logger-migration-100`, brief    |     71s |   **65s** |
-  | `logger-migration-100`, outcome  | **71s** |       78s |
+  | `logger-migration-100`, brief    | **60s** |       79s |
+  | `logger-migration-100`, outcome  |    115s |   **79s** |
 
   At 100 files stock Pi also writes a program, in Python through bash; shorthand's advantage is a better
-  program. Timings vary between runs of the same task (stock took 203s and then 111s on the same options
-  migration), so treat gaps of a few seconds as noise.
+  program. Timings vary a lot between runs of the same task: stock took 71s and then 115s on the same logger
+  migration, and the two logger comparisons swapped winners between runs. Treat the logger migration as even
+  until repeated runs say otherwise.
 
 - **Small edits cost nothing extra when the tool is optional.** On `empty-average` the model now picks a direct
-  edit (24s against stock's 24s). At 10 files a rename was 2.2× faster (35s against 76s), and a call migration
-  slightly slower (52s against 45s): nine direct edits are still quick at that size. That migration first took
-  108s, because the model chained one `sg.rewrite` per call shape and repaired the output by hand; pattern
-  rewrites now skip places an earlier rewrite produced, and the run needed one program and no repair.
-- **Most losses came from the tool, not the model, and were fixed:** a list of files started one git process per
-  file, the formatter searched configuration once per changed file, helper time counted towards the two-second
+  edit (24s against stock's 24s). At 10 files a rename was 2.2× faster (35s against 76s), but a call migration
+  was slower (52s and then 71s against 45s and 41s): nine direct edits are quick at that size, and in the
+  second run the model spent about 20s restoring line breaks that a template rewrite had flattened. That
+  migration first took 108s, because the model chained one `sg.rewrite` per call shape and repaired the output
+  by hand; pattern rewrites now skip places an earlier rewrite produced, so it needs one program.
+- **Most losses came from the tool, not the model, and were fixed:** a list of files, or a loop over them, started
+  one git process per file, the formatter searched configuration once per changed file, helper time counted towards the two-second
   timeout, large diffs filled the model's context, the model read the advanced guide for ordinary tasks, and
   macOS AppleDouble files appeared in directory listings.
 - **Known backend issue:** a combined GritQL `sequential` query panicked in the installed CLI; two separate
