@@ -15,6 +15,10 @@ export interface GraphNode {
 	exact?: true;
 	fanIn?: number;
 	fanOut?: number;
+	line?: number;
+	col?: number;
+	endCol?: number;
+	text?: string;
 }
 
 export interface GraphEdge {

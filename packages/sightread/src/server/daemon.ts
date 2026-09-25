@@ -7,6 +7,7 @@ import { join, relative, sep } from "node:path";
 import { nestedProjects, projectFiles, type Project } from "../project.ts";
 import { runQuery } from "../query.ts";
 import { createRangeIndex } from "../ranges.ts";
+import { createReferenceIndex } from "../references.ts";
 import { RequestError, startGraphClient } from "../upstream.ts";
 import { serverPaths } from "./paths.ts";
 import { projectSignature } from "./signature.ts";
@@ -36,6 +37,7 @@ export async function runDaemon(project: Project): Promise<void> {
 	const client = await startGraphClient(project, { stderr: 2, cacheDirectory: join(paths.directory, "ttsc-cache") });
 	const ranges = createRangeIndex(project.root);
 	const fileCount = projectFiles(project).then((files) => files.size);
+	const references = createReferenceIndex(project);
 	const nested = nestedProjects(project);
 	let lastUsed = startedAt;
 	let active = 0;
@@ -87,6 +89,7 @@ export async function runDaemon(project: Project): Promise<void> {
 			await client.close();
 		} finally {
 			await ranges.close();
+			await references.close();
 			await unlink(paths.socket).catch(() => undefined);
 			await unlink(paths.state).catch(() => undefined);
 		}
@@ -109,7 +112,20 @@ export async function runDaemon(project: Project): Promise<void> {
 						await Bun.sleep(duration("SIGHTREAD_DAEMON_STOP_DELAY_MS", 0));
 					break;
 				case "help":
-					value = client.requestTypes();
+					value = [
+						...client.requestTypes(),
+						{
+							type: "references",
+							fields: [
+								{ name: "symbol", required: true, description: "Symbol name or handle." },
+								{
+									name: "includeDeclaration",
+									required: false,
+									description: "Include the declaration itself (default: false).",
+								},
+							],
+						},
+					].toSorted((a, b) => a.type.localeCompare(b.type));
 					break;
 				case "query":
 					if (process.env.SIGHTREAD_DAEMON_QUERY_DELAY_MS)
@@ -118,6 +134,7 @@ export async function runDaemon(project: Project): Promise<void> {
 						{
 							client,
 							ranges,
+							references,
 							root: project.root,
 							tsconfig: relative(project.root, project.tsconfig).replaceAll(sep, "/"),
 							projectFileCount: await fileCount,
@@ -176,6 +193,7 @@ export async function runDaemon(project: Project): Promise<void> {
 		clearInterval(interval);
 		await client.close();
 		await ranges.close();
+		await references.close();
 		await unlink(paths.state).catch(() => undefined);
 		throw error;
 	}

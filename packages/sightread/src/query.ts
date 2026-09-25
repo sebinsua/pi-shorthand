@@ -4,12 +4,14 @@ import { inheritRequest, normalizeResult, type GraphResult } from "./model.ts";
 import { resolveNamesSettled } from "./names.ts";
 import { createPaths } from "./paths.ts";
 import type { RangeIndex } from "./ranges.ts";
+import type { ReferenceIndex } from "./references.ts";
 import { renderText } from "./render.ts";
 import type { GraphClient } from "./upstream.ts";
 
 export interface QueryContext {
 	client: GraphClient;
 	ranges: RangeIndex;
+	references?: ReferenceIndex;
 	root?: string;
 	tsconfig?: string;
 	projectFileCount?: number;
@@ -63,7 +65,12 @@ function filterIn(result: GraphResult, directory: string): GraphResult {
 		nodes,
 		edges,
 		sections,
-		shown: primary && Array.isArray(sections[primary]) ? sections[primary].length : 0,
+		shown:
+			result.type === "references"
+				? nodes.length
+				: primary && Array.isArray(sections[primary])
+					? sections[primary].length
+					: 0,
 	});
 }
 
@@ -80,6 +87,10 @@ export async function runQuery(
 		resolved.map(async (item) => {
 			if ("error" in item) return { error: item.error };
 			try {
+				if (item.request.type === "references") {
+					if (!context.references || !paths) throw new Error("references require a project server");
+					return { value: await context.references.query(item.request, paths), local: true as const };
+				}
 				return { value: (await context.client.query(item.request)).value };
 			} catch (error) {
 				return { error: error instanceof Error ? error.message : String(error), cause: error };
@@ -99,7 +110,9 @@ export async function runQuery(
 		results.map((result, index) =>
 			"error" in result
 				? ({ type: String(requests[index].type), error: result.error, tsconfig: context.tsconfig } as GraphResult)
-				: normalizeResult(requests[index], result.value, context.ranges, paths),
+				: "local" in result
+					? (result.value as GraphResult)
+					: normalizeResult(requests[index], result.value, context.ranges, paths),
 		),
 	);
 	for (const model of models) if (context.tsconfig) model.tsconfig = context.tsconfig;

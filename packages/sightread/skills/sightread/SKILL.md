@@ -1,60 +1,29 @@
 ---
 name: sightread
-description: Ask a TypeScript project what calls what, what a symbol uses and contains, and exactly which lines each piece of code spans, using the TypeScript compiler. Use it to get your bearings before reading files, to find callers or callees, and to see what a branch changed and what that affects.
+description: Find every place a TypeScript symbol is used, what calls what, and exactly which lines each piece of code spans, from the TypeScript compiler. Use it instead of searching text or opening files to locate code, before editing call sites, and to see what a branch changed and affects.
 ---
 
 # sightread
 
-`sightread` answers structural questions about a TypeScript project from the compiler, with exact line
-ranges. Ask it first, then read only the lines it points to, instead of searching text and opening
-whole files. It graphs the nearest `tsconfig.json`, so in a monorepo run it from the package or source
-folder whose code you're asking about.
+Use `sightread` instead of searching text or opening files to find where code is and what it touches.
+Its answers come from the TypeScript compiler, including uses through aliases, re-exports and
+interfaces, so trust them: don't repeat the search with `rg` or `grep`.
 
-## Ask in batches
-
-Pass one request, or an array of them, as JSON. One call answers every request in it:
+Ask everything you need in one call, as a JSON array. Names work directly:
 
 ```sh
-sightread '[{"type":"lookup","query":"formatPrice"},{"type":"trace","from":"formatPrice","direction":"reverse"}]'
+sightread '[{"type":"references","symbol":"Row.get"},{"type":"trace","from":"Row.get","direction":"reverse"}]'
 ```
 
-Names work wherever a symbol is expected: `formatPrice`, `Row.get`. If a name is ambiguous or
-missing, the error lists the handles to use instead, such as `src/row.ts#Row.get:method`. A request
-that fails reports its error in its own slot, and the rest of the batch still answers.
+- To change every use of something, ask for `references`. It lists each use with its line and that
+  line's text, which is enough to edit without reading the file.
+- To see what a change affects, ask for `trace` with `"direction": "reverse"`; for what something
+  calls, `"forward"`.
+- For what a symbol uses and contains, `details`. To get your bearings, `overview`. For a branch,
+  `sightread diff`.
 
-## Requests
+Read only the line ranges it gives. After editing, verify with the project's type check. Line numbers
+change when files do, so ask again rather than reuse old ones.
 
-- `lookup` (`query`): find symbols by name.
-- `trace` (`from`, `direction`): follow callers with `"reverse"`, callees with `"forward"`, or what
-  a change affects with `"impact"`. `maxDepth` and `maxNodes` bound it.
-- `details` (`handles`): what symbols call, use and contain, with the location of each
-  relationship.
-- `entrypoints` (`query`): where a feature starts.
-- `tour` (`reinterpretations`): a walk through the code relevant to some names.
-- `overview`: the project's structure; `aspect` narrows it to `hotspots`, `layers` or `publicApi`.
-
-`sightread --help` lists every field.
-
-## Reading the output
-
-Symbols are grouped by file, each with its exact line range: `20-115  runWithBun  function`. Read
-those lines and nothing else. Paths are relative to the repository, so they work unchanged with
-other tools, including shorthand. Relationships are listed by name, with where each happens:
-`main → runWithBun  calls at shorthand.ts:73`. When a list is cut short, the first line says which
-field to raise.
-
-`--json` prints the same results as data: `nodes` with `ranges`, and `edges` with `from`, `to`,
-`kind` and `at`. `--in packages/api` keeps results to one part of a monorepo.
-
-## Branches
-
-`sightread diff [base]` lists the declarations changed since `base` (by default, where the branch
-left the default branch), grouped by file, then their callers, the call chains, and the tests that
-use them. Read it before reviewing or extending someone else's change.
-
-## What it can't see
-
-- Code reached through string keys, dynamic property access or configuration.
-- A second call from the same caller: each caller is listed once, with its first call.
-- Your own edits, until you ask again. Line numbers go stale when files change, so re-run the
-  same query after editing rather than trusting earlier ranges.
+In a monorepo, run it from the package whose code you're asking about. `sightread --help` lists every
+field.

@@ -58,6 +58,7 @@ async function showHelp(cwd: string): Promise<string> {
 				`  sightread '{"type":"trace","from":"findProject","direction":"reverse"}'`,
 				`  sightread '{"type":"trace","from":"findProject","direction":"forward"}'`,
 				`  sightread '{"type":"details","handles":["findProject"]}'`,
+				`  sightread '{"type":"references","symbol":"Row.get"}'`,
 				"  sightread diff HEAD",
 				"  --raw prints upstream values and project-relative paths unchanged.",
 				"",

@@ -14,9 +14,9 @@ export class DiscoveryError extends Error {}
 
 const skipped = new Set([".llm-ephemeral", "node_modules", ".bare", ".git", "dist", "build"]);
 
-/** Count the same source files used when choosing a referenced TypeScript project. */
-export async function projectFiles(project: Project): Promise<Set<string>> {
-	const api = new API({ cwd: project.root });
+/** Count the same source files used when choosing a referenced TypeScript project. Pass an API to reuse it. */
+export async function projectFiles(project: Project, shared?: API): Promise<Set<string>> {
+	const api = shared ?? new API({ cwd: project.root });
 	try {
 		const parsed = await api.parseConfigFile(project.tsconfig);
 		return new Set(
@@ -25,7 +25,7 @@ export async function projectFiles(project: Project): Promise<Set<string>> {
 				.map((name) => resolve(name)),
 		);
 	} finally {
-		await api.close();
+		if (!shared) await api.close();
 	}
 }
 

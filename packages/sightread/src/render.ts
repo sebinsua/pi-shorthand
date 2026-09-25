@@ -13,6 +13,18 @@ function location(node: GraphNode): string {
 		: `${node.file}:range unavailable`;
 }
 
+// Trim the source line; in colour, dim it and keep the reference itself bright.
+function referenceLine(node: GraphNode, color: boolean): string {
+	const text = node.text ?? "";
+	const trimmed = text.trim();
+	if (!color || !node.col || !node.endCol) return trimmed;
+	const indent = text.length - text.trimStart().length;
+	const start = Math.max(0, node.col - 1 - indent);
+	const end = Math.min(trimmed.length, node.endCol - 1 - indent);
+	const part = (value: string, style: typeof dim) => (value ? style(value, color) : "");
+	return `${part(trimmed.slice(0, start), dim)}${part(trimmed.slice(start, end), bold)}${part(trimmed.slice(end), dim)}`;
+}
+
 function summary(result: GraphResult, nodes: Map<string, GraphNode>): string {
 	const { type, sections } = result;
 	if (type === "overview") {
@@ -91,6 +103,23 @@ function edgeLines(edges: GraphEdge[], nodes: Map<string, GraphNode>, color: boo
 export function renderText(result: GraphResult, options: { color: boolean }): string {
 	const nodes = new Map(result.nodes.map((node) => [node.handle, node]));
 	if (result.type === "overview") return overviewText(result, nodes, options.color);
+	if (result.type === "references") {
+		const symbol = String(result.sections.symbol ?? "");
+		const files = new Set(result.nodes.map((node) => node.file));
+		const lines = [
+			`references to ${symbol}: ${result.nodes.length} in ${files.size} ${files.size === 1 ? "file" : "files"}`,
+		];
+		for (const file of files) {
+			const references = result.nodes.filter((node) => node.file === file);
+			const width = Math.max(...references.map((node) => `${node.line}:${node.col}`.length));
+			lines.push("", bold(file, options.color));
+			for (const node of references)
+				lines.push(
+					`  ${dim(`${node.line}:${node.col}`.padStart(width), options.color)}  ${referenceLine(node, options.color)}`,
+				);
+		}
+		return lines.join("\n");
+	}
 	const baseCounts = new Map<string, number>();
 	for (const file of new Set(result.nodes.map((node) => node.file)))
 		baseCounts.set(basename(file), (baseCounts.get(basename(file)) ?? 0) + 1);

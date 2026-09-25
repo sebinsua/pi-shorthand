@@ -3,7 +3,7 @@ import { fromHandle, object } from "./model.ts";
 import type { PathMapper } from "./paths.ts";
 import type { GraphClient } from "./upstream.ts";
 
-const fields: Record<string, string[]> = { details: ["handles"], trace: ["from", "to"] };
+const fields: Record<string, string[]> = { details: ["handles"], trace: ["from", "to"], references: ["symbol"] };
 
 const segments = (name: string) =>
 	name
