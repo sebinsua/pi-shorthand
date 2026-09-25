@@ -39,7 +39,8 @@ export function nestedProjects(project: Project): string[] {
 		for (const parent of level) {
 			let entries;
 			try {
-				entries = readdirSync(parent, { withFileTypes: true });
+				// Sorted, because filesystems list entries in different orders and output must be deterministic.
+				entries = readdirSync(parent, { withFileTypes: true }).toSorted((a, b) => (a.name < b.name ? -1 : 1));
 			} catch {
 				continue;
 			}
