@@ -113,7 +113,7 @@ test("Vite root chooses the app config, reports it in text and JSON, and indexes
 	const diff = command(root, "diff", "HEAD");
 	expect(diff.code).toBe(0);
 	expect(diff.out).toStartWith(
-		`diff ${git(root, "rev-parse", "--short=12", "HEAD")} → working tree (.) (tsconfig.app.json): 1 changed`,
+		`diff ${git(root, "rev-parse", "--short=12", "HEAD")} → working tree (tsconfig.app.json): 1 changed`,
 	);
 	expect(diff.out).toContain("formatPrice  function  edited");
 	const diffJson = command(root, "--json", "diff", "HEAD");

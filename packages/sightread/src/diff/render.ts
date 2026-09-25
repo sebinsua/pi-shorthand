@@ -107,7 +107,7 @@ function mergeNameSites(tests: DiffResult["tests"]): DiffResult["tests"] {
 export function renderDiffText(value: DiffResult, files: Map<string, GitFile>, color: boolean): string {
 	const testCount = new Set(value.tests.map(({ file }) => file)).size;
 	const lines = [
-		`diff ${value.base.slice(0, 12)}${value.baseRef ? ` (${value.baseRef})` : ""} → working tree (${value.project})${value.tsconfig && value.tsconfig !== "tsconfig.json" ? ` (${value.tsconfig})` : ""}: ${value.totalChanged ?? value.changed.length} changed${value.totalChanged === undefined ? "" : ` (${value.changed.length} analysed)`}, ${value.callers.length} callers, ${testCount} test ${testCount === 1 ? "file" : "files"}`,
+		`diff ${value.base.slice(0, 12)}${value.baseRef ? ` (${value.baseRef})` : ""} → working tree${value.project === "." ? "" : ` (${value.project})`}${value.tsconfig && value.tsconfig !== "tsconfig.json" ? ` (${value.tsconfig})` : ""}: ${value.totalChanged ?? value.changed.length} changed${value.totalChanged === undefined ? "" : ` (${value.changed.length} analysed)`}, ${value.callers.length} callers, ${testCount} test ${testCount === 1 ? "file" : "files"}`,
 	];
 	const section = (title: string, rows: string[]) => {
 		if (rows.length) lines.push("", title, ...rows);
