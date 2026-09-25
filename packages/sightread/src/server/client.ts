@@ -158,8 +158,9 @@ async function startingLockAlive(paths: ServerPaths): Promise<boolean> {
 	}
 }
 
+// Each graph server holds a whole program in memory (400–900 MB on large repositories), so keep few running.
 async function evictIfNeeded(current: string): Promise<boolean> {
-	const maximum = Math.max(1, Number(process.env.SIGHTREAD_MAX_SERVERS) || 4);
+	const maximum = Math.max(1, Number(process.env.SIGHTREAD_MAX_SERVERS) || 2);
 	const servers: { paths: ServerPaths; lastUsed: number }[] = [];
 	let reservations = 0;
 	for (const directory of await allStateDirectories()) {
