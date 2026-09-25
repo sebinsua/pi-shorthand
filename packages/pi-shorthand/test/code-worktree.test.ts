@@ -29,7 +29,7 @@ test("code targets a child worktree from a bare worktree container", async () =>
 	await $`git -c user.name=test -c user.email=test@test -c commit.gpgsign=false commit -qm init`.cwd(child);
 
 	let registered: unknown;
-	registerCode({
+	await registerCode({
 		on() {},
 		registerTool(tool: unknown) {
 			registered = tool;

@@ -18,6 +18,8 @@ sg.one(pattern, files?) requires one match; sg.file(path) selects a JS/TS file r
 sg.insert(text, destination), sg.move(match, destination, transform?), sg.remove(match). Destination is exactly one of {before: match}, {after: match}, {startOf: container}, {endOf: container}. Statements/declarations only. Containers are file roots or matched statement blocks. Matches must be refreshed after editing their file. move's optional function transforms text.
 sg also exposes ast-grep's native API, including parse and Lang. Importing @ast-grep/napi is supported.
 Asynchronous refactors: refactor.rename({file, symbol, to}), refactor.renameFile({from, to}) and refactor.move({file, symbol, to}) update references and imports across the project.
+refactor.references({file, symbol}) returns resolved identifier matches that pass straight to sg.rewrite(matches, callback).
+graph.query(request | request[]) queries symbols and relationships; graph results can be passed to sg as scope. The graph shows the repository before this program's edits.
 $ is Bun's asynchronous shell and requires await; ast-grep and git CLIs are available.
 timeout is in seconds of program time (default 2); time inside helpers is excluded, up to 60 extra seconds. On failure, rollback="file" (default) rolls back failed or interrupted file edits and keeps the others; rollback="all" applies nothing.`;
 
@@ -71,7 +73,7 @@ export default function(pi) {
     const value = Reflect.get(target, key);
     return typeof value === "function" ? value.bind(target) : value;
   }});
-  extension(proxy);
+  return extension(proxy);
 }
 `,
 	);

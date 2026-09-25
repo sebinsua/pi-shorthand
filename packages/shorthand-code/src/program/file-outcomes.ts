@@ -1,6 +1,6 @@
 /** Per-file edit outcomes sent to the runner over a private inherited descriptor. */
 import { spawnSync } from "node:child_process";
-import { realpathSync, writeSync } from "node:fs";
+import { readFileSync, realpathSync, writeSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 export type FileOutcomeEvent =
@@ -18,6 +18,19 @@ delete process.env.PI_SHORTHAND_OUTCOMES_FD;
 delete process.env.PI_SHORTHAND_EXECUTION_ROOT;
 delete process.env.PI_SHORTHAND_INSPECTION_FAILURE;
 let nextId = 0;
+const edited = new Set<string>();
+
+export function wasEdited(file: string): boolean {
+	return edited.has(resolve(file));
+}
+
+function content(file: string): string | undefined {
+	try {
+		return readFileSync(file, "utf8");
+	} catch {
+		return undefined;
+	}
+}
 
 function send(event: FileOutcomeEvent): void {
 	if (!descriptor) return;
@@ -46,16 +59,18 @@ function paths(files: readonly string[]): string[] {
 
 /** An operation may touch several files (for example, moving a node between files). */
 export function editingFiles<T>(files: readonly string[], edit: () => T): T {
-	if (!descriptor) return edit();
+	const originals = files.map((file) => [resolve(file), content(file)] as const);
 	const id = nextId++;
-	send({ type: "begin", id, files: paths(files) });
+	if (descriptor) send({ type: "begin", id, files: paths(files) });
 	try {
 		const result = edit();
-		send({ type: "end", id });
+		if (descriptor) send({ type: "end", id });
 		return result;
 	} catch (error) {
-		send({ type: "fail", id });
+		if (descriptor) send({ type: "fail", id });
 		throw error;
+	} finally {
+		for (const [file, before] of originals) if (content(file) !== before) edited.add(file);
 	}
 }
 

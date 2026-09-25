@@ -21,6 +21,17 @@ export interface RenameOptions<File = string> {
 	to: string;
 }
 
+export interface ReferencesOptions<File = string> {
+	file: File;
+	symbol: string;
+	includeDeclaration?: boolean;
+}
+
+export interface ReferenceLocation {
+	uri: string;
+	range: Range;
+}
+
 export interface RenameFileOptions<File = string> {
 	from: File;
 	to: File;
@@ -34,6 +45,7 @@ interface DocumentSymbol {
 
 interface SymbolInformation {
 	name: string;
+	containerName?: string;
 	location: { range: Range };
 }
 
@@ -46,26 +58,45 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			"textDocument/documentSymbol",
 			{ textDocument: { uri } },
 		);
-		const positions = findSymbols(symbols ?? [], options.symbol);
-		if (positions.length === 0)
-			throw new Error(
-				`refactor.rename found no declaration named ${JSON.stringify(options.symbol)} in ${JSON.stringify(options.file)}`,
-			);
-		if (positions.length > 1)
-			throw new Error(
-				`refactor.rename found more than one declaration named ${JSON.stringify(options.symbol)} in ${JSON.stringify(options.file)}`,
-			);
+		const position = symbolPosition(symbols ?? [], options.symbol, options.file, "refactor.rename");
 		const edit = await server.sendRequest<WorkspaceEdit | null>("textDocument/rename", {
 			textDocument: { uri },
-			position: positions[0],
+			position,
 			newName: options.to,
 		});
-		const changes = planWorkspaceEdit(root, edit, keepShorthandPropertyNames(options.symbol, file, positions[0]!));
+		const changes = planWorkspaceEdit(
+			root,
+			edit,
+			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position),
+		);
 		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
 		editingFiles([...changes.keys()], () => {
 			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
 		});
 		await filesChanged(server, [...changes.keys()]);
+	});
+}
+
+/** Compiler-resolved reference spans, kept as LSP locations for the caller to turn into sg matches. */
+export async function references(root: string, options: ReferencesOptions): Promise<ReferenceLocation[]> {
+	if (!options || typeof options.file !== "string" || typeof options.symbol !== "string")
+		throw new TypeError("refactor.references expects { file, symbol } strings");
+	if (!options.file || !options.symbol) throw new Error("refactor.references file and symbol must not be empty");
+	const file = existingProjectFile(root, options.file);
+	const uri = pathToFileURL(file).href;
+	return withTypeScriptServer(root, async (server) => {
+		const symbols = await server.sendRequest<Array<DocumentSymbol | SymbolInformation> | null>(
+			"textDocument/documentSymbol",
+			{ textDocument: { uri } },
+		);
+		const position = symbolPosition(symbols ?? [], options.symbol, options.file, "refactor.references");
+		return (
+			(await server.sendRequest<ReferenceLocation[] | null>("textDocument/references", {
+				textDocument: { uri },
+				position,
+				context: { includeDeclaration: options.includeDeclaration === true },
+			})) ?? []
+		);
 	});
 }
 
@@ -170,12 +201,38 @@ function validateRenameFile(options: RenameFileOptions): void {
 	if (!options.from || !options.to) throw new Error("refactor.renameFile from and to must not be empty");
 }
 
-function findSymbols(symbols: Array<DocumentSymbol | SymbolInformation>, name: string): Position[] {
-	const positions: Position[] = [];
-	for (const symbol of symbols) {
-		if (symbol.name === name)
-			positions.push("selectionRange" in symbol ? symbol.selectionRange.start : symbol.location.range.start);
-		if ("children" in symbol && symbol.children) positions.push(...findSymbols(symbol.children, name));
+function symbolPosition(
+	symbols: Array<DocumentSymbol | SymbolInformation>,
+	name: string,
+	file: string,
+	helper: string,
+): Position {
+	const entries: { name: string; position: Position }[] = [];
+	const visit = (items: Array<DocumentSymbol | SymbolInformation>, container = "") => {
+		for (const item of items) {
+			const parent = "containerName" in item ? item.containerName || container : container;
+			const local = item.name === "constructor" ? "__constructor" : item.name;
+			const qualified = parent ? `${parent}.${local}` : local;
+			entries.push({
+				name: qualified,
+				position: "selectionRange" in item ? item.selectionRange.start : item.location.range.start,
+			});
+			if ("children" in item && item.children) visit(item.children, qualified);
+		}
+	};
+	visit(symbols);
+	const found = entries.filter((entry) =>
+		name.includes(".") ? entry.name === name : entry.name.split(".").at(-1) === name,
+	);
+	if (found.length === 0)
+		throw new Error(`${helper} found no declaration named ${JSON.stringify(name)} in ${JSON.stringify(file)}`);
+	if (found.length > 1) {
+		const names = [...new Set(found.map((entry) => entry.name))];
+		if (names.length > 1)
+			throw new Error(`${JSON.stringify(name)} is ambiguous in ${file}; use one of: ${names.join(", ")}`);
+		throw new Error(
+			`${helper} found more than one declaration named ${JSON.stringify(name)} in ${JSON.stringify(file)}`,
+		);
 	}
-	return positions;
+	return found[0]!.position;
 }

@@ -15,6 +15,13 @@ export async function supportedProgram() {
 	await refactor.rename({ file: "src/app.ts", symbol: "run", to: "start" });
 	await refactor.renameFile({ from: "src/other.ts", to: "src/start.ts" });
 	await refactor.move({ file: "src/app.ts", symbol: "start", to: "src/start.ts" });
+	const callers: GraphResult = await graph.query({ type: "trace", from: "Row.get", direction: "reverse" });
+	const caller: GraphNode | undefined = callers.nodes[0];
+	const edge: GraphEdge | undefined = callers.edges[0];
+	if (caller) sg.rewrite("$X.get($$$ARGS)", "$X.read($$$ARGS)", [caller, target]);
+	if (edge?.at) sg.find("$X.get($$$ARGS)", edge.at);
+	// @ts-expect-error An edge is not a file scope.
+	sg.find("$X.get($$$ARGS)", edge);
 	// Paths are typed as strings; file targets are accepted at runtime but not advertised.
 	// @ts-expect-error A file target is not part of the documented path type.
 	edit({ path: target, oldText: "a", newText: "b" });

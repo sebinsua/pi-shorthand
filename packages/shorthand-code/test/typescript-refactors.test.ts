@@ -99,7 +99,7 @@ test("rename rejects overloaded declarations without writing", async () => {
 
 test.each([
 	["missing", "found no declaration"],
-	["value", "found more than one declaration"],
+	["value", "is ambiguous"],
 ])("rename rejects %s declarations without writing", async (symbol, message) => {
 	const source = "export const value = 1;\nexport function outer() { const value = 2; return value; }\n";
 	const root = await fixture({

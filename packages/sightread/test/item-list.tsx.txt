@@ -1,0 +1,31 @@
+import { useState } from "react";
+
+type Item = { id: string; label: string };
+
+/** A list with a filter. */
+export function ItemList<T extends Item>({ items, onPick }: { items: T[]; onPick: (item: T) => void }) {
+	const [query, setQuery] = useState("");
+	const visible = items.filter((item) => item.label.includes(query));
+	return (
+		<div className="list">
+			<input value={query} onChange={(event) => setQuery(event.target.value)} />
+			{visible.length > 0 ? (
+				<ul>
+					{visible.map((item) => (
+						<li key={item.id} onClick={() => onPick(item)}>
+							{item.label}
+						</li>
+					))}
+				</ul>
+			) : (
+				<p>No items</p>
+			)}
+		</div>
+	);
+}
+
+export const Empty = () => <span>{"}"}</span>;
+
+export function after(): number {
+	return 1;
+}

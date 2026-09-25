@@ -1,5 +1,6 @@
 /** Running a program from another tool: Pi's `code` tool and the `shorthand` command both use this. */
 export { DEFAULT_TIMEOUT_SECONDS, RunnerError, runWithBun } from "./runner/client.ts";
+export { resolveSightread } from "./runner/graph-proxy.ts";
 export type { FileChange, FilesystemEntry, RunOptions, RunResult, RunTimings } from "./runner/runner.ts";
 export { type Diagnostics, diagnosticLines } from "./runner/diagnostics.ts";
 export {

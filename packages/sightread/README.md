@@ -1,0 +1,68 @@
+# sightread
+
+`sightread` shows how a TypeScript codebase fits together: what calls what, and the exact lines each piece of code spans. A coding agent can get its bearings with one command, then read only the lines it needs instead of whole files.
+
+## Install
+
+Install [Bun](https://bun.sh) 1.4 or later, then `sightread`:
+
+```sh
+npm i -g sightread
+```
+
+## Use
+
+Run it anywhere inside a TypeScript project, with a request as JSON:
+
+```sh
+sightread '{"type":"trace","from":"runWithBun","direction":"reverse"}'
+```
+
+```
+trace reverse from runWithBun: 3 shown
+
+packages/pi-shorthand/src/index.ts
+  48-139  default  function
+packages/shorthand-code/src/cli/shorthand.ts
+  34-95  main  function
+packages/shorthand-code/src/runner/client.ts
+  20-115  runWithBun  function
+packages/shorthand-code/test/graph.test.ts
+  287-306  description  function
+
+hops
+  main → runWithBun      calls at shorthand.ts:73
+  default → runWithBun   calls at index.ts:100
+  description → default  calls at graph.test.ts:289
+  description → default  type_ref at graph.test.ts:295
+```
+
+Pass an array to ask several questions at once. The requests you'll use most:
+
+- `lookup` finds symbols by name.
+- `trace` follows what calls something, or what it calls.
+- `details` shows what a symbol calls, uses and contains.
+- `tour` and `overview` sketch a feature or the whole project.
+
+`sightread --help` lists every field, with examples. Names work wherever a request asks for a symbol, and paths are relative to the repository, so you can pass them straight to other tools. Add `--json` for scripts, or `--in packages/api` to keep results to one part of a monorepo.
+
+## What a branch changes
+
+`sightread diff [base]` lists the declarations changed since `base` (by default, where your branch left the default branch), what calls them, and the tests that use them:
+
+```
+diff 1f2b8f79e012 → working tree (.): 1 changed, 2 callers, 0 test files
+
+changed
+src/price.ts
+  1-3  formatPrice  function  edited
+
+callers
+src/cart.ts
+  3-5  cartTotal  function
+src/checkout.ts
+  3-5  checkoutSummary  function
+
+chains
+  checkoutSummary → cartTotal → formatPrice
+```

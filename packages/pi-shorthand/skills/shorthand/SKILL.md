@@ -30,8 +30,10 @@ await refactor.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
 await refactor.move({ file: "src/api.ts", symbol: "parseUser", to: "src/users/parse.ts" });
 ```
 
-`refactor.rename` requires the declaration name to be unique in its file and leaves unrelated symbols
-alone. `refactor.renameFile` moves the file and updates imports and exports that resolve to it. Read
+Use a qualified `symbol` such as `Row.get` when a file has several declarations named `get`.
+An unqualified name works when it identifies one declaration. `rename`, `move` and `references`
+also accept a graph node as `file` and use its name when `symbol` is omitted. `refactor.renameFile`
+moves the file and updates imports and exports that resolve to it. Read
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
 rules, updated paths and failure conditions.
 
@@ -40,6 +42,52 @@ target imports what the declaration uses, exporting helpers from the source when
 imports it back if it still uses it; and files importing it from the source import it from the target.
 Importers keep their style, including `tsconfig` path aliases. Default exports, overloads, namespace
 imports that use it and dynamic imports of the source are refused before anything is written.
+
+## Exact references
+
+`refactor.references` returns every reference TypeScript resolves to a symbol, including calls through
+import aliases and a second call in the same function, and leaves same-named methods on other types
+alone. Each match's `text` is the name as written, and matches go straight to `sg.rewrite`:
+
+```ts
+const refs = await refactor.references({ file: "src/row.ts", symbol: "Row.get" });
+sg.rewrite(refs, () => "read");
+```
+
+When a reference is being called, `match.call` is the whole call or `new` expression, and a rewrite
+may edit it. That's how to change a call's arguments, including for methods:
+
+```ts
+sg.rewrite(refs, (m) => m.call?.replace(m.call.text().replace(/\)$/, ", { fresh: true })")) ?? null);
+```
+
+## Code graph
+
+When sightread is installed, `graph.query` asks the TypeScript compiler how code connects. It takes
+one request or an array, and names work wherever a symbol is expected:
+
+```ts
+const [found, callers] = await graph.query([
+	{ type: "lookup", query: "formatPrice" },
+	{ type: "trace", from: "formatPrice", direction: "reverse" },
+]);
+```
+
+Each result has `nodes`, symbols with `file` and line `ranges`, and `edges`, with `from`, `to`,
+`kind` and `at` for where each relationship happens. `lookup` finds symbols by name, `trace` follows
+callers (`direction: "reverse"`) or callees (`"forward"`), and `details` shows what a symbol uses.
+`sightread --help` lists every field.
+
+Pass nodes to `sg` as its scope to search only those symbols' lines:
+
+```ts
+sg.rewrite("formatPrice($A)", "formatPrice($A, currency)", callers.nodes);
+```
+
+The graph shows the repository before this program's edits: query first, then pass all the nodes
+to one `sg` call. Scoping `sg` to a node in a file the program already edited throws. A caller that
+calls a symbol twice is one edge, and `sg` inside a caller can also match a same-named call on
+another type; use `refactor.references` when every call site must be exact.
 
 ## Insert before or after a statement
 

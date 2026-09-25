@@ -1,15 +1,16 @@
 {
 	"name": "shorthand-workspace",
 	"private": true,
-	"description": "Workspace for shorthand-code and pi-shorthand.",
+	"description": "Workspace for shorthand-code, pi-shorthand and sightread.",
 	"license": "MIT",
 	"workspaces": [
 		"packages/shorthand-code",
-		"packages/pi-shorthand"
+		"packages/pi-shorthand",
+		"packages/sightread"
 	],
 	"type": "module",
 	"scripts": {
-		"test": "bun test ./packages/shorthand-code/test ./packages/pi-shorthand/test ./e2e/test",
+		"test": "bun test ./packages/shorthand-code/test ./packages/pi-shorthand/test ./packages/sightread/test ./e2e/test",
 		"typecheck": "tsc -p .",
 		"lint": "oxlint --deny-warnings",
 		"format": "oxfmt",

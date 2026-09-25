@@ -36,6 +36,7 @@ import {
 } from "./diagnostics.ts";
 import { preserveTextFormat } from "./text-format.ts";
 import { type FileOutcomeEvent, parseOpenWriters } from "../program/file-outcomes.ts";
+import { openGraphProxy } from "./graph-proxy.ts";
 
 export interface RunOptions {
 	cwd: string;
@@ -51,6 +52,8 @@ interface RunTestHooks {
 	writerInspectionFailure?: boolean;
 	workspaceCleanupFailure?: boolean;
 	finalCleanupDelayMs?: number;
+	graphColdStartDelayMs?: number;
+	graphUnavailable?: boolean;
 }
 
 interface ApplicationTestHooks {
@@ -588,86 +591,95 @@ async function runProgram(
 	const trackFiles = options.rollback === "file";
 	const outcomePath = path.join(tempDir, "file-outcomes");
 	const outcomeFile = await fs.open(outcomePath, "w");
-	const [command, ...args] = overlay.wrap(
-		[process.execPath, "--preload", executionPrelude, executionProgramPath],
-		executionCwd,
-	);
-	if (options.testHooks?.programStartMarker) await Bun.write(options.testHooks.programStartMarker, "started");
-	const child = spawn(command, args, {
-		cwd: executionCwd,
-		detached: true,
-		stdio: ["ignore", output.fd, output.fd, trackFiles ? outcomeFile.fd : "ignore", "pipe"],
-		env: {
-			...process.env,
-			...overlay.environment,
-			...programEnvironment(excludesFile, repo, overlay),
-			PI_SHORTHAND_OUTCOMES_FD: trackFiles ? "3" : "",
-			PI_SHORTHAND_PROGRESS_FD: "4",
-			PI_SHORTHAND_EXECUTION_ROOT: overlay.executionDir,
-			PI_SHORTHAND_INSPECTION_FAILURE: options.testHooks?.writerInspectionFailure ? "1" : "",
-		},
+	const graphProxy = await openGraphProxy(tempDir, options.cwd, repo, {
+		delayMs: options.testHooks?.graphColdStartDelayMs,
+		resolve: options.testHooks?.graphUnavailable ? async () => undefined : undefined,
 	});
-	const clock = new ProgramClock();
-	const progress = trackProgress(child, clock);
-	const killAll = () => {
-		if (overlay.stopProgram) {
-			// Native observers do not exit until their tracees are gone. Never
-			// signal their former PID after exit: it may already have been reused.
-			if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
-			try {
-				overlay.stopProgram(child.pid);
-			} catch {
-				/* already exited */
-			}
-		} else killGroup(child);
-	};
-	abort.addEventListener("abort", killAll);
-	if (abort.aborted) killAll();
-
-	const { exitCode, timedOut, openForWriting, stillRunning } = await measure(
-		"sandbox wait (includes preloads and program)",
-		() =>
-			waitWithTimeout(
-				child,
-				options.timeoutMs,
-				clock,
-				overlay.executionDir,
-				options.testHooks?.writerInspectionFailure,
-				killAll,
-			),
-	);
-	killAll(); // anything it left running
-	abort.removeEventListener("abort", killAll);
-	const helperMs = Math.round(clock.excludedMs());
-	if (helperMs > 0) diagnosticCounter("helper ms excluded from timeout", helperMs);
 	try {
-		await measure("descendant cleanup", async () => {
-			await overlay.terminateProcesses?.();
+		const [command, ...args] = overlay.wrap(
+			[process.execPath, "--preload", executionPrelude, executionProgramPath],
+			executionCwd,
+		);
+		if (options.testHooks?.programStartMarker) await Bun.write(options.testHooks.programStartMarker, "started");
+		const child = spawn(command, args, {
+			cwd: executionCwd,
+			detached: true,
+			stdio: ["ignore", output.fd, output.fd, trackFiles ? outcomeFile.fd : "ignore", "pipe"],
+			env: {
+				...process.env,
+				...overlay.environment,
+				...programEnvironment(excludesFile, repo, overlay),
+				PI_SHORTHAND_OUTCOMES_FD: trackFiles ? "3" : "",
+				PI_SHORTHAND_PROGRESS_FD: "4",
+				PI_SHORTHAND_EXECUTION_ROOT: overlay.executionDir,
+				PI_SHORTHAND_INSPECTION_FAILURE: options.testHooks?.writerInspectionFailure ? "1" : "",
+				PI_SHORTHAND_GRAPH_SOCKET: graphProxy.path,
+			},
 		});
+		const clock = new ProgramClock();
+		const progress = trackProgress(child, clock);
+		const killAll = () => {
+			if (overlay.stopProgram) {
+				// Native observers do not exit until their tracees are gone. Never
+				// signal their former PID after exit: it may already have been reused.
+				if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+				try {
+					overlay.stopProgram(child.pid);
+				} catch {
+					/* already exited */
+				}
+			} else killGroup(child);
+		};
+		abort.addEventListener("abort", killAll);
+		if (abort.aborted) killAll();
+
+		const { exitCode, timedOut, openForWriting, stillRunning } = await measure(
+			"sandbox wait (includes preloads and program)",
+			() =>
+				waitWithTimeout(
+					child,
+					options.timeoutMs,
+					clock,
+					overlay.executionDir,
+					options.testHooks?.writerInspectionFailure,
+					killAll,
+				),
+		);
+		killAll(); // anything it left running
+		abort.removeEventListener("abort", killAll);
+		const helperMs = Math.round(clock.excludedMs());
+		if (helperMs > 0) diagnosticCounter("helper ms excluded from timeout", helperMs);
+		try {
+			await measure("descendant cleanup", async () => {
+				await overlay.terminateProcesses?.();
+			});
+		} finally {
+			await Promise.all([output.close(), outcomeFile.close()]);
+			await measure("progress pipe close", () => progress.closed);
+			await fs.rm(programFile, { force: true });
+		}
+		const outcomes = fileOutcomes(await Bun.file(outcomePath).text());
+
+		// Keep the tail, where errors are. Show stack traces as "program.ts:3:11", and drop Bun's version footer.
+		let text = await Bun.file(outputFile).text();
+		if (text.length > MAX_OUTPUT_CHARS) {
+			text = `[${text.length - MAX_OUTPUT_CHARS} earlier characters dropped]\n${text.slice(-MAX_OUTPUT_CHARS)}`;
+		}
+		text = text.replaceAll(executionProgramPath, "program.ts").replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
+
+		return {
+			exitCode,
+			timedOut,
+			output: text,
+			openForWriting: trackFiles && exitCode !== 0 && !timedOut ? outcomes.writers : openForWriting,
+			stillRunning,
+			failedFiles: outcomes.failedFiles,
+			lastStep: progress.latest(),
+			helperMs,
+		};
 	} finally {
-		await Promise.all([output.close(), outcomeFile.close()]);
-		await measure("progress pipe close", () => progress.closed);
-		await fs.rm(programFile, { force: true });
+		await graphProxy.close();
 	}
-	const outcomes = fileOutcomes(await Bun.file(outcomePath).text());
-
-	// Keep the tail, where errors are. Show stack traces as "program.ts:3:11", and drop Bun's version footer.
-	let text = await Bun.file(outputFile).text();
-	if (text.length > MAX_OUTPUT_CHARS) {
-		text = `[${text.length - MAX_OUTPUT_CHARS} earlier characters dropped]\n${text.slice(-MAX_OUTPUT_CHARS)}`;
-	}
-	text = text.replaceAll(executionProgramPath, "program.ts").replace(/\nBun v[\d.]+ \([^)]*\)\n?$/, "\n");
-
-	return {
-		exitCode,
-		timedOut,
-		output: text,
-		openForWriting: trackFiles && exitCode !== 0 && !timedOut ? outcomes.writers : openForWriting,
-		stillRunning,
-		failedFiles: outcomes.failedFiles,
-		lastStep: progress.latest(),
-		helperMs,
-	};
 }
 
 /** Report infrastructure phases as well as commands, so a slow call says what it is waiting on. */

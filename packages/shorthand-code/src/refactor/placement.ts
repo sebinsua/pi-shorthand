@@ -29,6 +29,7 @@ export type Destination =
 
 interface Snapshot {
 	file: string;
+	displayFile: string;
 	source: string;
 	existed: boolean;
 	node: SgNode;
@@ -51,9 +52,9 @@ export function scriptLanguage(filename: string): Lang | undefined {
 	return languages[filename.split(".").pop()!];
 }
 
-export function remember<T extends Match>(match: T, source: string, existed = true): T {
-	const filename = existed ? realpathSync(match.file) : resolve(match.file);
-	snapshots.set(match, { file: filename, source, existed, node: match.node });
+export function remember<T extends Match>(match: T, source: string, existed = true, sourceFile = match.file): T {
+	const filename = existed ? realpathSync(sourceFile) : resolve(sourceFile);
+	snapshots.set(match, { file: filename, displayFile: match.file, source, existed, node: match.node });
 	return match;
 }
 
@@ -77,10 +78,7 @@ export function getMatchSnapshot(
 ): Snapshot {
 	const saved = snapshots.get(match);
 	if (!saved) throw new Error("Expected a file-backed match from sg.find, sg.one, or sg.file");
-	if (
-		match.node !== saved.node ||
-		(existsSync(match.file) ? realpathSync(match.file) : resolve(match.file)) !== saved.file
-	)
+	if (match.node !== saved.node || match.file !== saved.displayFile)
 		throw new Error("File-backed match identity was changed; select it again");
 	if (!sources.has(saved.file))
 		sources.set(saved.file, existsSync(saved.file) ? readFileSync(saved.file, "utf8") : null);
@@ -416,7 +414,13 @@ function moveNodes(
 					},
 					{ saved: target.saved, edits: [placed, ...targetEdits] },
 					...importers.map((importer) => ({
-						saved: { file: importer.file, source: importer.source, existed: true, node: importer.root },
+						saved: {
+							file: importer.file,
+							displayFile: importer.file,
+							source: importer.source,
+							existed: true,
+							node: importer.root,
+						},
 						edits: importer.edits.map((edit) => ({ ...edit, parent: importer.root })),
 					})),
 				]),

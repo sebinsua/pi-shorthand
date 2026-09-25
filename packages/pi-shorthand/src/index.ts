@@ -16,6 +16,7 @@ import {
 	diagnosticLines,
 	runFailed,
 	runWithBun,
+	resolveSightread,
 	textForModel,
 } from "shorthand-code";
 import { callLine, resultLines, unstructuredResultText } from "./display.ts";
@@ -29,12 +30,23 @@ Common operations:
 - sg.one(pattern, files?) selects exactly one match; sg.find returns an array. sg.rewrite also accepts a selected match or array without a file scope.
 - A rewrite callback receives a match and returns text, a native node.replace(text) edit, or null to skip. Return native edits to apply them. Pass selected arrays together for independent edits; select again after changing their file.
 - await refactor.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names.
+- await refactor.references({ file, symbol }) returns resolved identifier matches that pass straight to sg.rewrite(matches, callback).
 - await refactor.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
 - await refactor.move({ file, symbol, to }) moves a top-level declaration to another file and updates the imports that follow it.
 
 See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax or use rule objects. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
 
-export default function (pi: ExtensionAPI) {
+const GRAPH_DESCRIPTION =
+	"- await graph.query(request | request[]) queries symbols and relationships; graph results can be passed to sg as scope. The graph shows the repository before this program's edits.\n";
+
+export function codeDescription(graphAvailable: boolean): string {
+	return graphAvailable
+		? DESCRIPTION.replace("\n\nSee the shorthand skill", `\n${GRAPH_DESCRIPTION}\nSee the shorthand skill`)
+		: DESCRIPTION;
+}
+
+export default async function (pi: ExtensionAPI, findGraph: typeof resolveSightread = resolveSightread) {
+	const graphAvailable = Boolean(await findGraph());
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
 	// rather than throwing, since a thrown error loses them.)
 	pi.on("tool_result", async (event) => {
@@ -45,7 +57,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "code",
 		label: "Code",
-		description: DESCRIPTION,
+		description: codeDescription(graphAvailable),
 		promptSnippet:
 			"Make multi-file, repetitive or rename/move changes with one Bun program; a small change to one file is quicker as a direct edit. Run verification separately afterward",
 

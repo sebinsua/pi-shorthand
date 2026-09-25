@@ -1,21 +1,24 @@
-# pi-shorthand
+# `shortsight`
+
+Two tools for coding agents working on TypeScript and JavaScript repositories:
+
+- `shorthand` lets an agent change a repository by writing a small program, so a change that touches many files is one step instead of many.
+- `sightread` shows how a codebase fits together, so an agent reads only the code it needs.
+
+Each works on its own.
+
+## `shorthand`
 
 ![A code call in Pi](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2)
 
-A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.
+Instead of a patch, the agent writes a Bun program that can search, rewrite syntax, and rename or move TypeScript symbols. The program edits a private copy of the repository. When it succeeds, its changes are applied and the agent sees the diff. When it fails, finished files are kept and failed edits are rolled back.
 
-## Install
+### Install
 
-Install [Bun](https://bun.sh) 1.4 or later, which runs the programs:
+Install [Bun](https://bun.sh) 1.4 or later:
 
 ```sh
 curl -fsSL https://bun.sh/install | bash
-```
-
-Then install pi-shorthand:
-
-```sh
-pi install npm:pi-shorthand
 ```
 
 On macOS, install clang and AgentFS:
@@ -32,14 +35,34 @@ apt-cache policy bubblewrap
 sudo apt install bubblewrap build-essential lsof
 ```
 
-## Technical choices
+Then install it for [Pi](https://github.com/earendil-works/pi), which gives Pi a `code` tool:
 
-pi-shorthand gives Pi a programming environment instead of a patch format. This makes multi-file and structural edits possible in one call, but does not guarantee that Pi will find it easier or more reliable than its built-in edit tool. Which works better depends on the model and the task.
+```sh
+pi install npm:pi-shorthand
+```
 
-Programs edit a private workspace, with host files outside the repository kept read-only. By default, a failure keeps completed files and rolls back failed or interrupted edits. Concurrent edits can cause a run to be rejected; conflict detection is best-effort, not an atomic commit.
+Or install the `shorthand` command, for other agents and scripts:
 
-The `code` tool uses Pi's working directory by default. Pass `cwd` to target another checkout; relative paths are resolved from Pi's working directory. For example, when Pi starts in a bare worktree container, `cwd: "child"` targets its `child` worktree. The chosen directory must be inside a Git worktree.
+```sh
+npm i -g shorthand-code
+```
 
-## Without Pi
+Usage is in [pi-shorthand's README](packages/pi-shorthand/README.md) and [shorthand-code's README](packages/shorthand-code/README.md).
 
-The engine is published separately as `shorthand-code`, with a `shorthand` command that runs a program from a file or stdin and prints the same result. See `shorthand --help`.
+## `sightread`
+
+`sightread` shows what calls what in a TypeScript codebase, and the exact lines each piece of code spans. It asks the TypeScript compiler, so it follows imports, aliases and re-exports that text search misses.
+
+### Install
+
+Install [Bun](https://bun.sh) 1.4 or later, then:
+
+```sh
+npm i -g sightread
+```
+
+Usage is in [`sightread`'s README](packages/sightread/README.md).
+
+## Together
+
+With `sightread` installed, `shorthand` programs can ask the same questions, then edit what they find in the same step.

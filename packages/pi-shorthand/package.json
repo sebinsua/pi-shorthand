@@ -26,9 +26,6 @@
 		"README.md"
 	],
 	"type": "module",
-	"scripts": {
-		"prepack": "cp ../../README.md README.md"
-	},
 	"dependencies": {
 		"shorthand-code": "0.9.0"
 	},

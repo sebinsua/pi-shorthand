@@ -14,10 +14,13 @@
 
 import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { createConnection } from "node:net";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import * as astGrep from "@ast-grep/napi";
 import { type Edit, Lang, type NapiConfig, parse, type SgNode } from "@ast-grep/napi";
 import { $ as bunShell, Glob } from "bun";
-import { editingFiles, executionRoot, installFileOutcomeTracking } from "./file-outcomes.ts";
+import { editingFiles, executionRoot, installFileOutcomeTracking, wasEdited } from "./file-outcomes.ts";
 import {
 	file as selectFile,
 	moveDeclaration,
@@ -29,13 +32,95 @@ import {
 	remove,
 	type FileTarget,
 } from "../refactor/placement.ts";
-import type { RenameFileOptions, RenameOptions } from "../refactor/typescript-refactors.ts";
+import type {
+	ReferenceLocation,
+	ReferencesOptions,
+	RenameFileOptions,
+	RenameOptions,
+} from "../refactor/typescript-refactors.ts";
 
 installFileOutcomeTracking();
 
 const progressDescriptor = process.env.PI_SHORTHAND_PROGRESS_FD;
 // Subprocesses do not inherit this descriptor by default, so do not advertise it to them.
 delete process.env.PI_SHORTHAND_PROGRESS_FD;
+const graphSocket = process.env.PI_SHORTHAND_GRAPH_SOCKET;
+delete process.env.PI_SHORTHAND_GRAPH_SOCKET;
+const graphSources = new Map<string, string>();
+
+export interface GraphNode {
+	handle: string;
+	name: string;
+	kind?: string;
+	file: string;
+	ranges: { start: number; end: number }[] | null;
+	site?: { start: number; end: number };
+	exact?: true;
+}
+
+export interface GraphEdge {
+	from: string;
+	to: string;
+	kind: string;
+	at?: { file: string; line: number; col?: number; endLine?: number; endCol?: number };
+}
+
+type GraphSite = NonNullable<GraphEdge["at"]> & { node?: never; text?: never };
+
+export interface GraphResult {
+	type: string;
+	error?: string;
+	shown: number;
+	total?: number;
+	raise?: string;
+	nodes: GraphNode[];
+	edges: GraphEdge[];
+	sections: Record<string, unknown>;
+}
+
+function graphQuery(request: Record<string, unknown>): Promise<GraphResult>;
+function graphQuery(request: Record<string, unknown>[]): Promise<GraphResult[]>;
+function graphQuery(
+	request: Record<string, unknown> | Record<string, unknown>[],
+): Promise<GraphResult | GraphResult[]> {
+	if (!graphSocket) return Promise.reject(new Error("graph is available only inside a shorthand program"));
+	return new Promise((done, fail) => {
+		const socket = createConnection(graphSocket);
+		let buffer = "";
+		socket.setEncoding("utf8");
+		socket.once("error", fail);
+		socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
+		socket.on("data", (chunk: string) => {
+			buffer += chunk;
+			const end = buffer.indexOf("\n");
+			if (end < 0) return;
+			try {
+				const reply = JSON.parse(buffer.slice(0, end)) as {
+					value?: GraphResult | GraphResult[];
+					error?: string;
+					sources?: Record<string, string>;
+				};
+				if (reply.error) fail(new Error(reply.error));
+				else {
+					for (const [file, hash] of Object.entries(reply.sources ?? {})) graphSources.set(file, hash);
+					done(reply.value!);
+				}
+			} catch (error) {
+				fail(error);
+			} finally {
+				socket.end();
+			}
+		});
+	});
+}
+
+function queryGraph(request: Record<string, unknown>): Promise<GraphResult>;
+function queryGraph(request: Record<string, unknown>[]): Promise<GraphResult[]>;
+function queryGraph(
+	request: Record<string, unknown> | Record<string, unknown>[],
+): Promise<GraphResult | GraphResult[]> {
+	return logged("graph.query", [request], () => (Array.isArray(request) ? graphQuery(request) : graphQuery(request)));
+}
 
 function report(event: Record<string, unknown>) {
 	if (!progressDescriptor) return;
@@ -126,7 +211,7 @@ const $ = new Proxy(bunShell, {
  */
 function glob(pattern: string, where: string | { cwd?: string } = "."): string[] {
 	const dir = typeof where === "string" ? where : (where.cwd ?? ".");
-	return selectFiles(resolve(dir, pattern));
+	return selectFiles(resolve(checkedPath(dir), checkedPath(pattern)));
 }
 
 /**
@@ -292,9 +377,103 @@ export type SgMatch = {
 	text: string;
 	vars: Record<string, string>; // captured metavariables, e.g. vars.ARGS for $$$ARGS
 	node: SgNode;
+	call?: SgNode; // refactor.references: the call or `new` expression this reference is the callee of
 } & Record<Uppercase<string>, string>;
 
-export type FileScope = string | FileTarget | (string | FileTarget)[];
+type ScopeItem = string | FileTarget | GraphNode | GraphSite;
+export type FileScope = ScopeItem | ScopeItem[];
+
+function graphHandle(value: string): boolean {
+	return /#[^/]+:[A-Za-z][\w-]*$/.test(value);
+}
+
+function checkedPath(value: string): string {
+	if (graphHandle(value))
+		throw new TypeError(`${JSON.stringify(value)} is a graph handle, not a path; pass the node, or node.file`);
+	if (statSync(resolve(value), { throwIfNoEntry: false })) return value;
+	const fromRoot = resolve(repositoryRoot, value);
+	return !isAbsolute(value) && statSync(fromRoot, { throwIfNoEntry: false }) ? fromRoot : value;
+}
+
+function isGraphNode(value: unknown): value is GraphNode {
+	return typeof value === "object" && value !== null && "handle" in value && "file" in value && "ranges" in value;
+}
+
+function isGraphSite(value: unknown): value is GraphSite {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"file" in value &&
+		"line" in value &&
+		typeof value.file === "string" &&
+		typeof value.line === "number"
+	);
+}
+
+function scopedPath(value: unknown, helper = "sg.find"): string {
+	if (typeof value === "string") return checkedPath(value);
+	if (isGraphNode(value) || isGraphSite(value)) {
+		const file = resolve(repositoryRoot, value.file);
+		const expected = graphSources.get(value.file);
+		let current: string | undefined;
+		try {
+			current = createHash("sha256").update(readFileSync(file)).digest("hex");
+		} catch {
+			// The file disappeared after the graph snapshot.
+		}
+		if (wasEdited(file) || (expected !== undefined && current !== expected))
+			throw new Error(
+				`graph ranges for ${value.file} are stale: this program already edited it. Query first, then pass every node to one sg call`,
+			);
+		return file;
+	}
+	if (isFileTarget(value)) return value.file;
+	if (typeof value === "object" && value !== null && "nodes" in value && "edges" in value)
+		throw new TypeError("pass result.nodes (or a node), not the whole result");
+	if (typeof value === "object" && value !== null && "from" in value && "to" in value && "kind" in value)
+		throw new TypeError("an edge isn't a location; use edge.at for its span, or the node for edge.from");
+	throw new TypeError(`${helper}: files must be paths, sg.file() targets, or an array of either`);
+}
+
+type ScopeRange = { start: number; end: number; col?: number; endCol?: number };
+
+function scopeRanges(helper: string, files: FileScope): Map<string, ScopeRange[] | null> {
+	const ranges = new Map<string, ScopeRange[] | null>();
+	for (const item of Array.isArray(files) ? files : [files]) {
+		const file = scopedPath(item, helper);
+		const key = resolve(file);
+		if (isGraphNode(item) && !item.site && !item.ranges?.length)
+			throw new Error(
+				`graph node ${item.handle} has no line ranges, so it can't limit sg to that symbol; pass node.file to search the whole file`,
+			);
+		if (!isGraphNode(item) && !isGraphSite(item)) {
+			ranges.set(key, null);
+			continue;
+		}
+		if (ranges.has(key) && ranges.get(key) === null) continue;
+		const added = isGraphSite(item)
+			? [{ start: item.line, end: item.endLine ?? item.line, col: item.col, endCol: item.endCol }]
+			: item.site
+				? [item.site]
+				: item.ranges;
+		if (!added?.length) ranges.set(key, null);
+		else ranges.set(key, [...(ranges.get(key) ?? []), ...added]);
+	}
+	return ranges;
+}
+
+function withinScope(match: SgMatch, ranges: Map<string, ScopeRange[] | null>): boolean {
+	const selected = ranges.get(resolve(match.file));
+	return (
+		!selected ||
+		selected.some(({ start, end, col, endCol }) => {
+			if (match.line < start || match.line > end) return false;
+			if (col === undefined && endCol === undefined) return true;
+			const column = match.node.range().start.column + 1;
+			return (match.line > start || column >= (col ?? 1)) && (match.line < end || column < (endCol ?? Infinity));
+		})
+	);
+}
 
 /** File targets opt into explicit files; strings retain the helper's existing selection semantics. */
 function scopeFiles(helper: string, files: FileScope, select: (input: string) => string[]): string[] {
@@ -303,11 +482,13 @@ function scopeFiles(helper: string, files: FileScope, select: (input: string) =>
 	return inputs.length > 1 ? withSharedListing(selectAll) : selectAll();
 }
 
-function selectScope(helper: string, inputs: (string | FileTarget)[], select: (input: string) => string[]): string[] {
+function selectScope(helper: string, inputs: ScopeItem[], select: (input: string) => string[]): string[] {
 	return [
 		...new Set(
 			inputs.flatMap((input) => {
-				if (typeof input === "string") return select(input);
+				if (typeof input === "string" || isGraphNode(input) || isGraphSite(input))
+					return select(scopedPath(input, helper));
+				scopedPath(input, helper);
 				if (!isFileTarget(input))
 					throw new TypeError(`${helper}: files must be paths, sg.file() targets, or an array of either`);
 				const absolute = explicitPath(input.file);
@@ -350,7 +531,7 @@ const filesReexportingAll = () => scriptFilesMatching("(^|[^[:alnum:]_$])export[
 /** A scope for a warning: short scopes in full, long ones as a count and the first few paths. */
 function describeScope(scope: FileScope): string {
 	const paths = (Array.isArray(scope) ? scope : [scope]).map((entry) =>
-		typeof entry === "string" ? entry : gitPath(entry.file),
+		typeof entry === "string" ? entry : isGraphNode(entry) || isGraphSite(entry) ? entry.file : gitPath(entry.file),
 	);
 	if (paths.length <= 3) return JSON.stringify(paths);
 	return `${paths.length} paths (${paths
@@ -372,7 +553,14 @@ function sourceFiles(helper: string, files: FileScope): string[] {
 	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${describeScope(files)}`);
 	// Named from the program's working directory, like every other path it reads and writes, so a program that
 	// changes directory still reads, writes and reports the file it selected. At the root this is the path itself.
-	return parseable.map((file) => relative(process.cwd(), resolve(repositoryRoot, file)));
+	return parseable.map((file) => {
+		const absolute = resolve(repositoryRoot, file);
+		try {
+			return relative(process.cwd(), absolute);
+		} catch {
+			return absolute;
+		}
+	});
 }
 
 /**
@@ -380,9 +568,24 @@ function sourceFiles(helper: string, files: FileScope): string[] {
  * target in their place, since that is an easy mistake to make and its meaning is unambiguous.
  */
 function pathArgument(helper: string, path: unknown): string {
-	if (typeof path === "string") return path;
+	if (typeof path === "string") return checkedPath(path);
+	if (isGraphNode(path)) return scopedPath(path);
 	if (isFileTarget(path)) return getMatchSnapshot(path).file;
 	throw new TypeError(`${helper}: expected a file path string`);
+}
+
+function refactorTarget(helper: string, options: { file: string | GraphNode; symbol?: string }) {
+	const node = isGraphNode(options.file) ? options.file : undefined;
+	if (
+		node &&
+		(!node.name ||
+			["file", "project", "package", "directory", "test", "reference", "external"].includes(node.kind ?? ""))
+	)
+		throw new Error(`${helper}: graph node ${node.handle} cannot be used as a symbol target`);
+	return {
+		file: gitPath(pathArgument(helper, options.file)),
+		symbol: options.symbol ?? node?.name,
+	};
 }
 
 function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
@@ -391,11 +594,14 @@ function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
 
 function findMatches(helper: string, pattern: string | NapiConfig, files: FileScope): SgMatch[] {
 	const matches: SgMatch[] = [];
+	const ranges = scopeRanges(helper, files);
 	for (const file of sourceFiles(helper, files)) {
 		const parsed = parseFile(file);
 		if (!parsed) continue;
-		for (const node of findNodes(helper, parsed.root, pattern))
-			matches.push(toMatch(file, node, parsed.source, pattern));
+		for (const node of findNodes(helper, parsed.root, pattern)) {
+			const match = toMatch(file, node, parsed.source, pattern);
+			if (withinScope(match, ranges)) matches.push(match);
+		}
 	}
 	return matches;
 }
@@ -435,7 +641,7 @@ function placementFile(path: string) {
 }
 
 function explicitPath(path: string): string {
-	let ancestor = resolve(repositoryRoot, gitPath(path));
+	let ancestor = resolve(repositoryRoot, gitPath(checkedPath(path)));
 	const missing: string[] = [];
 	while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
 		missing.unshift(basename(ancestor));
@@ -452,7 +658,8 @@ function explicitPath(path: string): string {
 /** Text replaces the whole match; native edits replace nodes within it. Other listed values skip. */
 export type RewriteResult = string | Edit | readonly Edit[] | null | undefined | false;
 
-function replacementEdits(result: unknown, node: SgNode, file: string): Edit[] {
+function replacementEdits(result: unknown, match: SgMatch, file: string): Edit[] {
+	const node = match.node;
 	if (result === null || result === undefined || result === false) return [];
 	if (typeof result === "string") return [node.replace(result)];
 	const location = `${JSON.stringify(file)}:${node.range().start.line + 1}`;
@@ -465,7 +672,7 @@ function replacementEdits(result: unknown, node: SgNode, file: string): Edit[] {
 		return invalid("Received a Promise/thenable; rewrite callbacks are synchronous");
 	}
 	const edits = Array.isArray(result) ? result : [result];
-	const bounds = node.replace("");
+	const bounds = (match.call ?? node).replace("");
 	return Array.from(edits, (edit): Edit => {
 		if (
 			typeof edit !== "object" ||
@@ -501,7 +708,7 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 			typeof replacement === "function"
 				? programCode(() => replacement(match))
 				: replacement.replace(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g, (text, _, name) => match.vars[name] ?? text);
-		const changes = replacementEdits(result, match.node, file);
+		const changes = replacementEdits(result, match, file);
 		if (changes.length > 0) {
 			edits.push(...changes);
 			count++;
@@ -578,7 +785,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		const groups = new Map<string, SgMatch[]>();
 		const sources = new Map<string, string | null>();
 		for (const match of (Array.isArray(target) ? target : [target]) as SgMatch[]) {
-			const saved = editingFiles([match.file], () => getMatchSnapshot(match, sources, rewriteStaleAdvice));
+			const saved = getMatchSnapshot(match, sources, rewriteStaleAdvice);
 			if (!match.vars || typeof match.line !== "number")
 				throw new Error("sg.rewrite expects matches from sg.one or sg.find");
 			const file = explicitPath(match.file);
@@ -599,6 +806,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	}
 	const pattern = target as string | NapiConfig;
 	const scope = files ?? ".";
+	const ranges = scopeRanges("sg.rewrite", scope);
 	let count = 0,
 		matched = 0;
 	const skipped: SgMatch[] = [];
@@ -606,9 +814,9 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		count += editingFiles([file], () => {
 			const parsed = parseFile(file);
 			if (!parsed) return 0;
-			const matches = findNodes("sg.rewrite", parsed.root, pattern).map((node) =>
-				toMatch(file, node, parsed.source, pattern),
-			);
+			const matches = findNodes("sg.rewrite", parsed.root, pattern)
+				.map((node) => toMatch(file, node, parsed.source, pattern))
+				.filter((match) => withinScope(match, ranges));
 			matched += matches.length;
 			const earlier = insideEarlierOutput(file, parsed.source, matches);
 			skipped.push(...earlier);
@@ -641,7 +849,14 @@ function parseFile(file: string) {
 	return { source, root: parse(lang, source).root() };
 }
 
-function toMatch(file: string, node: SgNode, source: string, pattern: string | NapiConfig): SgMatch {
+function toMatch(
+	file: string,
+	node: SgNode,
+	source: string,
+	pattern: string | NapiConfig,
+	sourceFile = file,
+	call?: SgNode,
+): SgMatch {
 	const vars: Record<string, string> = {};
 	for (const [, dollars, name] of JSON.stringify(pattern).matchAll(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g)) {
 		if (dollars === "$$$") {
@@ -655,7 +870,68 @@ function toMatch(file: string, node: SgNode, source: string, pattern: string | N
 			if (captured) vars[name] = captured.text();
 		}
 	}
-	return remember({ ...vars, file, line: node.range().start.line + 1, text: node.text(), vars, node }, source);
+	return remember(
+		{ ...vars, file, line: node.range().start.line + 1, text: node.text(), vars, node, call },
+		source,
+		true,
+		sourceFile,
+	);
+}
+
+/** A reference can edit its enclosing call only when it names the callee. */
+function referenceCall(node: SgNode): SgNode | undefined {
+	let callee = node;
+	const parent = node.parent();
+	if (parent?.kind() === "member_expression") {
+		const property = parent.field("property")?.range();
+		const span = node.range();
+		if (!property || property.start.index !== span.start.index || property.end.index !== span.end.index) return;
+		callee = parent;
+	}
+	const call = callee.parent();
+	if (call?.kind() !== "call_expression" && call?.kind() !== "new_expression") return;
+	const called = call.field(call.kind() === "new_expression" ? "constructor" : "function")?.range();
+	const span = callee.range();
+	return called?.start.index === span.start.index && called.end.index === span.end.index ? call : undefined;
+}
+
+function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
+	const parsed = new Map<string, NonNullable<ReturnType<typeof parseFile>>>();
+	return locations.map(({ uri, range }) => {
+		const file = fileURLToPath(uri);
+		let document = parsed.get(file);
+		if (!document) {
+			document = parseFile(file) ?? undefined;
+			if (!document) throw new Error(`refactor.references cannot parse ${JSON.stringify(file)}`);
+			parsed.set(file, document);
+		}
+		const start = range.start;
+		const end = range.end;
+		const node = document.root
+			.findAll({
+				rule: {
+					any: [
+						"identifier",
+						"type_identifier",
+						"property_identifier",
+						"shorthand_property_identifier",
+						"shorthand_property_identifier_pattern",
+					].map((kind) => ({ kind })),
+				},
+			})
+			.find((candidate) => {
+				const span = candidate.range();
+				return (
+					span.start.line === start.line &&
+					span.start.column === start.character &&
+					span.end.line === end.line &&
+					span.end.column === end.character
+				);
+			});
+		if (!node)
+			throw new Error(`refactor.references could not locate the identifier at ${gitPath(file)}:${start.line + 1}`);
+		return toMatch(gitPath(file), node, document.source, "", file, referenceCall(node));
+	});
 }
 
 function normalizeEditLineEndings(text: string): string {
@@ -694,16 +970,17 @@ function editText(options: { path: string; oldText: string; newText: string }): 
 const globals = {
 	$,
 	edit: (...args: Parameters<typeof editText>) =>
-		logged("edit", args, () =>
-			editingFiles(typeof args[0]?.path === "string" ? [args[0].path] : [], () => editText(...args)),
-		),
+		logged("edit", args, () => {
+			const path = pathArgument("edit", args[0]?.path);
+			return editingFiles([path], () => editText({ ...args[0], path }));
+		}),
 	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
 	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
 	sg: {
 		...astGrep,
 		find: (...args: Parameters<typeof find>) => logged("sg.find", args, () => find(...args)),
 		one: (...args: Parameters<typeof one>) => logged("sg.one", args, () => one(...args)),
-		file: (...args: Parameters<typeof placementFile>) => logged("sg.file", args, () => placementFile(...args)),
+		file: (path: string) => logged("sg.file", [path], () => placementFile(pathArgument("sg.file", path))),
 		insert: (...args: Parameters<typeof insert>) => logged("sg.insert", args, () => insert(...args)),
 		move: (...args: Parameters<typeof move>) => {
 			const [match, destination, transform] = args;
@@ -714,21 +991,40 @@ const globals = {
 		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
 	},
 	refactor: {
-		rename: (options: RenameOptions) =>
+		rename: (
+			options:
+				| RenameOptions<string | GraphNode>
+				| (Omit<RenameOptions<string | GraphNode>, "symbol"> & { symbol?: string }),
+		) =>
 			logged("refactor.rename", [options], () => {
 				const prepared = {
 					...options,
-					file: pathArgument("refactor.rename", options.file),
+					...refactorTarget("refactor.rename", options),
 				};
-				return import("../refactor/typescript-refactors.ts").then(({ rename }) => rename(repositoryRoot, prepared));
+				return import("../refactor/typescript-refactors.ts").then(({ rename }) =>
+					rename(repositoryRoot, prepared as RenameOptions),
+				);
 			}),
-		move: (options: { file: string; symbol: string; to: string }) =>
+		references: (
+			options:
+				| ReferencesOptions<string | GraphNode>
+				| (Omit<ReferencesOptions<string | GraphNode>, "symbol"> & { symbol?: string }),
+		) =>
+			logged("refactor.references", [options], async () => {
+				const prepared = { ...options, ...refactorTarget("refactor.references", options) };
+				const { references } = await import("../refactor/typescript-refactors.ts");
+				return referenceMatches(await references(repositoryRoot, prepared as ReferencesOptions));
+			}),
+		move: (options: { file: string | GraphNode; symbol?: string; to: string }) =>
 			logged("refactor.move", [options], async () => {
-				const from = explicitPath(pathArgument("refactor.move", options.file));
+				const target = refactorTarget("refactor.move", options);
+				const from = explicitPath(target.file);
 				const to = explicitPath(pathArgument("refactor.move", options.to));
-				if (typeof options.symbol !== "string" || !options.symbol)
+				if (typeof target.symbol !== "string" || !target.symbol)
 					throw new TypeError("refactor.move expects { file, symbol, to } with a symbol name");
-				await moveDeclaration(from, options.symbol, to, {
+				if (target.symbol.includes("."))
+					throw new Error(`refactor.move only moves top-level declarations; ${target.symbol} names a member`);
+				await moveDeclaration(from, target.symbol, to, {
 					root: repositoryRoot,
 					scripts: scriptFiles,
 					loadingModules: filesLoadingModules,
@@ -746,6 +1042,7 @@ const globals = {
 				);
 			}),
 	},
+	graph: { query: queryGraph },
 };
 
 export type ShorthandGlobals = typeof globals;
