@@ -19,3 +19,12 @@ test("Pi loads the shorthand skill from shorthand-code", async () => {
 	const skill = await Bun.file(path.join(discovered.skillPaths[0], "shorthand/SKILL.md")).text();
 	expect(skill.startsWith("---\nname: shorthand\n")).toBe(true);
 });
+
+test("Node resolves shorthand-code's package.json, as Pi does when loading the extension", () => {
+	// Bun ignores a package's `exports` map here, and Node doesn't, so check under Node.
+	const result = Bun.spawnSync(["node", "-e", 'console.log(require.resolve("shorthand-code/package.json"))'], {
+		cwd: path.join(import.meta.dir, ".."),
+	});
+	expect(result.stderr.toString()).toBe("");
+	expect(result.stdout.toString().trim().endsWith(path.join("shorthand-code", "package.json"))).toBe(true);
+});

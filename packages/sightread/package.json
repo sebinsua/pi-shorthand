@@ -26,7 +26,8 @@
 	],
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts"
+		".": "./src/index.ts",
+		"./package.json": "./package.json"
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "1.30.1",
