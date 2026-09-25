@@ -70,14 +70,13 @@ test("an untracked realistic TSX component retains its entire range and new-file
 	f.put("client/src/ItemList.tsx", tsx);
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 4 changed, 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: 4 changed · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/ItemList.tsx  (new file)",
-			"    3-3  Item      type      added",
-			"   5-25  ItemList  function  added",
-			"  27-27  Empty     variable  added",
-			"  29-31  after     function  added",
+			"    3-3  Item  added",
+			"   5-25  ItemList  added",
+			"  27-27  Empty  added",
+			"  29-31  after  added",
 		].join("\n"),
 	);
 }, 30_000);
@@ -85,7 +84,7 @@ test("an untracked realistic TSX component retains its entire range and new-file
 test("no changes prints the complete empty result", async () => {
 	const f = fixture({ "client/src/View.tsx": tsx });
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 0 changed, 0 callers, 0 test files\n\n(no changes)`,
+		`diff against ${f.sha.slice(0, 12)} in client: 0 changed · used by 0 · tested by 0 files\n\n(no changes)`,
 	);
 }, 30_000);
 
@@ -97,18 +96,11 @@ test("deleted function finds a live caller by name", async () => {
 	f.put("client/src/api.ts", "\n");
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 1 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: removed deleted · used by 1 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/api.ts",
-			"  1-1  removed  function  deleted (base lines)",
-			"",
-			"callers",
-			"client/src/use.ts",
-			"  2-2  use  function",
-			"",
-			"chains",
-			"  use -by_name→ removed  (by name)",
+			"  1-1  removed  deleted (base lines)",
+			"  └─ named in client/src/use.ts:2-2  use",
 		].join("\n"),
 	);
 }, 30_000);
@@ -119,7 +111,7 @@ test("a pure deletion inside a method selects the method", async () => {
 	});
 	f.put("client/src/box.ts", "export class Box {\n\tvalue() {\n\t\tconst a = 1;\n\t\treturn a;\n\t}\n}\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 0 test files\n\nchanged\nclient/src/box.ts\n  2-5  Box.value  method  edited`,
+		`diff against ${f.sha.slice(0, 12)} in client: Box.value edited · used by 0 · tested by 0 files\n\nclient/src/box.ts\n  2-5  Box.value  edited\n  └─ no callers`,
 	);
 }, 30_000);
 
@@ -127,7 +119,7 @@ test("edited TSX parses the base with its real extension", async () => {
 	const f = fixture({ "client/src/ItemList.tsx": tsx });
 	f.put("client/src/ItemList.tsx", tsx.replace("No items", "Nothing here"));
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 0 test files\n\nchanged\nclient/src/ItemList.tsx\n  5-25  ItemList  function  edited`,
+		`diff against ${f.sha.slice(0, 12)} in client: ItemList edited · used by 0 · tested by 0 files\n\nclient/src/ItemList.tsx\n  5-25  ItemList  edited\n  └─ no callers`,
 	);
 }, 30_000);
 
@@ -139,13 +131,13 @@ test("spaces, mts, cts, and changed files outside the project have rooted paths"
 	f.put("client/public/regions.json", "{}\n");
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 2 changed, 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: 2 changed · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/other.cts  (new file)",
-			"  1-1  other  function  added",
+			"  1-1  other  added",
+			"",
 			"client/src/with space.mts  (new file)",
-			"  1-1  spaced  function  added",
+			"  1-1  spaced  added",
 			"",
 			"notes",
 			"  1 non-TypeScript file changed: client/public/regions.json",
@@ -162,11 +154,11 @@ test("a rename labels the file and emits one note", async () => {
 	f.put("client/src/new.ts", "export function renamed() {\n\tconst value = 1;\n\treturn value + 2;\n}\n");
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: renamed moved · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/new.ts  (renamed from client/src/old.ts)",
-			"  1-4  renamed  function  moved (from client/src/old.ts)",
+			"  1-4  renamed  moved (from client/src/old.ts)",
+			"  └─ no callers",
 			"",
 			"notes",
 			"  client/src/old.ts → client/src/new.ts: file rename",
@@ -266,7 +258,7 @@ test("default base reports when no other branch exists and explicit HEAD works",
 		"no default branch found; pass diff [base]",
 	);
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 0 changed, 0 callers, 0 test files\n\n(no changes)`,
+		`diff against ${f.sha.slice(0, 12)} in client: 0 changed · used by 0 · tested by 0 files\n\n(no changes)`,
 	);
 }, 30_000);
 
@@ -278,7 +270,7 @@ test("reuses a fresh daemon and refreshes after a same-line source edit", async 
 	f.put("client/src/api.ts", "export function target() { return 2; }\n");
 	const first = await f.run();
 	expect(first).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 0 test files\n\nchanged\nclient/src/api.ts\n  1-1  target  function  edited`,
+		`diff against ${f.sha.slice(0, 12)} in client: target edited · used by 0 · tested by 0 files\n\nclient/src/api.ts\n  1-1  target  edited\n  └─ no callers`,
 	);
 	const one = await connect(f.project);
 	expect(await f.run()).toBe(first);
@@ -286,17 +278,19 @@ test("reuses a fresh daemon and refreshes after a same-line source edit", async 
 	f.put("client/src/api.test.ts", "import { target } from './api';\nexport function check() { return target(); }\n");
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 2 changed, 0 callers, 1 test file`,
+			`diff against ${f.sha.slice(0, 12)} in client: 2 changed · used by 0 · tested by 1 file`,
 			"",
-			"changed",
 			"client/src/api.ts",
-			"  1-1  target  function  edited",
+			"  1-1  target  edited",
+			"  └─ no callers",
+			"",
 			"client/src/api.test.ts",
-			"  2-2  check  function  edited",
+			"  2-2  check  edited",
+			"  └─ no callers",
 			"",
 			"tests",
 			"client/src/api.test.ts",
-			"  2  target  test",
+			"  target on line 2",
 		].join("\n"),
 	);
 	expect((await connect(f.project)).pid).not.toBe(one.pid);
@@ -324,12 +318,13 @@ test("edited overloads and merged interfaces each keep every range", async () =>
 	);
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 2 changed, 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: 2 changed · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/types.ts",
-			"  1-1, 2-2, 3-3  call  function   edited",
-			"       4-6, 7-9  Item  interface  edited",
+			"  1-1, 2-2, 3-3  call  edited",
+			"  └─ no callers",
+			"       4-6, 7-9  Item  edited",
+			"  └─ no callers",
 		].join("\n"),
 	);
 }, 30_000);
@@ -346,13 +341,14 @@ test("insert, method edit, import note, and removal render once and match full J
 	);
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 3 changed, 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: 3 changed · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/a.ts",
-			"  2-2  old      function  deleted (base lines)",
-			"  3-3  Row.get  method    edited",
-			"  5-5  added    function  added",
+			"  2-2  old  deleted (base lines)",
+			"  └─ no callers",
+			"  3-3  Row.get  edited",
+			"  └─ no callers",
+			"  5-5  added  added",
 			"",
 			"notes",
 			"  client/src/a.ts: imports changed",
@@ -404,15 +400,15 @@ test("a direct test call appears under tests", async () => {
 	f.put("client/src/api.ts", "export function target() { return 2; }\n");
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 1 test file`,
+			`diff against ${f.sha.slice(0, 12)} in client: target edited · used by 0 · tested by 1 file`,
 			"",
-			"changed",
 			"client/src/api.ts",
-			"  1-1  target  function  edited",
+			"  1-1  target  edited",
+			"  └─ no callers",
 			"",
 			"tests",
 			"client/src/api.test.ts",
-			"  2  target  test",
+			"  target on line 2",
 		].join("\n"),
 	);
 }, 30_000);
@@ -427,13 +423,12 @@ test("30-symbol cap orders production symbols before test-file symbols", async (
 	f.put("client/src/a.test.ts", "export const testItem = 1;\n");
 	const rows = Array.from(
 		{ length: 30 },
-		(_, index) => `  ${`${index + 1}-${index + 1}`.padStart(5)}  p${String(index).padStart(2, "0")}  variable  added`,
+		(_, index) => `  ${`${index + 1}-${index + 1}`.padStart(5)}  p${String(index).padStart(2, "0")}  added`,
 	);
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 31 changed (30 analysed), 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: 31 changed (30 analysed) · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/z.ts  (new file)",
 			...rows,
 			"",
@@ -451,7 +446,7 @@ test("deleted locals do not search unrelated files or appear as changes", async 
 	});
 	f.put("client/src/api.ts", "\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 0 test files\n\nchanged\nclient/src/api.ts\n  1-4  removed  function  deleted (base lines)`,
+		`diff against ${f.sha.slice(0, 12)} in client: removed deleted · used by 0 · tested by 0 files\n\nclient/src/api.ts\n  1-4  removed  deleted (base lines)\n  └─ no callers`,
 	);
 }, 30_000);
 
@@ -464,7 +459,7 @@ test("a deleted module-level function finds only an importing caller and a same-
 	});
 	f.put("client/src/api.ts", "export function own() { return removed(); }\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 2 callers, 0 test files\n\nchanged\nclient/src/api.ts\n  1-1  removed  function  deleted (base lines)\n\ncallers\nclient/src/api.ts\n  1-1  own  function\nclient/src/use.ts\n  2-2  use  function\n\nchains\n  own -by_name→ removed  (by name)\n  use -by_name→ removed  (by name)`,
+		`diff against ${f.sha.slice(0, 12)} in client: removed deleted · used by 2 · tested by 0 files\n\nclient/src/api.ts\n  1-1  removed  deleted (base lines)\n  ├─ named in client/src/api.ts:1-1  own\n  └─ named in client/src/use.ts:2-2  use`,
 	);
 }, 30_000);
 
@@ -475,7 +470,7 @@ test("an edited local marks its enclosing function", async () => {
 	});
 	f.put("client/src/api.ts", "export function calculate() {\n\tconst result = 2;\n\treturn result;\n}\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 0 test files\n\nchanged\nclient/src/api.ts\n  1-4  calculate  function  edited`,
+		`diff against ${f.sha.slice(0, 12)} in client: calculate edited · used by 0 · tested by 0 files\n\nclient/src/api.ts\n  1-4  calculate  edited\n  └─ no callers`,
 	);
 }, 30_000);
 
@@ -488,7 +483,7 @@ test("test callback calls are found by name through a relative import", async ()
 	});
 	f.put("client/src/api/index.ts", "export function target() { return 2; }\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 0 callers, 1 test file\n\nchanged\nclient/src/api/index.ts\n  1-1  target  function  edited\n\ntests\nclient/src/api.test.ts\n  4  target  test  (by name)`,
+		`diff against ${f.sha.slice(0, 12)} in client: target edited · used by 0 · tested by 1 file\n\nclient/src/api/index.ts\n  1-1  target  edited\n  └─ no callers\n\ntests\nclient/src/api.test.ts\n  target on line 4  (by name)`,
 	);
 	expect(JSON.parse(await f.run(true)).tests).toEqual([
 		{
@@ -511,7 +506,7 @@ test("a longer caller chain removes its contiguous tail", async () => {
 	});
 	f.put("client/src/api.ts", "export function target() { return 2; }\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 2 callers, 0 test files\n\nchanged\nclient/src/api.ts\n  1-1  target  function  edited\n\ncallers\nclient/src/middle.ts\n  2-2  middle  function\nclient/src/outer.ts\n  2-2  outer  function\n\nchains\n  outer → middle → target`,
+		`diff against ${f.sha.slice(0, 12)} in client: target edited · used by 2 · tested by 0 files\n\nclient/src/api.ts\n  1-1  target  edited\n  └─ called by client/src/middle.ts:2-2  middle\n     └─ called by client/src/outer.ts:2-2  outer`,
 	);
 }, 30_000);
 
@@ -527,17 +522,14 @@ test("the cap selects edited production code before added symbols", async () => 
 	);
 	expect(await f.run()).toBe(
 		[
-			`diff ${f.sha.slice(0, 12)} → working tree (client): 31 changed (30 analysed), 0 callers, 0 test files`,
+			`diff against ${f.sha.slice(0, 12)} in client: 31 changed (30 analysed) · used by 0 · tested by 0 files`,
 			"",
-			"changed",
 			"client/src/z.ts",
-			"  1-1  edited  function  edited",
+			"  1-1  edited  edited",
+			"  └─ no callers",
+			"",
 			"client/src/a.ts  (new file)",
-			...Array.from(
-				{ length: 29 },
-				(_, index) =>
-					`  ${`${index + 1}-${index + 1}`.padStart(5)}  a${index}${index < 10 ? " " : ""}  variable  added`,
-			),
+			...Array.from({ length: 29 }, (_, index) => `  ${`${index + 1}-${index + 1}`.padStart(5)}  a${index}  added`),
 			"",
 			"notes",
 			"  1 omitted (cap 30): 1 added",
@@ -555,7 +547,7 @@ test("type reference hops are labelled in complete text and JSON chains", async 
 	f.put("client/src/model.ts", "export interface ChangedSymbol { value: string }\n");
 	const output = await f.run();
 	expect(output).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 4 callers, 0 test files\n\nchanged\nclient/src/model.ts\n  1-1  ChangedSymbol  interface  edited\n\ncallers\nclient/src/impact.ts\n  2-2  Impact          interface\n  2-2  Impact.changed  variable\n  3-3  collectImpact   function\n  4-4  runDiff         function\n\nchains\n  runDiff → collectImpact -type_ref→ Impact -type_ref→ ChangedSymbol\n  Impact.changed -type_ref→ ChangedSymbol`,
+		`diff against ${f.sha.slice(0, 12)} in client: ChangedSymbol edited · used by 4 · tested by 0 files\n\nclient/src/model.ts\n  1-1  ChangedSymbol  edited\n  ├─ used as a type by client/src/impact.ts:2-2  Impact\n  │  └─ used as a type by client/src/impact.ts:3-3  collectImpact\n  │     └─ called by client/src/impact.ts:4-4  runDiff\n  └─ used as a type by client/src/impact.ts:2-2  Impact.changed`,
 	);
 	expect(JSON.parse(await f.run(true)).chains).toEqual([
 		{
@@ -608,7 +600,7 @@ test("added and deleted containers stand for their members", async () => {
 		"export class New {\n\tmethod() { return 1; }\n}\nexport interface Fresh {\n\tvalue: number;\n}\n",
 	);
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 4 changed, 0 callers, 0 test files\n\nchanged\nclient/src/old.ts\n  1-3  Old   class      deleted (base lines)\n  4-6  Gone  interface  deleted (base lines)\nclient/src/new.ts  (new file)\n  1-3  New    class      added\n  4-6  Fresh  interface  added`,
+		`diff against ${f.sha.slice(0, 12)} in client: 4 changed · used by 0 · tested by 0 files\n\nclient/src/old.ts\n  1-3  Old  deleted (base lines)\n  └─ no callers\n  4-6  Gone  deleted (base lines)\n  └─ no callers\n\nclient/src/new.ts  (new file)\n  1-3  New  added\n  4-6  Fresh  added`,
 	);
 }, 30_000);
 
@@ -638,7 +630,7 @@ test("repeated notes coalesce and appear in a fixed order", () => {
 			false,
 		),
 	).toBe(
-		"diff 123456789012 → working tree (client): 0 changed, 0 callers, 0 test files\n\nnotes\n  3 omitted (cap 30): 3 added\n  impact truncated for 6 symbols (A, B, C, D, E, …); reverse trace used\n  4 imports changed: w.ts, x.ts, y.ts, … (1 more)\n  4 non-TypeScript files changed: a.md, b.md, c.md, … (1 more)\n  1 file changed outside the project: client/src/out.ts",
+		"diff against 123456789012 in client: 0 changed · used by 0 · tested by 0 files\n\nnotes\n  3 omitted (cap 30): 3 added\n  impact truncated for 6 symbols (A, B, C, D, E, …); reverse trace used\n  4 imports changed: w.ts, x.ts, y.ts, … (1 more)\n  4 non-TypeScript files changed: a.md, b.md, c.md, … (1 more)\n  1 file changed outside the project: client/src/out.ts",
 	);
 });
 
@@ -653,7 +645,7 @@ test("changed declarations outside the graphed config are coalesced", async () =
 	git(f.repo, "commit", "-qm", "restrict project");
 	f.put("client/src/node/__tests__/fixtures/with space/main.ts", "export function main() { return 2; }\n");
 	expect(await f.run()).toBe(
-		`diff ${git(f.repo, "rev-parse", "HEAD").slice(0, 12)} → working tree (client): 0 changed, 0 callers, 0 test files\n\nnotes\n  1 changed declarations outside the graphed project (tsconfig.json)`,
+		`diff against ${git(f.repo, "rev-parse", "HEAD").slice(0, 12)} in client: 0 changed · used by 0 · tested by 0 files\n\nnotes\n  1 changed declarations outside the graphed project (tsconfig.json)`,
 	);
 }, 30_000);
 
@@ -665,7 +657,7 @@ test("a graph handle with spaces round-trips to its caller", async () => {
 	});
 	f.put("client/src/with space/api.ts", "export function target() { return 2; }\n");
 	expect(await f.run()).toBe(
-		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 1 callers, 0 test files\n\nchanged\nclient/src/with space/api.ts\n  1-1  target  function  edited\n\ncallers\nclient/src/use.ts\n  2-2  use  function\n\nchains\n  use → target`,
+		`diff against ${f.sha.slice(0, 12)} in client: target edited · used by 1 · tested by 0 files\n\nclient/src/with space/api.ts\n  1-1  target  edited\n  └─ called by client/src/use.ts:2-2  use`,
 	);
 }, 30_000);
 
@@ -690,6 +682,6 @@ test("uses of one name across a test file render as one row of line runs", () =>
 			false,
 		),
 	).toBe(
-		"diff 123456789012 → working tree (client): 0 changed, 0 callers, 2 test files\n\ntests\nclient/src/api.test.ts\n  4-6, 9-9, 12-13  target  test  (by name)\nclient/src/other.test.ts\n  7  target  test  (by name)",
+		"diff against 123456789012 in client: 0 changed · used by 0 · tested by 2 files\n\ntests\nclient/src/api.test.ts\n  target on lines 4-6, 9, 12-13  (by name)\nclient/src/other.test.ts\n  target on line 7  (by name)",
 	);
 });

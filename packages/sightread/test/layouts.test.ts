@@ -113,9 +113,9 @@ test("Vite root chooses the app config, reports it in text and JSON, and indexes
 	const diff = command(root, "diff", "HEAD");
 	expect(diff.code).toBe(0);
 	expect(diff.out).toStartWith(
-		`diff ${git(root, "rev-parse", "--short=12", "HEAD")} → working tree (tsconfig.app.json): 1 changed`,
+		`diff against ${git(root, "rev-parse", "--short=12", "HEAD")} using tsconfig.app.json: formatPrice edited`,
 	);
-	expect(diff.out).toContain("formatPrice  function  edited");
+	expect(diff.out).toContain("formatPrice  edited");
 	const diffJson = command(root, "--json", "diff", "HEAD");
 	expect((JSON.parse(diffJson.out) as { tsconfig: string }).tsconfig).toBe("tsconfig.app.json");
 }, 30_000);
@@ -162,8 +162,8 @@ test("bare-container worktree falls back to main and root discovery stays readab
 	await project(join(feature, "client"));
 	const diff = command(join(feature, "client"), "diff");
 	expect(diff.code).toBe(0);
-	expect(diff.out).toStartWith(`diff ${git(feature, "rev-parse", "--short=12", "main")} (main) → working tree`);
-	expect(diff.out).toContain("formatPrice  function  edited");
+	expect(diff.out).toStartWith(`diff against main (${git(feature, "rev-parse", "--short=12", "main")}) in client:`);
+	expect(diff.out).toContain("formatPrice  edited");
 	const discovery = command(container, '{"type":"lookup","query":"formatPrice"}');
 	expect(discovery).toMatchObject({
 		code: 1,
@@ -187,8 +187,10 @@ test("normal clone prefers origin/HEAD over a local main ref", async () => {
 	await project(join(clone, "client"));
 	const output = command(join(clone, "client"), "diff");
 	expect(output.code).toBe(0);
-	expect(output.out).toStartWith(`diff ${git(clone, "rev-parse", "--short=12", "main")} (origin/HEAD) → working tree`);
-	expect(output.out).toContain("formatPrice  function  edited");
+	expect(output.out).toStartWith(
+		`diff against origin/HEAD (${git(clone, "rev-parse", "--short=12", "main")}) in client:`,
+	);
+	expect(output.out).toContain("formatPrice  edited");
 }, 30_000);
 
 test("a bounded discovery error is not cut at 240 characters", () => {

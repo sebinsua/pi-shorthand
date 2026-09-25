@@ -1,6 +1,6 @@
 # pi-shorthand
 
-![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/screenshot.png?v=2)
+![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
 
 A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.
 

@@ -1,5 +1,5 @@
 // Render the stable diff result as aligned text or a single JSON object.
-import { bold, groupedSymbols } from "../layout.ts";
+import { bold, dim, range } from "../layout.ts";
 import { fromHandle, type GraphNode } from "../model.ts";
 import type { GitFile } from "./git.ts";
 
@@ -22,6 +22,7 @@ export interface DiffResult {
 	notes: string[];
 }
 
+const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 const listed = (items: string[], limit: number) =>
 	`${items.slice(0, limit).join(", ")}${items.length > limit ? `, … (${items.length - limit} more)` : ""}`;
 
@@ -50,7 +51,7 @@ export function formatDiffNotes(notes: string[]): string[] {
 	}
 	if (truncated.length)
 		groups[1].push(
-			`impact truncated for ${truncated.length} symbols (${listed(truncated, 5).replace(/, … \(\d+ more\)$/, ", …")}); reverse trace used`,
+			`impact truncated for ${plural(truncated.length, "symbol")} (${listed(truncated, 5).replace(/, … \(\d+ more\)$/, ", …")}); reverse trace used`,
 		);
 	if (imports.length > 3) groups[5].push(`${imports.length} imports changed: ${listed(imports.toSorted(), 3)}`);
 	else groups[5].push(...imports.toSorted().map((path) => `${path}: imports changed`));
@@ -71,87 +72,135 @@ export function formatDiffNotes(notes: string[]): string[] {
 	return groups.flat();
 }
 
-// A name used on many lines of one test file is one row, its lines joined into runs.
-function mergeNameSites(tests: DiffResult["tests"]): DiffResult["tests"] {
-	const merged: DiffResult["tests"] = [];
-	const rows = new Map<string, { node: DiffResult["tests"][number]; lines: number[] }>();
-	for (const node of tests) {
-		if (!node.byName || !node.site) {
-			merged.push(node);
-			continue;
-		}
-		const key = `${node.file}\u0000${node.name}`;
-		const row = rows.get(key);
-		if (row) row.lines.push(node.site.start);
-		else {
-			const created = { node, lines: [node.site.start] };
-			rows.set(key, created);
-			merged.push(node);
-		}
+const relation: Record<string, string> = {
+	calls: "called by",
+	accesses: "accessed by",
+	instantiates: "instantiated by",
+	type_ref: "used as a type by",
+	doc_ref: "linked from the docs of",
+	extends: "extended by",
+	implements: "implemented by",
+	overrides: "overridden by",
+	dispatches: "dispatched to by",
+	renders: "rendered by",
+	by_name: "named in",
+};
+const maxChildren = 8;
+
+// Join sorted line numbers into runs: 10-18, 22-28, 32.
+function lineRuns(lines: number[]): string {
+	const runs: Array<{ start: number; end: number }> = [];
+	for (const line of [...new Set(lines)].toSorted((a, b) => a - b)) {
+		const last = runs.at(-1);
+		if (last && line <= last.end + 1) last.end = line;
+		else runs.push({ start: line, end: line });
 	}
-	return merged.map((node) => {
-		const row = node.byName && node.site ? rows.get(`${node.file}\u0000${node.name}`) : undefined;
-		if (!row || row.lines.length === 1) return node;
-		const runs: Array<{ start: number; end: number }> = [];
-		for (const line of row.lines.toSorted((a, b) => a - b)) {
-			const last = runs.at(-1);
-			if (last && line <= last.end + 1) last.end = line;
-			else runs.push({ start: line, end: line });
-		}
-		const { site: _site, ...rest } = node;
-		return { ...rest, ranges: runs };
-	});
+	return runs.map(({ start, end }) => (start === end ? `${start}` : `${start}-${end}`)).join(", ");
 }
 
-/** Show counts, file-grouped symbols, chains, sites, then bounded notes. */
+// Draw what reaches each changed declaration as a tree. A caller is expanded the first time it
+// appears and marked "shown above" after that, so shared callers are drawn once.
+function impactTrees(value: DiffResult, files: Map<string, GitFile>, color: boolean): string[] {
+	const nodes = new Map([...value.changed, ...value.callers].map((node) => [node.handle, node]));
+	const callersOf = new Map<string, Map<string, string>>();
+	for (const { handles, hops } of value.chains)
+		for (let index = 1; index < handles.length; index++) {
+			const target = handles[index];
+			const callers = callersOf.get(target) ?? new Map<string, string>();
+			if (!callers.has(handles[index - 1])) callers.set(handles[index - 1], hops[index - 1]?.kind ?? "calls");
+			callersOf.set(target, callers);
+		}
+	const shown = new Set<string>();
+	const describe = (handle: string) => {
+		const node = nodes.get(handle);
+		const ref = fromHandle(handle);
+		const file = node?.file ?? ref?.file ?? handle;
+		const where = node && (node.site || node.ranges?.length) ? `${file}:${range(node).replaceAll(", ", ",")}` : file;
+		return `${where}  ${bold(node?.name ?? ref?.name ?? handle, color)}`;
+	};
+	const rows: string[] = [];
+	const branch = (handle: string, prefix: string) => {
+		const callers = [...(callersOf.get(handle) ?? [])];
+		const visible = callers.slice(0, maxChildren);
+		visible.forEach(([caller, kind], index) => {
+			const last = index === visible.length - 1 && callers.length <= maxChildren;
+			const repeat = shown.has(caller);
+			shown.add(caller);
+			rows.push(
+				`${prefix}${dim(last ? "└─ " : "├─ ", color)}${dim(relation[kind] ?? `${kind} by`, color)} ${describe(caller)}${repeat ? dim("  (shown above)", color) : ""}`,
+			);
+			if (!repeat) branch(caller, `${prefix}${last ? "   " : dim("│  ", color)}`);
+		});
+		if (callers.length > maxChildren)
+			rows.push(
+				`${prefix}${dim("└─ ", color)}${dim(`… ${plural(callers.length - maxChildren, "more caller")}`, color)}`,
+			);
+	};
+	for (const file of new Set(value.changed.map((node) => node.file))) {
+		const info = files.get(file);
+		const label =
+			info?.status === "untracked" || info?.status === "added"
+				? "  (new file)"
+				: info?.status === "deleted"
+					? "  (deleted file)"
+					: info?.oldPath
+						? `  (renamed from ${info.oldPath})`
+						: "";
+		rows.push("", `${bold(file, color)}${label}`);
+		const changed = value.changed.filter((node) => node.file === file);
+		const width = Math.max(...changed.map((node) => range(node).length));
+		for (const node of changed) {
+			const status =
+				node.status === "deleted"
+					? "deleted (base lines)"
+					: node.status === "moved"
+						? `moved (from ${node.oldPath})`
+						: node.status;
+			rows.push(`  ${dim(range(node).padStart(width), color)}  ${bold(node.name, color)}  ${status}`);
+			shown.add(node.handle);
+			if (callersOf.has(node.handle)) branch(node.handle, "  ");
+			else if (node.status !== "added") rows.push(`  ${dim("└─ no callers", color)}`);
+		}
+	}
+	return rows;
+}
+
+// Each test file, then one row per name it uses, with the lines.
+function testRows(value: DiffResult, color: boolean): string[] {
+	const files = new Map<string, Map<string, { lines: number[]; byName: boolean }>>();
+	for (const node of value.tests) {
+		const names = files.get(node.file) ?? new Map<string, { lines: number[]; byName: boolean }>();
+		const group = names.get(node.name) ?? { lines: [], byName: true };
+		if (node.site) group.lines.push(node.site.start);
+		group.byName &&= !!node.byName;
+		names.set(node.name, group);
+		files.set(node.file, names);
+	}
+	return [...files].flatMap(([file, names]) => [
+		bold(file, color),
+		...[...names].map(
+			([name, { lines, byName }]) =>
+				`  ${bold(name, color)}${lines.length ? ` on ${lines.length === 1 ? "line" : "lines"} ${lineRuns(lines)}` : ""}${byName ? dim("  (by name)", color) : ""}`,
+		),
+	]);
+}
+
+/** Show counts, then each change with what reaches it, the tests that use it, and bounded notes. */
 export function renderDiffText(value: DiffResult, files: Map<string, GitFile>, color: boolean): string {
 	const testCount = new Set(value.tests.map(({ file }) => file)).size;
+	const total = value.totalChanged ?? value.changed.length;
+	const what =
+		total === 1 && value.changed.length === 1
+			? `${value.changed[0].name} ${value.changed[0].status}`
+			: `${total} changed${value.totalChanged === undefined ? "" : ` (${value.changed.length} analysed)`}`;
 	const lines = [
-		`diff ${value.base.slice(0, 12)}${value.baseRef ? ` (${value.baseRef})` : ""} → working tree${value.project === "." ? "" : ` (${value.project})`}${value.tsconfig && value.tsconfig !== "tsconfig.json" ? ` (${value.tsconfig})` : ""}: ${value.totalChanged ?? value.changed.length} changed${value.totalChanged === undefined ? "" : ` (${value.changed.length} analysed)`}, ${value.callers.length} callers, ${testCount} test ${testCount === 1 ? "file" : "files"}`,
+		`diff against ${value.baseRef ? `${value.baseRef} (${value.base.slice(0, 12)})` : value.base.slice(0, 12)}${value.project === "." ? "" : ` in ${value.project}`}${value.tsconfig && value.tsconfig !== "tsconfig.json" ? ` using ${value.tsconfig}` : ""}: ${what} · used by ${value.callers.length} · tested by ${plural(testCount, "file")}`,
 	];
 	const section = (title: string, rows: string[]) => {
 		if (rows.length) lines.push("", title, ...rows);
 	};
-	section(
-		"changed",
-		groupedSymbols(
-			value.changed,
-			color,
-			(node) => {
-				const item = node as DiffResult["changed"][number];
-				return item.status === "deleted"
-					? "deleted (base lines)"
-					: item.status === "moved"
-						? `moved (from ${item.oldPath})`
-						: item.status;
-			},
-			(file) => {
-				const info = files.get(file);
-				if (!info) return file;
-				if (info.status === "untracked" || info.status === "added") return `${file}  (new file)`;
-				if (info.status === "deleted") return `${file}  (deleted file)`;
-				if (info.oldPath) return `${file}  (renamed from ${info.oldPath})`;
-				return file;
-			},
-		),
-	);
-	section("callers", groupedSymbols(value.callers, color));
-	section("chains", [
-		...new Set(
-			value.chains.map(
-				({ handles, hops, byName }) =>
-					`  ${bold(handles.map((handle, index) => `${index ? (hops[index - 1]?.kind === "calls" ? " → " : ` -${hops[index - 1]?.kind ?? "unknown"}→ `) : ""}${fromHandle(handle)?.name ?? handle}`).join(""), color)}${byName ? "  (by name)" : ""}`,
-			),
-		),
-	]);
-	section(
-		"tests",
-		groupedSymbols(
-			mergeNameSites(value.tests).map((node) => ({ ...node, kind: "test" })),
-			color,
-			(node) => (node.byName ? "(by name)" : ""),
-		),
-	);
+	lines.push(...impactTrees(value, files, color));
+	section("tests", testRows(value, color));
 	section(
 		"notes",
 		formatDiffNotes(value.notes)

@@ -9,7 +9,7 @@ Each works on its own.
 
 ## `shorthand`
 
-![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/screenshot.png?v=2)
+![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
 
 Instead of a patch, the agent writes a Bun program that can search, rewrite syntax, and rename or move TypeScript symbols. The program edits a private copy of the repository. When it succeeds, its changes are applied and the agent sees the diff. When it fails, finished files are kept and failed edits are rolled back.
 
@@ -50,6 +50,8 @@ npm i -g shorthand-code
 Usage is in [pi-shorthand's README](packages/pi-shorthand/README.md) and [shorthand-code's README](packages/shorthand-code/README.md).
 
 ## `sightread`
+
+![What a change to getMimeType affects in hono](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/sightread.png)
 
 `sightread` shows what calls what in a TypeScript codebase, and the exact lines each piece of code spans. It asks the TypeScript compiler, so it follows imports, aliases and re-exports that text search misses.
 

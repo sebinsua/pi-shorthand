@@ -1,5 +1,7 @@
 # sightread
 
+![What a change to getMimeType affects in hono](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/sightread.png)
+
 `sightread` shows how a TypeScript codebase fits together: what calls what, and the exact lines each piece of code spans. A coding agent can get its bearings with one command, then read only the lines it needs instead of whole files.
 
 ## Install
@@ -51,18 +53,10 @@ Pass an array to ask several questions at once. The requests you'll use most:
 `sightread diff [base]` lists the declarations changed since `base` (by default, where your branch left the default branch), what calls them, and the tests that use them:
 
 ```
-diff 1f2b8f79e012 → working tree (.): 1 changed, 2 callers, 0 test files
+diff against main (1f2b8f79e012): formatPrice edited · used by 2 · tested by 0 files
 
-changed
 src/price.ts
-  1-3  formatPrice  function  edited
-
-callers
-src/cart.ts
-  3-5  cartTotal  function
-src/checkout.ts
-  3-5  checkoutSummary  function
-
-chains
-  checkoutSummary → cartTotal → formatPrice
+  1-3  formatPrice  edited
+  └─ called by src/cart.ts:3-5  cartTotal
+     └─ called by src/checkout.ts:3-5  checkoutSummary
 ```

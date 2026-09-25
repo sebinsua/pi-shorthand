@@ -476,7 +476,7 @@ export async function collectImpact(
 	await deletedCallers({ git, project, parser, changed, getDeclarations, nodeFor, callerMap, chains, config });
 	await testSites({ git, project, parser, changed, getDeclarations, testMap, config });
 	const tests = [...testMap.values()].toSorted((a, b) => a.file.localeCompare(b.file) || a.site!.start - b.site!.start);
-	if (tests.length > 20) notes.push(`... ${tests.length - 20} more direct test sites`);
+	if (tests.length > 200) notes.push(`... ${tests.length - 200} more direct test sites`);
 	return {
 		changed,
 		totalChanged: ordered.length,
@@ -492,7 +492,7 @@ export async function collectImpact(
 						other.handles.slice(-chain.handles.length).every((handle, position) => handle === chain.handles[position]),
 				),
 		),
-		tests: tests.slice(0, 20),
+		tests: tests.slice(0, 200),
 		notes,
 		server,
 	};
