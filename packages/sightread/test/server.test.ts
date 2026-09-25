@@ -25,6 +25,7 @@ const environment = [
 	"SIGHTREAD_IDLE_MS",
 	"SIGHTREAD_MISSING_MS",
 	"SIGHTREAD_MAX_SERVERS",
+	"SIGHTREAD_QUIET_MS",
 	"SIGHTREAD_DAEMON_FAIL",
 	"SIGHTREAD_DAEMON_START_DELAY_MS",
 	"SIGHTREAD_DAEMON_QUERY_DELAY_MS",
@@ -352,9 +353,10 @@ test("config change restarts only its project", async () => {
 	expect((await connect(project(second.root))).pid).toBe(other.pid);
 }, 45_000);
 
-test("server limit evicts least recently used", async () => {
+test("server limit evicts the least recently used quiet server", async () => {
 	await stopAllServers();
 	process.env.SIGHTREAD_MAX_SERVERS = "1";
+	process.env.SIGHTREAD_QUIET_MS = "0";
 	try {
 		const limited = await connect(project(first.root));
 		await connect(project(second.root));
@@ -362,10 +364,23 @@ test("server limit evicts least recently used", async () => {
 		expect(await listServers()).toHaveLength(1);
 	} finally {
 		delete process.env.SIGHTREAD_MAX_SERVERS;
+		delete process.env.SIGHTREAD_QUIET_MS;
 	}
 }, 45_000);
 
-test("concurrent cold starts reserve the single server slot", async () => {
+test("server limit never stops a server in recent use", async () => {
+	await stopAllServers();
+	process.env.SIGHTREAD_MAX_SERVERS = "1";
+	try {
+		const busy = await connect(project(first.root));
+		const other = await connect(project(second.root));
+		expect((await listServers()).map(({ pid }) => pid).toSorted()).toEqual([busy.pid, other.pid].toSorted());
+	} finally {
+		delete process.env.SIGHTREAD_MAX_SERVERS;
+	}
+}, 45_000);
+
+test("concurrent cold starts over the limit don't wait for each other", async () => {
 	await stopAllServers();
 	const module = new URL("../src/server/client.ts", import.meta.url).href;
 	const projects = JSON.stringify([project(first.root), project(second.root)]);
@@ -391,7 +406,7 @@ try {
 	expect({ exit, stderr, result: JSON.parse(stdout) }).toEqual({
 		exit: 0,
 		stderr: "",
-		result: { starts: ["fulfilled", "fulfilled"], count: 1 },
+		result: { starts: ["fulfilled", "fulfilled"], count: 2 },
 	});
 }, 45_000);
 

@@ -159,8 +159,12 @@ async function startingLockAlive(paths: ServerPaths): Promise<boolean> {
 }
 
 // Each graph server holds a whole program in memory (400–900 MB on large repositories), so keep few running.
-async function evictIfNeeded(current: string): Promise<boolean> {
+// Only quiet servers make room: agents in parallel worktrees never stop each other's servers or wait for a slot,
+// and servers over the limit stop once they're quiet and another starts, or when they idle out.
+async function evictQuiet(current: string): Promise<void> {
 	const maximum = Math.max(1, Number(process.env.SIGHTREAD_MAX_SERVERS) || 2);
+	const configured = Number(process.env.SIGHTREAD_QUIET_MS);
+	const quiet = process.env.SIGHTREAD_QUIET_MS && Number.isFinite(configured) ? configured : 5 * 60_000;
 	const servers: { paths: ServerPaths; lastUsed: number }[] = [];
 	let reservations = 0;
 	for (const directory of await allStateDirectories()) {
@@ -194,35 +198,27 @@ async function evictIfNeeded(current: string): Promise<boolean> {
 		else if (state?.startedAt && Date.now() - state.startedAt < startTimeout && pidAlive(state.pid ?? 0))
 			reservations++;
 	}
-	if (reservations >= maximum) return false;
 	const need = Math.max(0, servers.length + reservations - maximum + 1);
-	for (const server of servers.toSorted((a, b) => a.lastUsed - b.lastUsed).slice(0, need)) await stopAt(server.paths);
-	return true;
+	const idle = servers.filter((server) => Date.now() - server.lastUsed >= quiet);
+	for (const server of idle.toSorted((a, b) => a.lastUsed - b.lastUsed).slice(0, need)) await stopAt(server.paths);
 }
 
 async function start(paths: ServerPaths, project: Project, signature: string): Promise<Ping> {
-	const deadline = Date.now() + startTimeout;
-	while (true) {
-		const reserved = await withStartLock(join(paths.parent, "start.lock"), async () => {
-			if (!(await evictIfNeeded(paths.directory))) return false;
-			await writeFile(
-				paths.state,
-				JSON.stringify({
-					state: "starting",
-					project: project.root,
-					tsconfig: project.tsconfig,
-					pid: process.pid,
-					startedAt: Date.now(),
-					lastUsed: Date.now(),
-					signature,
-				}),
-			);
-			return true;
-		});
-		if (reserved) break;
-		if (Date.now() >= deadline) throw new Error(`server did not start; see ${paths.log}`);
-		await pause(100);
-	}
+	await withStartLock(join(paths.parent, "start.lock"), async () => {
+		await evictQuiet(paths.directory);
+		await writeFile(
+			paths.state,
+			JSON.stringify({
+				state: "starting",
+				project: project.root,
+				tsconfig: project.tsconfig,
+				pid: process.pid,
+				startedAt: Date.now(),
+				lastUsed: Date.now(),
+				signature,
+			}),
+		);
+	});
 	await rm(paths.socket, { force: true });
 	const log = await open(paths.log, "a");
 	try {
