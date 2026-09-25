@@ -140,6 +140,6 @@ export async function runQuery(
 			? formatted[0]
 			: formatted.map((value, index) => `=== ${index + 1}: ${models[index].type} ===\n${value}`).join("\n\n");
 	return context.nestedProjects?.length
-		? `${output}\nnote: graphed ${context.tsconfig ?? "tsconfig.json"} (${context.projectFileCount ?? 0} ${context.projectFileCount === 1 ? "file" : "files"}); nested projects: ${context.nestedProjects.slice(0, 5).join(", ")}. Run from one of those for its code.`
+		? `${output}\n\nnote: graphed ${context.tsconfig ?? "tsconfig.json"} (${context.projectFileCount ?? 0} ${context.projectFileCount === 1 ? "file" : "files"}); nested projects: ${context.nestedProjects.slice(0, 5).join(", ")}. Run from one of those for its code.`
 		: output;
 }

@@ -101,7 +101,7 @@ test("nested projects are named after the text result and included in JSON", () 
 	try {
 		const query = '{"type":"lookup","query":"createServer"}';
 		expect(run("--cwd", nested.root, query).out).toBe(
-			"lookup for createServer: 0 shown\n\n(none)\nnote: graphed tsconfig.json (1 file); nested projects: src/client, src/node. Run from one of those for its code.",
+			"lookup for createServer: 0 shown\n\n(none)\n\nnote: graphed tsconfig.json (1 file); nested projects: src/client, src/node. Run from one of those for its code.",
 		);
 		const json = JSON.parse(run("--cwd", nested.root, "--json", query).out) as Array<{ nestedProjects: string[] }>;
 		expect(json[0].nestedProjects).toEqual(["src/client", "src/node"]);
