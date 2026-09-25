@@ -29,9 +29,14 @@ test("Node resolves shorthand-code's package.json, as Pi does when loading the e
 	expect(result.stdout.toString().trim().endsWith(path.join("shorthand-code", "package.json"))).toBe(true);
 });
 
-test("the extension loads under Node, the way Pi loads it", () => {
+// Pi declares the Node versions it supports; the Linux CI container's Node is older, and Pi can't load there.
+const piDirectory = path.dirname(Bun.resolveSync("@earendil-works/pi-coding-agent/package.json", import.meta.dir));
+const piNode = (require(path.join(piDirectory, "package.json")) as { engines: { node: string } }).engines.node;
+const node = Bun.spawnSync(["node", "--version"]).stdout.toString().trim().replace(/^v/, "");
+const nodeSupported = Bun.semver.satisfies(node, piNode);
+
+test.skipIf(!nodeSupported)(`the extension loads under Node ${piNode}, the way Pi loads it`, () => {
 	// Tests run in Bun, which has globals Node lacks. Pi loads extensions with jiti under Node, so load it that way.
-	const piDirectory = path.dirname(Bun.resolveSync("@earendil-works/pi-coding-agent/package.json", import.meta.dir));
 	const jiti = Bun.resolveSync("jiti", piDirectory);
 	const entry = path.join(import.meta.dir, "../src/index.ts");
 	const script = `
