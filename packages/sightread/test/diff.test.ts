@@ -668,3 +668,28 @@ test("a graph handle with spaces round-trips to its caller", async () => {
 		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 1 callers, 0 test files\n\nchanged\nclient/src/with space/api.ts\n  1-1  target  function  edited\n\ncallers\nclient/src/use.ts\n  2-2  use  function\n\nchains\n  use → target`,
 	);
 }, 30_000);
+
+const testSite = (file: string, line: number) => ({
+	handle: `${file}#target:site:${line}-${line}`,
+	name: "target",
+	file,
+	ranges: null,
+	site: { start: line, end: line },
+	byName: true as const,
+});
+
+test("uses of one name across a test file render as one row of line runs", () => {
+	const tests = [
+		...[4, 5, 6, 9, 12, 13].map((line) => testSite("client/src/api.test.ts", line)),
+		testSite("client/src/other.test.ts", 7),
+	];
+	expect(
+		renderDiffText(
+			{ base: "123456789012", project: "client", changed: [], callers: [], chains: [], tests, notes: [] },
+			new Map(),
+			false,
+		),
+	).toBe(
+		"diff 123456789012 → working tree (client): 0 changed, 0 callers, 2 test files\n\ntests\nclient/src/api.test.ts\n  4-6, 9-9, 12-13  target  test  (by name)\nclient/src/other.test.ts\n  7  target  test  (by name)",
+	);
+});

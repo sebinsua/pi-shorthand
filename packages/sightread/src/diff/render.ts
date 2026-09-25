@@ -71,6 +71,38 @@ export function formatDiffNotes(notes: string[]): string[] {
 	return groups.flat();
 }
 
+// A name used on many lines of one test file is one row, its lines joined into runs.
+function mergeNameSites(tests: DiffResult["tests"]): DiffResult["tests"] {
+	const merged: DiffResult["tests"] = [];
+	const rows = new Map<string, { node: DiffResult["tests"][number]; lines: number[] }>();
+	for (const node of tests) {
+		if (!node.byName || !node.site) {
+			merged.push(node);
+			continue;
+		}
+		const key = `${node.file}\u0000${node.name}`;
+		const row = rows.get(key);
+		if (row) row.lines.push(node.site.start);
+		else {
+			const created = { node, lines: [node.site.start] };
+			rows.set(key, created);
+			merged.push(node);
+		}
+	}
+	return merged.map((node) => {
+		const row = node.byName && node.site ? rows.get(`${node.file}\u0000${node.name}`) : undefined;
+		if (!row || row.lines.length === 1) return node;
+		const runs: Array<{ start: number; end: number }> = [];
+		for (const line of row.lines.toSorted((a, b) => a - b)) {
+			const last = runs.at(-1);
+			if (last && line <= last.end + 1) last.end = line;
+			else runs.push({ start: line, end: line });
+		}
+		const { site: _site, ...rest } = node;
+		return { ...rest, ranges: runs };
+	});
+}
+
 /** Show counts, file-grouped symbols, chains, sites, then bounded notes. */
 export function renderDiffText(value: DiffResult, files: Map<string, GitFile>, color: boolean): string {
 	const testCount = new Set(value.tests.map(({ file }) => file)).size;
@@ -115,7 +147,7 @@ export function renderDiffText(value: DiffResult, files: Map<string, GitFile>, c
 	section(
 		"tests",
 		groupedSymbols(
-			value.tests.map((node) => ({ ...node, kind: "test" })),
+			mergeNameSites(value.tests).map((node) => ({ ...node, kind: "test" })),
 			color,
 			(node) => (node.byName ? "(by name)" : ""),
 		),
