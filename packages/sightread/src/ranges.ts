@@ -150,6 +150,21 @@ function isDefault(node: Node): boolean {
 	);
 }
 
+// A declaration's own doc comments belong to it; a file's leading `@module` comment does not.
+const fileDoc = /@(?:module|packageDocumentation|file|fileoverview)\b/;
+function documentedStart(sourceFile: SourceFile, node: Node): number {
+	const code = node.getStart(sourceFile);
+	const documented = node.getStart(sourceFile, true);
+	let start = documented;
+	for (const block of sourceFile.text.slice(documented, code).matchAll(/\/\*\*[\s\S]*?\*\//g)) {
+		if (!fileDoc.test(block[0])) break;
+		const after = documented + block.index + block[0].length;
+		const next = sourceFile.text.slice(after, code).search(/\S/);
+		start = next === -1 ? code : after + next;
+	}
+	return start;
+}
+
 function collectDeclarations(sourceFile: SourceFile): Declaration[] {
 	const declarations: Declaration[] = [];
 	const line = (position: number) => sourceFile.getLineAndCharacterOfPosition(position).line + 1;
@@ -157,7 +172,7 @@ function collectDeclarations(sourceFile: SourceFile): Declaration[] {
 		declarations.push({
 			name,
 			kind,
-			start: line(node.getStart(sourceFile, true)),
+			start: line(documentedStart(sourceFile, node)),
 			end: line(Math.max(node.getStart(sourceFile), node.end - 1)),
 			codeStart: line(node.getStart(sourceFile)),
 		});

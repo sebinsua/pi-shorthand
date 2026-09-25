@@ -85,6 +85,16 @@ test("preserves function overloads and merged interface declarations in source o
 	expect(entry(declarations, "Flag", "enum").map(({ start }) => start)).toEqual([6, 7]);
 });
 
+test("a file's @module comment isn't part of the first declaration, but its own doc comment is", async () => {
+	const declarations = await parseDeclarations(
+		"sample.ts",
+		"/**\n * @module\n * MIME utility.\n */\n\nexport const first = 1;\n\n/** The second. */\nexport const second = 2;\n/**\n * @packageDocumentation\n */\n/** Documented. */\nexport function third() {}",
+	);
+	expect(entry(declarations, "first", "variable").map(({ start }) => start)).toEqual([6]);
+	expect(entry(declarations, "second", "variable").map(({ start }) => start)).toEqual([8]);
+	expect(entry(declarations, "third", "function").map(({ start }) => start)).toEqual([13]);
+});
+
 test("ranges anonymous default declarations using names and kinds from the live graph", async () => {
 	const repository = await project();
 	const root = join(repository, "client");
