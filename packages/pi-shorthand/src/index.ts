@@ -17,7 +17,7 @@ import {
 	diagnosticLines,
 	runFailed,
 	runWithBun,
-	resolveSightread,
+	sightreadAvailable,
 	textForModel,
 } from "shorthand-code";
 import { callLine, resultLines, unstructuredResultText } from "./display.ts";
@@ -51,7 +51,7 @@ export function codeDescription(graphAvailable: boolean): string {
 		: DESCRIPTION;
 }
 
-export default async function (pi: ExtensionAPI, findGraph: typeof resolveSightread = resolveSightread) {
+export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknown> = sightreadAvailable) {
 	// The shorthand skill ships with shorthand-code, whose `shorthand --skill` prints it for other agents.
 	pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 	const graphAvailable = Boolean(await findGraph());

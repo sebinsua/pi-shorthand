@@ -1,8 +1,10 @@
 /** A lazy host-side graph connection for sandboxed shorthand programs. */
 import { createServer, type Server, type Socket } from "node:net";
 import { createHash } from "node:crypto";
+import { accessSync, constants } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export interface GraphLibrary {
@@ -51,16 +53,52 @@ async function packageFromPath(path: string): Promise<{ directory: string; manif
 	}
 }
 
+/** An executable on PATH, found with plain filesystem calls: Pi runs extensions under Node, where Bun.which doesn't exist. */
+function findExecutable(name: string): string | undefined {
+	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+		if (!directory) continue;
+		const candidate = join(directory, name);
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// Not in this directory.
+		}
+	}
+	return undefined;
+}
+
+async function expectedVersion(): Promise<string> {
+	return (JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string })
+		.version;
+}
+
+/**
+ * Whether a sightread matching this version is installed, found through module resolution or a `sightread` on
+ * PATH. It reads package.json and never imports sightread, because Pi calls it under Node and sightread needs Bun.
+ */
+export async function sightreadAvailable(executable = findExecutable("sightread")): Promise<boolean> {
+	const expected = await expectedVersion();
+	const candidates: string[] = [];
+	try {
+		candidates.push(createRequire(import.meta.url).resolve("sightread/package.json"));
+	} catch {
+		// Not in this package's dependency tree; a global install may still be on PATH.
+	}
+	if (executable) candidates.push(executable);
+	for (const candidate of candidates) {
+		const found = await packageFromPath(candidate).catch(() => undefined);
+		if (found?.manifest.version === expected) return true;
+	}
+	return false;
+}
+
 /** Resolve once in production; explicit options make both lookup routes testable. */
 export function resolveSightread(options: ResolveOptions = {}) {
 	const importer = options.importer ?? ((specifier: string) => import(specifier));
-	const executable = options.executable === undefined ? Bun.which("sightread") : options.executable;
+	const executable = options.executable === undefined ? findExecutable("sightread") : options.executable;
 	const find = async (): Promise<GraphLibrary | undefined> => {
-		const { version: expected } = JSON.parse(
-			await readFile(new URL("../../package.json", import.meta.url), "utf8"),
-		) as {
-			version: string;
-		};
+		const expected = await expectedVersion();
 		let mismatch: string | undefined;
 		let direct: GraphLibrary | undefined;
 		try {

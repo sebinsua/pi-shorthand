@@ -28,3 +28,20 @@ test("Node resolves shorthand-code's package.json, as Pi does when loading the e
 	expect(result.stderr.toString()).toBe("");
 	expect(result.stdout.toString().trim().endsWith(path.join("shorthand-code", "package.json"))).toBe(true);
 });
+
+test("the extension loads under Node, the way Pi loads it", () => {
+	// Tests run in Bun, which has globals Node lacks. Pi loads extensions with jiti under Node, so load it that way.
+	const piDirectory = path.dirname(Bun.resolveSync("@earendil-works/pi-coding-agent/package.json", import.meta.dir));
+	const jiti = Bun.resolveSync("jiti", piDirectory);
+	const entry = path.join(import.meta.dir, "../src/index.ts");
+	const script = `
+		const { createJiti } = await import(${JSON.stringify(jiti)});
+		const extension = await createJiti(import.meta.url).import(${JSON.stringify(entry)});
+		let tool;
+		await extension.default({ on() {}, registerTool(registered) { tool = registered; } });
+		console.log(tool.name);
+	`;
+	const result = Bun.spawnSync(["node", "--input-type=module", "-e", script]);
+	expect(result.stderr.toString()).toBe("");
+	expect(result.stdout.toString().trim()).toBe("code");
+});
