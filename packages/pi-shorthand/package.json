@@ -22,7 +22,6 @@
 	},
 	"files": [
 		"src",
-		"skills",
 		"README.md"
 	],
 	"type": "module",
@@ -55,9 +54,6 @@
 	"pi": {
 		"extensions": [
 			"./src/index.ts"
-		],
-		"skills": [
-			"./skills"
 		],
 		"image": "https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/screenshot.png?v=2"
 	}

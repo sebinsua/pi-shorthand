@@ -31,9 +31,6 @@
 	"pi": {
 		"extensions": [
 			"./packages/pi-shorthand/src/index.ts"
-		],
-		"skills": [
-			"./packages/pi-shorthand/skills"
 		]
 	}
 }

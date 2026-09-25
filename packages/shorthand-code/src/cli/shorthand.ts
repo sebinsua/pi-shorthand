@@ -24,10 +24,14 @@ Options:
   --timeout <seconds>    Program time before it is killed; time inside helpers is excluded (default: ${DEFAULT_TIMEOUT_SECONDS})
   --rollback <file|all>  On failure, roll back only failed or interrupted file edits (file), or apply nothing (all) (default: file)
   --json                 Print the full result as JSON instead of text
+  --skill                Print the skill that explains how to write programs
   -h, --help             Show this help
   -v, --version          Show the version
 
 Exit codes: 0 applied, 1 the run failed, 2 usage or runner error, 130 stopped.`;
+
+/** The skill Pi loads through pi-shorthand, and that `--skill` prints for other agents. */
+const SKILL_DIRECTORY = path.join(import.meta.dir, "../../skills/shorthand");
 
 class UsageError extends Error {}
 
@@ -40,6 +44,7 @@ async function main(argv: string[]): Promise<number> {
 			timeout: { type: "string" },
 			rollback: { type: "string" },
 			json: { type: "boolean" },
+			skill: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 			version: { type: "boolean", short: "v" },
 		},
@@ -50,6 +55,11 @@ async function main(argv: string[]): Promise<number> {
 	}
 	if (values.version) {
 		console.log(version());
+		return 0;
+	}
+	if (values.skill) {
+		console.log(readFileSync(path.join(SKILL_DIRECTORY, "SKILL.md"), "utf8").trimEnd());
+		console.log(`\nAdvanced guide: ${path.join(SKILL_DIRECTORY, "advanced-refactors.md")}`);
 		return 0;
 	}
 	if (positionals.length > 1) throw new UsageError("expected at most one program file");

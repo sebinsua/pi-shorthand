@@ -3,6 +3,7 @@
  * Its writes go to a copy-on-write overlay; if it succeeds, they're applied and the diff is returned.
  */
 
+import { createRequire } from "node:module";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
@@ -39,6 +40,11 @@ See the shorthand skill for renames, moves and call-site migrations. Read its ad
 const GRAPH_DESCRIPTION =
 	"- await graph.query(request | request[]) queries symbols and relationships; graph results can be passed to sg as scope. The graph shows the repository before this program's edits.\n";
 
+export const SKILLS_DIRECTORY = path.join(
+	path.dirname(createRequire(import.meta.url).resolve("shorthand-code/package.json")),
+	"skills",
+);
+
 export function codeDescription(graphAvailable: boolean): string {
 	return graphAvailable
 		? DESCRIPTION.replace("\n\nSee the shorthand skill", `\n${GRAPH_DESCRIPTION}\nSee the shorthand skill`)
@@ -46,6 +52,8 @@ export function codeDescription(graphAvailable: boolean): string {
 }
 
 export default async function (pi: ExtensionAPI, findGraph: typeof resolveSightread = resolveSightread) {
+	// The shorthand skill ships with shorthand-code, whose `shorthand --skill` prints it for other agents.
+	pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 	const graphAvailable = Boolean(await findGraph());
 	// A failed run is an error, both for the model and for how Pi shows it. (execute() returns its details
 	// rather than throwing, since a thrown error loses them.)

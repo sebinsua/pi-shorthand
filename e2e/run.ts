@@ -12,7 +12,7 @@
  * same recorded fixture. A completion is verified only when Pi succeeds within budget and --check passes.
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -43,6 +43,18 @@ import {
 import { saveChanges } from "./artifacts.ts";
 import { sessionReport } from "./report.ts";
 import { seedSession } from "./seed-session.ts";
+
+/** Where a checkout keeps the shorthand skill: shorthand-code now, pi-shorthand or the root in older revisions. */
+function shorthandSkill(root: string): string {
+	const places = [
+		"packages/shorthand-code/skills/shorthand",
+		"packages/pi-shorthand/skills/shorthand",
+		"skills/shorthand",
+	];
+	const found = places.map((place) => path.join(root, place)).find((place) => existsSync(path.join(place, "SKILL.md")));
+	if (!found) throw new Error(`No shorthand skill in ${root}`);
+	return found;
+}
 
 const { values: args } = parseArgs({
 	options: {
@@ -213,7 +225,7 @@ async function runPi(
 		: null;
 	const setupArgs = entry ? ["-e", entry] : [];
 	setupArgs.push("--tools", conditionTools(setup).join(","));
-	if (skill === "shorthand" && extension) setupArgs.push("--skill", path.join(extension.path, "skills/shorthand"));
+	if (skill === "shorthand" && extension) setupArgs.push("--skill", shorthandSkill(extension.path));
 	const agentDir = path.join(workDir, `${name}-agent`);
 	mkdirSync(agentDir, { mode: 0o700 });
 	// Preserve authentication and model definitions, but not ambient prompts, skills or settings.

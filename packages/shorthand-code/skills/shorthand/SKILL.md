@@ -30,10 +30,11 @@ await refactor.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
 await refactor.move({ file: "src/api.ts", symbol: "parseUser", to: "src/users/parse.ts" });
 ```
 
-Use a qualified `symbol` such as `Row.get` when a file has several declarations named `get`.
-An unqualified name works when it identifies one declaration. `rename`, `move` and `references`
-also accept a graph node as `file` and use its name when `symbol` is omitted. `refactor.renameFile`
-moves the file and updates imports and exports that resolve to it. Read
+`refactor.rename` leaves unrelated symbols alone. Use a qualified `symbol` such as `Row.get` when a
+file has several declarations named `get`; an unqualified name works when it identifies one
+declaration. `rename`, `move` and `references` also accept a graph node as `file` and use its name
+when `symbol` is omitted. `refactor.renameFile` moves the file and updates imports and exports that
+resolve to it. Read
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
 rules, updated paths and failure conditions.
 

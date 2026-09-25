@@ -40,6 +40,20 @@ test("prints its version and help", () => {
 	expect(shorthand(["--help"]).stdout).toContain("Usage: shorthand [options] [program.ts]");
 });
 
+test("--skill prints the skill verbatim, from outside any repository", async () => {
+	const directory = await mkdtemp(path.join(tmpdir(), "shorthand-skill-"));
+	try {
+		const result = shorthand(["--skill"], { cwd: directory });
+		const skill = await Bun.file(path.join(import.meta.dir, "../skills/shorthand/SKILL.md")).text();
+		expect(result.code).toBe(0);
+		expect(result.stdout.startsWith(skill.trimEnd())).toBe(true);
+		const guide = /\nAdvanced guide: (.+)\n$/.exec(result.stdout)?.[1];
+		expect(guide && (await Bun.file(guide).exists())).toBe(true);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 test("rejects bad arguments with usage and exit code 2", () => {
 	for (const args of [["--rollback", "some"], ["--timeout", "0"], ["--nope"], ["a.ts", "b.ts"]]) {
 		const result = shorthand(args, { stdin: "" });
