@@ -12,6 +12,8 @@ export interface QueryContext {
 	ranges: RangeIndex;
 	root?: string;
 	tsconfig?: string;
+	projectFileCount?: number;
+	nestedProjects?: string[];
 }
 
 export interface QueryOptions {
@@ -101,6 +103,7 @@ export async function runQuery(
 		),
 	);
 	for (const model of models) if (context.tsconfig) model.tsconfig = context.tsconfig;
+	for (const model of models) model.nestedProjects = context.nestedProjects ?? [];
 	const filtered = options.in
 		? models.map((model) => {
 				if (model.error) return model;
@@ -119,7 +122,11 @@ export async function runQuery(
 	const formatted = filtered.map((result) =>
 		result.error ? `error: ${result.error}` : renderText(result, { color: options.color === true }),
 	);
-	return formatted.length === 1
-		? formatted[0]
-		: formatted.map((value, index) => `=== ${index + 1}: ${models[index].type} ===\n${value}`).join("\n\n");
+	const output =
+		formatted.length === 1
+			? formatted[0]
+			: formatted.map((value, index) => `=== ${index + 1}: ${models[index].type} ===\n${value}`).join("\n\n");
+	return context.nestedProjects?.length
+		? `${output}\nnote: graphed ${context.tsconfig ?? "tsconfig.json"} (${context.projectFileCount ?? 0} files); nested projects: ${context.nestedProjects.slice(0, 5).join(", ")}. Run from one of those for its code.`
+		: output;
 }

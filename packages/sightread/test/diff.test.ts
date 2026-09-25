@@ -149,7 +149,7 @@ test("spaces, mts, cts, and changed files outside the project have rooted paths"
 			"",
 			"notes",
 			"  1 non-TypeScript file changed: client/public/regions.json",
-			"  sibling/readme.md: outside project",
+			"  1 file changed outside the project: sibling/readme.md",
 		].join("\n"),
 	);
 }, 30_000);
@@ -638,6 +638,33 @@ test("repeated notes coalesce and appear in a fixed order", () => {
 			false,
 		),
 	).toBe(
-		"diff 123456789012 → working tree (client): 0 changed, 0 callers, 0 test files\n\nnotes\n  3 omitted (cap 30): 3 added\n  impact truncated for 6 symbols (A, B, C, D, E, …); reverse trace used\n  4 imports changed: w.ts, x.ts, y.ts, … (1 more)\n  4 non-TypeScript files changed: a.md, b.md, c.md, … (1 more)\n  client/src/out.ts: outside project",
+		"diff 123456789012 → working tree (client): 0 changed, 0 callers, 0 test files\n\nnotes\n  3 omitted (cap 30): 3 added\n  impact truncated for 6 symbols (A, B, C, D, E, …); reverse trace used\n  4 imports changed: w.ts, x.ts, y.ts, … (1 more)\n  4 non-TypeScript files changed: a.md, b.md, c.md, … (1 more)\n  1 file changed outside the project: client/src/out.ts",
 	);
 });
+
+test("changed declarations outside the graphed config are coalesced", async () => {
+	const f = fixture({
+		"client/src/api.ts": "export function included() { return 1; }\n",
+		"client/src/node/__tests__/fixtures/with space/main.ts": "export function main() { return 1; }\n",
+		"client/src/View.tsx": tsx,
+	});
+	f.put("client/tsconfig.json", '{"compilerOptions":{"jsx":"preserve"},"include":["src/api.ts","src/View.tsx"]}\n');
+	git(f.repo, "add", "client/tsconfig.json");
+	git(f.repo, "commit", "-qm", "restrict project");
+	f.put("client/src/node/__tests__/fixtures/with space/main.ts", "export function main() { return 2; }\n");
+	expect(await f.run()).toBe(
+		`diff ${git(f.repo, "rev-parse", "HEAD").slice(0, 12)} → working tree (client): 0 changed, 0 callers, 0 test files\n\nnotes\n  1 changed declarations outside the graphed project (tsconfig.json)`,
+	);
+}, 30_000);
+
+test("a graph handle with spaces round-trips to its caller", async () => {
+	const f = fixture({
+		"client/src/with space/api.ts": "export function target() { return 1; }\n",
+		"client/src/use.ts": "import { target } from './with space/api';\nexport function use() { return target(); }\n",
+		"client/src/View.tsx": tsx,
+	});
+	f.put("client/src/with space/api.ts", "export function target() { return 2; }\n");
+	expect(await f.run()).toBe(
+		`diff ${f.sha.slice(0, 12)} → working tree (client): 1 changed, 1 callers, 0 test files\n\nchanged\nclient/src/with space/api.ts\n  1-1  target  function  edited\n\ncallers\nclient/src/use.ts\n  2-2  use  function\n\nchains\n  use → target`,
+	);
+}, 30_000);

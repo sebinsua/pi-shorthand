@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Parse the sightread command and route requests to a project daemon.
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDiff } from "./diff/index.ts";
@@ -11,6 +11,7 @@ import { runDaemon } from "./server/daemon.ts";
 const usage = `sightread [--cwd DIR] [--in DIR] [--json | --raw] '<JSON request or array>'
 sightread [--cwd DIR] [--json] diff [base]
 sightread [--cwd DIR] --help
+sightread --skill
 sightread ps
 sightread [--cwd DIR] stop [--all]`;
 const argumentError = "pass one JSON request (or array); run sightread --help";
@@ -89,6 +90,7 @@ async function query(
 		await connect(project)
 	).query(requests, {
 		mode,
+		cwd,
 		in: within,
 		color: mode === "text" && process.stdout.isTTY && process.env.NO_COLOR === undefined,
 	});
@@ -131,6 +133,8 @@ async function main(args: string[]): Promise<string> {
 	if (json && raw)
 		throw new Error("usage: sightread [--cwd DIR] [--in DIR] [--json | --raw] '<JSON request or array>'");
 	if (positionals.length === 1 && ["--help", "-h"].includes(positionals[0])) return showHelp(cwd);
+	if (positionals.length === 1 && positionals[0] === "--skill")
+		return readFile(join(import.meta.dir, "../skills/sightread/SKILL.md"), "utf8");
 	if (positionals[0] === "ps" && positionals.length === 1) {
 		return (await listServers())
 			.map(({ pid, project, lastUsed }) => `${pid}\t${project}\t${new Date(lastUsed).toISOString()}`)
@@ -167,11 +171,14 @@ async function main(args: string[]): Promise<string> {
 
 try {
 	const output = await main(process.argv.slice(2));
-	if (process.argv[2] !== "--daemon") console.log(output);
+	if (process.argv[2] !== "--daemon") {
+		if (process.argv.includes("--skill")) process.stdout.write(output);
+		else console.log(output);
+	}
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);
 	console.error(
-		`sightread: ${(error instanceof ServerRequestError && error.full) || error instanceof DiscoveryError ? message : message.length > 240 ? `${message.slice(0, 239)}…` : message}`,
+		`sightread: ${(error instanceof ServerRequestError && error.full) || error instanceof DiscoveryError || /(?: is ambiguous; use a handle:| not found(?:; nearest:)?) /.test(`${message} `) ? message : message.length > 240 ? `${message.slice(0, 239)}…` : message}`,
 	);
 	process.exitCode = 1;
 }

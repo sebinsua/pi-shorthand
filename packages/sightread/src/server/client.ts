@@ -17,7 +17,7 @@ export interface ServerConnection {
 	/** Rendered output, exactly what the CLI prints. */
 	query(
 		requests: Record<string, unknown>[],
-		options: { mode?: "text" | "json" | "raw"; in?: string; color?: boolean; json?: boolean },
+		options: { mode?: "text" | "json" | "raw"; in?: string; color?: boolean; json?: boolean; cwd?: string },
 	): Promise<string>;
 	/** Upstream values, unchanged, one per request in input order. */
 	values(requests: Record<string, unknown>[]): Promise<unknown[]>;

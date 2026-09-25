@@ -4,6 +4,7 @@
  * locate a crossover instead of averaging tasks of one small size.
  */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import * as path from "node:path";
 import { absent, assertNoDrift, contains, matches, measureDrift, resolvesTo, squash, type Check } from "./drift.ts";
@@ -667,7 +668,184 @@ const moveDeclaration: Family = {
 	},
 };
 
-export const scaleFamilies: Family[] = [renameSymbol, optionsMigration, moveModule, moveDeclaration, loggerMigration];
+const impactReport: Family = {
+	id: "impact-report",
+	revision: "scale-v1",
+	category: "analysis",
+	build(size) {
+		const before: Record<string, string> = {
+			"src/lib/pricing.ts":
+				"export function applyDiscount(cents: number, rate: number): number { return Math.round(cents * (1 - rate)); }\n",
+			"src/lib/index.ts": 'export { applyDiscount } from "./pricing";\n',
+			"src/legacy/pricing.ts": "export function applyDiscount(cents: number): number { return cents - 1; }\n",
+			"src/features/shared/discount.ts":
+				'import { applyDiscount } from "../../lib/pricing";\nexport function sharedDiscount(cents: number) { return applyDiscount(cents, 0.1); }\n',
+		};
+		const names: string[] = ["sharedDiscount"];
+		const decoyNames: string[] = [];
+		for (let i = 0; i < size; i++) {
+			const file = i === 0 ? "src/features/feature0.tsx" : consumer(i);
+			const name = `feature${i}`;
+			const kind = i % 7;
+			const lib = specifier(file, kind === 1 ? "src/lib/index.ts" : "src/lib/pricing.ts");
+			const shared = specifier(file, "src/features/shared/discount.ts");
+			const legacy = specifier(file, "src/legacy/pricing.ts");
+			const texts = [
+				`import { applyDiscount } from "${lib}";\nexport function ${name}() { return applyDiscount(${key(i, 1)}, 0.1); }\n`,
+				`import { applyDiscount } from "${lib}";\nexport function ${name}() { return applyDiscount(${key(i, 1)}, 0.1); }\n`,
+				`import { applyDiscount as discount } from "${lib}";\nexport function ${name}() { return discount(${key(i, 1)}, 0.1); }\n`,
+				`import { sharedDiscount } from "${shared}";\nexport function ${name}() { return sharedDiscount(${key(i, 1)}); }\n`,
+				`import { applyDiscount } from "${legacy}";\nexport function ${name}() { return applyDiscount(${key(i, 1)}); }\n`,
+				`function applyDiscount(cents: number) { return cents - 2; }\nexport function ${name}() { return applyDiscount(${key(i, 1)}); }\n`,
+				`class Cart { applyDiscount() { return 3; } }\nexport const event${i} = "applyDiscount";\nexport function ${name}() { return new Cart().applyDiscount(); }\n`,
+			];
+			before[file] = texts[kind]!;
+			if (i === 0) {
+				before[file] +=
+					`declare global { namespace JSX { interface IntrinsicElements { [name: string]: Record<string, unknown> } } }
+export function Preview<T extends { cents: number }>(props: { items: T[]; title: string }) {
+  return <section data-title={props.title}><header><strong>{props.title}</strong></header><main>{props.items.map((item, index) => <article data-index={index}><span>{applyDiscount(item.cents, 0.1)}</span></article>)}</main></section>;
+}
+`;
+				names.push("Preview");
+			}
+			(kind < 4 ? names : decoyNames).push(name);
+		}
+		const expected = names.toSorted();
+		return {
+			before,
+			after: { "IMPACT.txt": expected.join("\n") + "\n" },
+			sites: expected.map((name) => contains("IMPACT.txt", name)),
+			decoys: decoyNames.map((name) => ({
+				file: "IMPACT.txt",
+				label: `IMPACT.txt: ${name} must be absent`,
+				holds: (text) => !text?.includes(name),
+			})),
+			cases: [],
+			prompt:
+				"If applyDiscount in src/lib/pricing.ts changed its behaviour, which exported functions under src/features would be affected, directly or through other functions? Write their names to IMPACT.txt, one per line, sorted.",
+			brief:
+				"Report exported functions under src/features affected directly or transitively by applyDiscount in src/lib/pricing.ts, through imports, aliases and re-exports. Exclude the separate legacy function, local functions with the same name, class methods, and strings. Write only the affected function names to IMPACT.txt, one per line, sorted. Make no other changes; run `npm run check` afterwards.",
+		};
+	},
+};
+
+const methodMigration: Family = {
+	id: "method-migration",
+	revision: "scale-v1",
+	category: "migration",
+	build(size) {
+		const before: Record<string, string> = {
+			"src/lib/row.ts": `export const calls: { fresh?: boolean }[] = [];
+export interface Getter { get(index: number, options?: { fresh?: boolean }): number }
+export class Row implements Getter {
+  get(index: number, options: { fresh?: boolean } = {}): number {
+    calls.push(options);
+    return index + 10;
+  }
+}
+`,
+			"src/lib/cache.ts": "export class Cache { get(key: string) { return key; } }\n",
+		};
+		const after: Record<string, string | null> = {};
+		const sites: Check[] = [];
+		const decoys: Check[] = [contains("src/lib/cache.ts", "get(key: string)")];
+		const cases: Case[] = [];
+		for (let i = 0; i < size; i++) {
+			const file = consumer(i);
+			const row = specifier(file, "src/lib/row.ts");
+			const cache = specifier(file, "src/lib/cache.ts");
+			const name = `feature${i}`;
+			const variants = [
+				[
+					`import { Row } from "${row}";\nexport function ${name}() { const row = new Row(); return row.get(1) + row.get(2); }\n`,
+					`import { Row } from "${row}";\nexport function ${name}() { const row = new Row(); return row.get(1, { fresh: true }) + row.get(2, { fresh: true }); }\n`,
+					2,
+					23,
+				],
+				[
+					`import { Row } from "${row}";\nexport function ${name}() { const row = new Row(); return row.get(\n  3,\n); }\n`,
+					`import { Row } from "${row}";\nexport function ${name}() { const row = new Row(); return row.get(\n  3,\n  { fresh: true },\n); }\n`,
+					1,
+					13,
+				],
+				[
+					`import { Row } from "${row}";\nexport function ${name}() { const row: Row | undefined = new Row(); return row?.get(0); }\n`,
+					`import { Row } from "${row}";\nexport function ${name}() { const row: Row | undefined = new Row(); return row?.get(0, { fresh: true }); }\n`,
+					1,
+					10,
+				],
+				[
+					`import { Row } from "${row}";\nexport function ${name}() { const rows = [new Row(), new Row()]; return rows.map((r) => r.get(0)); }\n`,
+					`import { Row } from "${row}";\nexport function ${name}() { const rows = [new Row(), new Row()]; return rows.map((r) => r.get(0, { fresh: true })); }\n`,
+					2,
+					[10, 10],
+				],
+				[
+					`import { Row as TableRow } from "${row}";\nexport function ${name}() { return new TableRow().get(4); }\n`,
+					`import { Row as TableRow } from "${row}";\nexport function ${name}() { return new TableRow().get(4, { fresh: true }); }\n`,
+					1,
+					14,
+				],
+				[
+					`import { Row, type Getter } from "${row}";\nexport function ${name}() { const row: Getter = new Row(); return row.get(5); }\n`,
+					`import { Row, type Getter } from "${row}";\nexport function ${name}() { const row: Getter = new Row(); return row.get(5, { fresh: true }); }\n`,
+					1,
+					15,
+				],
+				[
+					`import { Row } from "${row}";\nimport { Cache } from "${cache}";\nconst get = (n: number) => n;\nexport const hint${i} = ".get(";\nexport function ${name}() { new Cache().get("x"); new Map().get("x"); new URLSearchParams().get("x"); get(1); return new Row().get(6); }\n`,
+					`import { Row } from "${row}";\nimport { Cache } from "${cache}";\nconst get = (n: number) => n;\nexport const hint${i} = ".get(";\nexport function ${name}() { new Cache().get("x"); new Map().get("x"); new URLSearchParams().get("x"); get(1); return new Row().get(6, { fresh: true }); }\n`,
+					1,
+					16,
+				],
+			] as const;
+			const [start, solution, calls, returned] = variants[i % variants.length]!;
+			before[file] = start;
+			after[file] = solution;
+			sites.push(contains(file, "{ fresh: true }", `${name} Row.get option`));
+			if (i % variants.length === 0)
+				sites.push(matches(file, /row\.get\(1,\{fresh:true\}\)\+row\.get\(2,\{fresh:true\}\)/, `${name} both calls`));
+			if (i % variants.length === 6)
+				decoys.push(
+					contains(file, 'new Cache().get("x")'),
+					contains(file, 'new Map().get("x")'),
+					contains(file, 'new URLSearchParams().get("x")'),
+					contains(file, "get(1)"),
+					contains(file, '".get("'),
+				);
+			cases.push({
+				file,
+				call: name,
+				expected: { returned, logged: Array.from({ length: calls }, () => ({ fresh: true })) },
+			});
+		}
+		return {
+			before,
+			after,
+			sites,
+			decoys,
+			cases,
+			observe: async (root) => {
+				const { calls } = await import(pathToFileURL(path.join(root, "src/lib/row.ts")).href);
+				return calls.splice(0);
+			},
+			prompt:
+				"Every call to Row.get under src/features must pass { fresh: true } as its second argument. Add it to single-argument calls, preserving all other behaviour.",
+			brief: `Update every Row.get call under src/features (${size} consumer files) to pass { fresh: true } second, including two calls on one line, multi-line and optional calls, map callbacks, aliased Row imports, and calls typed through an interface. Leave Cache.get, Map.get, URLSearchParams.get, local get functions and strings unchanged. Make no other changes; run \`npm run check\` afterwards.`,
+		};
+	},
+};
+
+export const scaleFamilies: Family[] = [
+	renameSymbol,
+	optionsMigration,
+	moveModule,
+	moveDeclaration,
+	loggerMigration,
+	impactReport,
+	methodMigration,
+];
 
 function scaleTask(family: Family, size: number): Task {
 	const fixture = family.build(size);
@@ -677,6 +855,22 @@ function scaleTask(family: Family, size: number): Task {
 	);
 	const drift = (root: string) =>
 		measureDrift(root, { expected: changed.map(([file]) => file), sites: fixture.sites, decoys: fixture.decoys });
+	const measuredDrift = async (root: string) => {
+		const measured = await drift(root);
+		if (family.id !== "impact-report") return measured;
+		const lines = (await readFile(path.join(root, "IMPACT.txt"), "utf8").catch(() => ""))
+			.split(/\r?\n/)
+			.filter(Boolean);
+		const expected = fixture.after["IMPACT.txt"]!.trim().split("\n");
+		const expectedSet = new Set(expected);
+		return {
+			...measured,
+			sites: expected.length,
+			missed: expected.filter((name) => !lines.includes(name)).map((name) => `IMPACT.txt: ${name}`),
+			decoys: fixture.decoys.length,
+			overmatched: lines.filter((name) => !expectedSet.has(name)).map((name) => `IMPACT.txt: ${name}`),
+		};
+	};
 	return {
 		id: `${family.id}-${size}`,
 		category: family.category,
@@ -685,9 +879,20 @@ function scaleTask(family: Family, size: number): Task {
 		brief: fixture.brief,
 		files: fixture.before,
 		solution: Object.fromEntries(changed),
-		include: ["src/**/*.ts"],
-		drift,
+		include: ["src/**/*.ts", "src/**/*.tsx"],
+		drift: measuredDrift,
 		async verify(root) {
+			if (family.id === "impact-report") {
+				const actual = (await readFile(path.join(root, "IMPACT.txt"), "utf8").catch(() => ""))
+					.replaceAll("\r\n", "\n")
+					.replace(/\n$/, "")
+					.split("\n");
+				assert.deepEqual(
+					actual,
+					fixture.after["IMPACT.txt"]!.trim().split("\n"),
+					"IMPACT.txt must list exactly the affected functions, sorted",
+				);
+			}
 			for (const { file, call, args = [], expected } of fixture.cases) {
 				const module = await moduleAt(root, file);
 				assert.equal(typeof module[call], "function", `${file} must export ${call}`);
@@ -695,7 +900,7 @@ function scaleTask(family: Family, size: number): Task {
 				const actual = fixture.observe ? { returned, logged: await fixture.observe(root) } : returned;
 				assert.deepEqual(actual, expected, `${file} ${call}() changed behaviour`);
 			}
-			assertNoDrift(await drift(root));
+			assertNoDrift(await measuredDrift(root));
 		},
 	};
 }

@@ -6,7 +6,15 @@ import type { Drift } from "./drift.ts";
 
 export interface Task {
 	id: string;
-	category: "small-edit" | "migration" | "implementation" | "extraction" | "propagation" | "rename" | "move";
+	category:
+		| "small-edit"
+		| "migration"
+		| "implementation"
+		| "extraction"
+		| "propagation"
+		| "rename"
+		| "move"
+		| "analysis";
 	revision: string;
 	/** Outcome-only request: the agent explores and decides how to make the change. */
 	prompt: string;

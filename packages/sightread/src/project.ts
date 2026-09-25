@@ -14,6 +14,47 @@ export class DiscoveryError extends Error {}
 
 const skipped = new Set([".llm-ephemeral", "node_modules", ".bare", ".git", "dist", "build"]);
 
+/** Count the same source files used when choosing a referenced TypeScript project. */
+export async function projectFiles(project: Project): Promise<Set<string>> {
+	const api = new API({ cwd: project.root });
+	try {
+		const parsed = await api.parseConfigFile(project.tsconfig);
+		return new Set(
+			parsed.fileNames
+				.filter((name) => /\.(?:ts|tsx|mts|cts)$/.test(name) && !/\.d\.(?:ts|mts|cts)$/.test(name))
+				.map((name) => resolve(name)),
+		);
+	} finally {
+		await api.close();
+	}
+}
+
+/** List nearby tsconfig directories below the graphed config, up to three levels deep. */
+export function nestedProjects(project: Project): string[] {
+	const root = dirname(project.tsconfig);
+	const found: string[] = [];
+	let level = [root];
+	for (let depth = 1; depth <= 3 && level.length; depth++) {
+		const next: string[] = [];
+		for (const parent of level) {
+			let entries;
+			try {
+				entries = readdirSync(parent, { withFileTypes: true });
+			} catch {
+				continue;
+			}
+			for (const entry of entries) {
+				if (!entry.isDirectory() || skipped.has(entry.name)) continue;
+				const child = join(parent, entry.name);
+				if (hasTsconfig(child)) found.push(child);
+				if (depth < 3) next.push(child);
+			}
+		}
+		level = next;
+	}
+	return found;
+}
+
 function hasTsconfig(directory: string): boolean {
 	try {
 		return statSync(join(directory, "tsconfig.json")).isFile();

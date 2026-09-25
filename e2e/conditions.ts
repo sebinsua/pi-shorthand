@@ -5,6 +5,18 @@ import { pathToFileURL } from "node:url";
 export const setups = ["baseline", "code", "replace", "read-code"] as const;
 export type Setup = (typeof setups)[number];
 export type Documentation = "shipped" | "minimal";
+export type Sightread = "off" | "on";
+
+export function parseSightread(value: string): Sightread[] {
+	const result = value.split(",");
+	if (
+		!result.length ||
+		result.some((item) => item !== "off" && item !== "on") ||
+		new Set(result).size !== result.length
+	)
+		throw new Error("--sightread must be distinct members of off, on");
+	return result as Sightread[];
+}
 
 /** API facts only: no batching advice, workflow examples, or skill referral. */
 export const minimalDescription = `Execute a TypeScript program with Bun in an isolated repository workspace. Top-level await and Bun/Node APIs are available. Use relative repository paths. Successful writes are applied transactionally and returned as a diff; failures return the error and candidate diff. Only tracked and non-ignored files are applied. Writes to .git are blocked.
@@ -58,22 +70,28 @@ async function extensionIndex(root: string): Promise<string> {
 }
 
 /** Wrap registration rather than changing the shipped extension or its execution behaviour. */
-export async function extensionEntry(root: string, documentation: Documentation, destination: string): Promise<string> {
+export async function extensionEntry(
+	root: string,
+	documentation: Documentation,
+	destination: string,
+	sightread: Sightread = "on",
+): Promise<string> {
 	const entry = await extensionIndex(root);
-	if (documentation === "shipped") return entry;
+	if (documentation === "shipped" && sightread === "on") return entry;
 	await mkdir(path.dirname(destination), { recursive: true });
+	const description = sightread === "on" ? minimalDescription : minimalDescription.replace(/^graph\.query.*\n/m, "");
 	await writeFile(
 		destination,
 		`import extension from ${JSON.stringify(pathToFileURL(entry).href)};
 export default function(pi) {
   const proxy = new Proxy(pi, { get(target, key) {
     if (key === "registerTool") return (tool) => target.registerTool(tool.name === "code"
-      ? { ...tool, description: ${JSON.stringify(minimalDescription)}, promptSnippet: "Transactional Bun program for repository changes", promptGuidelines: [] }
+      ? ${documentation === "minimal" ? `{ ...tool, description: ${JSON.stringify(description)}, promptSnippet: "Transactional Bun program for repository changes", promptGuidelines: [] }` : "tool"}
       : tool);
     const value = Reflect.get(target, key);
     return typeof value === "function" ? value.bind(target) : value;
   }});
-  return extension(proxy);
+  return extension(proxy${sightread === "off" ? ", async () => undefined" : ""});
 }
 `,
 	);

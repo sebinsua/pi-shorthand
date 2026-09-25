@@ -13,6 +13,8 @@ export interface GraphNode {
 	ranges: { start: number; end: number }[] | null;
 	site?: { start: number; end: number };
 	exact?: true;
+	fanIn?: number;
+	fanOut?: number;
 }
 
 export interface GraphEdge {
@@ -34,6 +36,7 @@ export interface GraphEdge {
 export interface GraphResult {
 	type: string;
 	tsconfig?: string;
+	nestedProjects?: string[];
 	error?: string;
 	shown: number;
 	total?: number;
@@ -72,7 +75,7 @@ export const omittedKeys = [
 ] as const;
 
 const omitted = new Set<string>(omittedKeys);
-const primaryLists = ["hits", "entrypoints", "nodes", "reached", "hops", "files", "tests"];
+const primaryLists = ["hits", "entrypoints", "hotspots", "publicApi", "nodes", "reached", "hops", "files", "tests"];
 const requests = new WeakMap<GraphResult, Record<string, unknown>>();
 
 function utf16Column(line: string, byteColumn: number): number | undefined {
@@ -213,6 +216,8 @@ export async function normalizeResult(
 			...(ref.kind ? { kind: ref.kind } : {}),
 			...(ref.site ? { site: ref.site } : {}),
 			...(exact ? { exact: true as const } : {}),
+			...(typeof item.fanIn === "number" ? { fanIn: item.fanIn } : {}),
+			...(typeof item.fanOut === "number" ? { fanOut: item.fanOut } : {}),
 		};
 		nodes.set(handle, node);
 		if (ref.kind)

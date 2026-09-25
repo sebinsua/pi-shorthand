@@ -52,7 +52,14 @@ export async function materializeTask(task: Task, root: string): Promise<void> {
 	await writeFile(
 		path.join(root, "tsconfig.json"),
 		JSON.stringify({
-			compilerOptions: { strict: true, target: "ES2022", module: "ESNext", moduleResolution: "bundler", noEmit: true },
+			compilerOptions: {
+				strict: true,
+				target: "ES2022",
+				module: "ESNext",
+				moduleResolution: "bundler",
+				jsx: "preserve",
+				noEmit: true,
+			},
 			include: task.include ?? ["*.ts"],
 		}),
 	);

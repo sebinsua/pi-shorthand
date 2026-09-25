@@ -15,6 +15,10 @@ function location(node: GraphNode): string {
 
 function summary(result: GraphResult, nodes: Map<string, GraphNode>): string {
 	const { type, sections } = result;
+	if (type === "overview") {
+		const counts = sections.counts as { files?: number; nodes?: number; edges?: number } | undefined;
+		return `overview: ${(counts?.files ?? 0).toLocaleString("en-US")} files, ${(counts?.nodes ?? 0).toLocaleString("en-US")} symbols, ${(counts?.edges ?? 0).toLocaleString("en-US")} relationships`;
+	}
 	const request = requestFor(result);
 	let subject = "";
 	if (type === "trace") {
@@ -27,6 +31,42 @@ function summary(result: GraphResult, nodes: Map<string, GraphNode>): string {
 		subject = ` for ${request.reinterpretations.map(scalar).join(", ")}`;
 	const count = result.total === undefined ? `${result.shown} shown` : `${result.shown} of ${result.total} shown`;
 	return `${type}${subject}${result.tsconfig && result.tsconfig !== "tsconfig.json" ? ` (${result.tsconfig})` : ""}: ${count}${result.raise ? ` (truncated; raise ${result.raise})` : ""}`;
+}
+
+function overviewText(result: GraphResult, nodes: Map<string, GraphNode>, color: boolean): string {
+	const lines = [summary(result, nodes)];
+	for (const [key, value] of Object.entries(result.sections)) {
+		if (key === "layers" && Array.isArray(value) && value.length) {
+			const layers = value as Array<{ dir: string; files: number; exported: number }>;
+			const width = Math.max(...layers.map(({ dir }) => dir.length));
+			const countWidth = Math.max(...layers.map(({ files }) => String(files).length));
+			lines.push(
+				"",
+				key,
+				...layers.map(
+					({ dir, files, exported }) =>
+						`  ${dir.padEnd(width)}  ${String(files).padStart(countWidth)} files  ${exported} exported`,
+				),
+			);
+		}
+		if ((key === "hotspots" || key === "publicApi") && Array.isArray(value) && value.length) {
+			const ranked = value.filter((handle): handle is string => typeof handle === "string" && nodes.has(handle));
+			const rankedNodes = ranked.map((handle) => nodes.get(handle)!);
+			const nameWidth = Math.max(...rankedNodes.map((node) => node.name.length));
+			const kindWidth = Math.max(...rankedNodes.map((node) => displayKind(node).length));
+			const numberWidth = String(rankedNodes.length).length;
+			const locationWidth = Math.max(...rankedNodes.map((node) => location(node).length));
+			lines.push(
+				"",
+				key,
+				...rankedNodes.map(
+					(node, index) =>
+						`  ${String(index + 1).padStart(numberWidth)}. ${bold(node.name, color)}${" ".repeat(nameWidth - node.name.length + 2)}${dim(displayKind(node).padEnd(kindWidth), color)}  ${key === "hotspots" ? `${bold(location(node), color)}${" ".repeat(locationWidth - location(node).length)}  fan-in ${node.fanIn ?? 0}, fan-out ${node.fanOut ?? 0}` : bold(location(node), color)}`,
+				),
+			);
+		}
+	}
+	return lines.join("\n");
 }
 
 function edgeLines(edges: GraphEdge[], nodes: Map<string, GraphNode>, color: boolean): string[] {
@@ -50,6 +90,7 @@ function edgeLines(edges: GraphEdge[], nodes: Map<string, GraphNode>, color: boo
 /** Render one model with one mention of each symbol's location. */
 export function renderText(result: GraphResult, options: { color: boolean }): string {
 	const nodes = new Map(result.nodes.map((node) => [node.handle, node]));
+	if (result.type === "overview") return overviewText(result, nodes, options.color);
 	const baseCounts = new Map<string, number>();
 	for (const file of new Set(result.nodes.map((node) => node.file)))
 		baseCounts.set(basename(file), (baseCounts.get(basename(file)) ?? 0) + 1);

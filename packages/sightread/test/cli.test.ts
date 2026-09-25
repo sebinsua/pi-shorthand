@@ -1,6 +1,6 @@
 // Exercise the Bun command against a disposable project and live graph.
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createFixtureProject } from "./fixture.ts";
 
@@ -52,6 +52,64 @@ test("parsing errors have exact messages and exit 1", () => {
 		expect(output.err).toBe(`sightread: ${message}`);
 	}
 });
+
+test("--skill prints the complete skill outside a project", () => {
+	const output = run("--cwd", outside, "--skill");
+	expect(output).toEqual({
+		code: 0,
+		out: readFileSync(join(import.meta.dir, "../skills/sightread/SKILL.md"), "utf8").trimEnd(),
+		err: "",
+	});
+	const process = Bun.spawnSync(["bun", join(repo, "packages/sightread/src/cli.ts"), "--skill"], { cwd: outside });
+	expect(process.stdout.toString()).toBe(readFileSync(join(import.meta.dir, "../skills/sightread/SKILL.md"), "utf8"));
+	expect(run("--help").out).toContain("--skill");
+});
+
+test("ambiguous handles remain complete past the ordinary error limit", () => {
+	const large = createFixtureProject({
+		...Object.fromEntries(
+			Array.from({ length: 10 }, (_, index) => [
+				`src/long-directory-for-component-${index}/file.ts`,
+				"export function duplicateName() { return 1; }\n",
+			]),
+		),
+		"src/View.tsx": "export const View = () => <main><section><p>View</p></section></main>;\n",
+	});
+	try {
+		const output = run("--cwd", large.root, '{"type":"trace","from":"duplicateName","direction":"reverse"}');
+		expect(output.err).toBe(
+			`sightread: duplicateName is ambiguous; use a handle: ${Array.from(
+				{ length: 6 },
+				(_, index) => `src/long-directory-for-component-${index}/file.ts#duplicateName:function`,
+			).join(", ")}`,
+		);
+	} finally {
+		run("--cwd", large.root, "stop");
+		large.cleanup();
+	}
+}, 30_000);
+
+test("nested projects are named after the text result and included in JSON", () => {
+	const nested = createFixtureProject({
+		"tsconfig.json": '{"include":["scripts/**/*.ts"]}',
+		"scripts/build.ts": "export const build = 1;\n",
+		"src/node/tsconfig.json": '{"include":["**/*.ts"]}',
+		"src/node/server.ts": "export function createServer() { return 1; }\n",
+		"src/client/tsconfig.json": '{"include":["**/*.tsx"]}',
+		"src/client/View.tsx": "export function View() { return <main><section><p>Hi</p></section></main>; }\n",
+	});
+	try {
+		const query = '{"type":"lookup","query":"createServer"}';
+		expect(run("--cwd", nested.root, query).out).toBe(
+			"lookup for createServer: 0 shown\n\n(none)\nnote: graphed tsconfig.json (1 files); nested projects: src/node, src/client. Run from one of those for its code.",
+		);
+		const json = JSON.parse(run("--cwd", nested.root, "--json", query).out) as Array<{ nestedProjects: string[] }>;
+		expect(json[0].nestedProjects).toEqual(["src/node", "src/client"]);
+	} finally {
+		run("--cwd", nested.root, "stop");
+		nested.cleanup();
+	}
+}, 30_000);
 
 test("diff rejects extra arguments with its command usage", () => {
 	expect(run("--cwd", fixture.root, "diff", "HEAD", "extra")).toMatchObject({
@@ -116,12 +174,14 @@ test("a failed batch slot leaves later requests available in text and JSON", () 
 		type: string;
 		error?: string;
 		tsconfig?: string;
+		nestedProjects?: string[];
 		nodes?: { name: string }[];
 	}[];
 	expect(values[0]).toEqual({
 		type: "trace",
 		error: expect.stringContaining("NoSuchNameAtAll not found"),
 		tsconfig: "tsconfig.json",
+		nestedProjects: [],
 	});
 	expect(values[1].nodes?.some(({ name }) => name === "greet")).toBe(true);
 	expect(
@@ -166,7 +226,9 @@ test("ps, stop and stop --all show live servers and stop them", () => {
 	expect(projectOutput.code).toBe(0);
 	const ps = run("ps");
 	expect(ps.code).toBe(0);
-	expect(ps.out).toMatch(new RegExp(`^\\d+\\t${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\t\\d{4}-`));
+	expect(ps.out).toMatch(
+		new RegExp(`(?:^|\\n)\\d+\\t${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\t\\d{4}-`),
+	);
 	expect(run("--cwd", fixture.root, "stop")).toMatchObject({ code: 0, out: "stopped" });
 	expect(run("--cwd", fixture.root, "stop")).toMatchObject({ code: 0, out: "stopped" });
 	expect(run("ps").out).not.toContain(fixture.root);

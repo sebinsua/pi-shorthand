@@ -23,7 +23,8 @@ function path(value: string): string {
 }
 
 function patchPath(value: string): string {
-	const decoded = value.startsWith('"') ? (JSON.parse(value) as string) : value;
+	const clean = value.split("\t", 1)[0];
+	const decoded = clean.startsWith('"') ? (JSON.parse(clean) as string) : clean;
 	return path(decoded.startsWith("b/") ? decoded.slice(2) : decoded);
 }
 

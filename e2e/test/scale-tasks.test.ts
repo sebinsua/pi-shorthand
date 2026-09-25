@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { $ } from "bun";
+import { Lang, parse } from "@ast-grep/napi";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { applySolution, materializeTask, taskById } from "../tasks.ts";
@@ -19,6 +20,19 @@ afterEach(async () => {
 
 const edit = async (root: string, file: string, change: (text: string) => string) =>
 	writeFile(path.join(root, file), change(await readFile(path.join(root, file), "utf8")));
+
+test("impact fixture keeps realistic JSX ranges by parsing its actual .tsx extension", () => {
+	const source = taskById("impact-report-10").files["src/features/feature0.tsx"]!;
+	const jsx = parse(Lang.Tsx, source).root();
+	const plain = parse(Lang.TypeScript, source).root();
+	const component = jsx.find({ rule: { kind: "function_declaration", regex: "Preview" } });
+	expect(component?.range().end.index).toBe(source.length - 1);
+	expect(jsx.findAll({ rule: { kind: "ERROR" } })).toHaveLength(0);
+	expect(plain.findAll({ rule: { kind: "ERROR" } }).length).toBeGreaterThan(0);
+	expect(plain.find({ rule: { kind: "function_declaration", regex: "Preview" } })?.range().end.index).not.toBe(
+		component?.range().end.index,
+	);
+});
 
 test("every scale task has a brief and an unchanged starting fixture reports only missed sites", async () => {
 	for (const task of scaleTasks) {
@@ -108,3 +122,32 @@ test("a module moved with git mv is not reported as an unrelated change", async 
 	await applySolution(task, root);
 	expect(await task.drift!(root)).toMatchObject({ missed: [], overmatched: [], unrelated: [] });
 });
+
+for (const size of [10, 40, 100]) {
+	test(`impact-report-${size} requires the exact sorted names and excludes decoys`, async () => {
+		const task = taskById(`impact-report-${size}`);
+		const root = await fixture(task.id);
+		expect(task.files["src/features/feature0.tsx"]).toBeString();
+		await expect(task.verify(root)).rejects.toThrow();
+		await applySolution(task, root);
+		await task.verify(root);
+		const correct = await readFile(path.join(root, "IMPACT.txt"), "utf8");
+		await writeFile(path.join(root, "IMPACT.txt"), correct + "feature4\n");
+		expect((await task.drift!(root)).overmatched).toContain("IMPACT.txt: feature4");
+		await expect(task.verify(root)).rejects.toThrow();
+		await writeFile(path.join(root, "IMPACT.txt"), correct.replace("feature0\n", ""));
+		expect((await task.drift!(root)).missed).toContain("IMPACT.txt: feature0");
+	});
+
+	test(`method-migration-${size} records fresh options at every Row.get call`, async () => {
+		const task = taskById(`method-migration-${size}`);
+		const initial = await fixture(task.id);
+		await expect(task.verify(initial)).rejects.toThrow();
+		const root = await fixture(task.id);
+		await applySolution(task, root);
+		await task.verify(root);
+		const first = "src/features/feature0.ts";
+		await writeFile(path.join(root, first), task.files[first]!);
+		expect((await task.drift!(root)).missed.some((site) => site.includes(first))).toBe(true);
+	});
+}

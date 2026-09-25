@@ -223,11 +223,13 @@ async function queryGraph(project: Project, changed: ChangedSymbol[]) {
 		server = await server.restart();
 		values = requests.length ? await server.values(requests) : [];
 	}
-	for (const { item, line } of mismatches())
-		throw new Error(
-			`graph line mismatch for ${item.node.handle}: disk ${item.codeStarts.join(",")}, graph ${line}; refusing stale diff`,
-		);
-	return { active, server, values };
+	const skipped = new Set(mismatches().map(({ item }) => item.node.handle));
+	return {
+		active: active.filter((item) => !skipped.has(item.node.handle)),
+		server,
+		values: values.filter((_, index) => !skipped.has(active[index].node.handle)),
+		notes: [...skipped].map((handle) => `${handle}: graph disagrees with the file; skipped`),
+	};
 }
 
 function createLookup(git: GitChanges, project: Project, parser: DeclarationParser, matched: MatchedChanges): Lookup {
@@ -461,7 +463,9 @@ export async function collectImpact(
 	matched: MatchedChanges,
 ): Promise<Impact> {
 	const { ordered, changed, notes } = selectChanges(matched);
-	const { active, server, values } = await queryGraph(project, changed);
+	const queried = await queryGraph(project, changed);
+	const { active, server, values } = queried;
+	notes.push(...queried.notes);
 	const { getDeclarations, nodeFor } = createLookup(git, project, parser, matched);
 	const callerMap = new Map<string, GraphNode>();
 	const testMap = new Map<string, GraphNode & { byName?: true }>();

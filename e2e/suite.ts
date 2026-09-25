@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { materializeTask, promptFor, suites, taskById, type PromptStyle, type Suite } from "./tasks.ts";
-import { parseSetups } from "./conditions.ts";
+import { parseSetups, parseSightread } from "./conditions.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -14,6 +14,7 @@ const { values } = parseArgs({
 		setups: { type: "string", default: "baseline,replace,code" },
 		documentation: { type: "string", default: "shipped" },
 		skills: { type: "string", default: "none" },
+		sightread: { type: "string", default: "off" },
 		runs: { type: "string", default: "3" },
 		model: { type: "string", default: "anthropic/claude-sonnet-4-6" },
 		reasoning: { type: "string", default: "high" },
@@ -32,6 +33,7 @@ if (!prompts.length || prompts.some((style) => style !== "outcome" && style !== 
 // Fail before any model call if a selected task has no brief.
 for (const task of selected) for (const style of prompts) promptFor(task, style);
 const setups = parseSetups(values.setups!);
+const sightread = parseSightread(values.sightread!);
 if (!Number.isInteger(Number(values.runs)) || Number(values.runs) < 1)
 	throw new Error("--runs must be positive integer");
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -47,6 +49,7 @@ for (const task of selected)
 				setups,
 				documentation: values.documentation,
 				skills: values.skills,
+				sightread,
 				repetitions: Number(values.runs),
 				execute: values.execute,
 			}),
@@ -90,6 +93,7 @@ async function runTask(task: ReturnType<typeof taskById>, style: PromptStyle, fi
 		"setups",
 		"documentation",
 		"skills",
+		"sightread",
 		"runs",
 		"model",
 		"reasoning",

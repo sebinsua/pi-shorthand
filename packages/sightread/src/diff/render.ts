@@ -31,7 +31,9 @@ export function formatDiffNotes(notes: string[]): string[] {
 	const truncated: string[] = [];
 	const nonTs: string[] = [];
 	const imports: string[] = [];
+	const outside: string[] = [];
 	let extraNonTs = 0;
+	let extraOutside = 0;
 	for (const note of notes) {
 		const truncation = note.match(/^(.+): impact truncated at \d+ callers; reverse trace used$/);
 		if (truncation) truncated.push(truncation[1]);
@@ -42,7 +44,8 @@ export function formatDiffNotes(notes: string[]): string[] {
 		else if (note.includes(": not indexed:")) groups[2].push(note);
 		else if (note.includes("deleted/renamed away")) groups[3].push(note);
 		else if (note.endsWith(": file rename")) groups[4].push(note);
-		else if (note.endsWith(": outside project") || note.includes("outside-project files")) groups[7].push(note);
+		else if (note.endsWith(": outside project")) outside.push(note.slice(0, -": outside project".length));
+		else if (/^\.\.\. \d+ more outside-project files$/.test(note)) extraOutside += Number(note.match(/\d+/)?.[0]);
 		else groups[5].push(note);
 	}
 	if (truncated.length)
@@ -56,6 +59,13 @@ export function formatDiffNotes(notes: string[]): string[] {
 		const names = nonTs.slice(0, 3).join(", ");
 		groups[6].push(
 			`${count} non-TypeScript ${count === 1 ? "file" : "files"} changed: ${names}${count > 3 ? `, … (${count - 3} more)` : ""}`,
+		);
+	}
+	if (outside.length || extraOutside) {
+		const count = outside.length + extraOutside;
+		const names = outside.slice(0, 3).join(", ");
+		groups[7].push(
+			`${count} ${count === 1 ? "file" : "files"} changed outside the project: ${names}${count > 3 ? `, … (${count - 3} more)` : ""}`,
 		);
 	}
 	return groups.flat();

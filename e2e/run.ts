@@ -12,8 +12,8 @@
  * same recorded fixture. A completion is verified only when Pi succeeds within budget and --check passes.
  */
 
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises";
+import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmod, copyFile, mkdtemp, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
@@ -36,9 +36,11 @@ import {
 	conditionTools,
 	extensionEntry,
 	parseSetups,
+	parseSightread,
 	rotateConditions,
 	type Documentation,
 	type Setup,
+	type Sightread,
 } from "./conditions.ts";
 import { saveChanges } from "./artifacts.ts";
 import { sessionReport } from "./report.ts";
@@ -56,6 +58,13 @@ function shorthandSkill(root: string): string {
 	return found;
 }
 
+function sightreadRoot(extension?: FrozenExtension): string {
+	const roots = [extension?.path, extensionRoot].filter((root): root is string => root !== undefined);
+	const found = roots.find((root) => existsSync(path.join(root, "packages/sightread/src/cli.ts")));
+	if (!found) throw new Error("No sightread CLI in extension or this checkout");
+	return found;
+}
+
 const { values: args } = parseArgs({
 	options: {
 		repo: { type: "string" },
@@ -64,6 +73,7 @@ const { values: args } = parseArgs({
 		setups: { type: "string" },
 		documentation: { type: "string", default: "shipped" },
 		skills: { type: "string", default: "none" },
+		sightread: { type: "string", default: "off" },
 		"results-dir": { type: "string" },
 		"budget-dollars": { type: "string" },
 		"task-id": { type: "string" },
@@ -92,12 +102,20 @@ const selectedDocumentation = args.documentation!.split(",") as Documentation[];
 if (selectedDocumentation.some((item) => !["shipped", "minimal"].includes(item)))
 	throw new Error("--documentation must be shipped and/or minimal");
 const skills = args.skills!.split(",");
+const selectedSightread = parseSightread(args.sightread!);
 if (skills.some((item) => !["none", "shorthand"].includes(item)))
 	throw new Error("--skills must be none and/or shorthand");
 const budgetDollars = args["budget-dollars"] === undefined ? null : Number(args["budget-dollars"]);
 if (budgetDollars !== null && (!Number.isFinite(budgetDollars) || budgetDollars <= 0))
 	throw new Error("--budget-dollars must be positive");
-type Condition = { id: string; setup: Setup; documentation: Documentation; skill: string; extension?: FrozenExtension };
+type Condition = {
+	id: string;
+	setup: Setup;
+	documentation: Documentation;
+	skill: string;
+	sightread: Sightread;
+	extension?: FrozenExtension;
+};
 const paired = Boolean(args["baseline-extension"] || args["candidate-extension"]);
 if (paired && (!args["baseline-extension"] || !args["candidate-extension"])) {
 	throw new Error("Paired mode requires both --baseline-extension and --candidate-extension");
@@ -120,16 +138,25 @@ try {
 	const extensions = await prepareExtensions(workDir);
 	const conditions: Condition[] = selectedSetups.flatMap((setup): Condition[] =>
 		setup === "baseline"
-			? [{ id: "baseline", setup, documentation: "shipped", skill: "none" }]
+			? selectedSightread.map((sightread) => ({
+					id: `baseline-sightread-${sightread}`,
+					setup,
+					documentation: "shipped",
+					skill: "none",
+					sightread,
+				}))
 			: extensions.flatMap((extension) =>
 					selectedDocumentation.flatMap((docs) =>
-						skills.map((skill) => ({
-							id: `${setup}-${extension.label}-${docs}-${skill}`,
-							setup,
-							documentation: docs,
-							skill,
-							extension,
-						})),
+						selectedSightread.flatMap((sightread) =>
+							skills.map((skill) => ({
+								id: `${setup}-${extension.label}-${docs}-${skill}-sightread-${sightread}`,
+								setup,
+								documentation: docs,
+								skill,
+								sightread,
+								extension,
+							})),
+						),
 					),
 				),
 	);
@@ -157,7 +184,13 @@ try {
 		kind: "experiment",
 		model: args.model,
 		reasoning: args.reasoning ?? null,
-		conditions: conditions.map(({ id, setup, documentation, skill }) => ({ id, setup, documentation, skill })),
+		conditions: conditions.map(({ id, setup, documentation, skill, sightread }) => ({
+			id,
+			setup,
+			documentation,
+			skill,
+			sightread,
+		})),
 		task: args.task,
 		taskId: args["task-id"] ?? null,
 		category: args.category ?? null,
@@ -217,151 +250,189 @@ async function runPi(
 	startingFixture: Awaited<ReturnType<typeof fixtureIdentity>>,
 	recordedFixture: string,
 ) {
-	const { setup, extension, documentation, skill } = condition;
-	const logFile = path.join(resultsRoot, `${name}.jsonl`);
-	const stderrFile = path.join(resultsRoot, `${name}.stderr.log`);
-	const entry = extension
-		? await extensionEntry(extension.path, documentation, path.join(workDir, `${name}.ts`))
-		: null;
-	const setupArgs = entry ? ["-e", entry] : [];
-	setupArgs.push("--tools", conditionTools(setup).join(","));
-	if (skill === "shorthand" && extension) setupArgs.push("--skill", shorthandSkill(extension.path));
-	const agentDir = path.join(workDir, `${name}-agent`);
-	mkdirSync(agentDir, { mode: 0o700 });
-	// Preserve authentication and model definitions, but not ambient prompts, skills or settings.
-	const originalAgentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".pi/agent");
-	for (const file of ["auth.json", "models.json"]) {
-		const from = path.join(originalAgentDir, file);
-		if (await Bun.file(from).exists()) {
-			await copyFile(from, path.join(agentDir, file));
-			await chmod(path.join(agentDir, file), 0o600);
+	const { setup, extension, documentation, skill, sightread } = condition;
+	const runtime = await mkdtemp(path.join(realpathSync("/tmp"), "sr-"));
+	const sightreadBin = path.join(workDir, `${name}-bin`);
+	try {
+		if (sightread === "on") {
+			mkdirSync(sightreadBin, { recursive: true });
+			await symlink(
+				path.join(sightreadRoot(extension), "packages/sightread/src/cli.ts"),
+				path.join(sightreadBin, "sightread.ts"),
+			);
+			writeFileSync(path.join(sightreadBin, "sightread"), '#!/bin/sh\nexec bun "$(dirname "$0")/sightread.ts" "$@"\n', {
+				mode: 0o755,
+			});
+		}
+		const logFile = path.join(resultsRoot, `${name}.jsonl`);
+		const stderrFile = path.join(resultsRoot, `${name}.stderr.log`);
+		const entry = extension
+			? await extensionEntry(extension.path, documentation, path.join(workDir, `${name}.ts`), sightread)
+			: null;
+		const setupArgs = entry ? ["-e", entry] : [];
+		setupArgs.push("--tools", conditionTools(setup).join(","));
+		if (skill === "shorthand" && extension) setupArgs.push("--skill", shorthandSkill(extension.path));
+		if (sightread === "on")
+			setupArgs.push("--skill", path.join(sightreadRoot(extension), "packages/sightread/skills/sightread"));
+		const agentDir = path.join(workDir, `${name}-agent`);
+		mkdirSync(agentDir, { mode: 0o700 });
+		// Preserve authentication and model definitions, but not ambient prompts, skills or settings.
+		const originalAgentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".pi/agent");
+		for (const file of ["auth.json", "models.json"]) {
+			const from = path.join(originalAgentDir, file);
+			if (await Bun.file(from).exists()) {
+				await copyFile(from, path.join(agentDir, file));
+				await chmod(path.join(agentDir, file), 0o600);
+			}
+		}
+		const reasoningArgs = ["--thinking", args.reasoning ?? "high"];
+		let seedRecord: { source: string; fingerprint: string; messages: number } | null = null;
+		const sessionArgs = ["--no-session"];
+		if (seeds && extension) {
+			const messages = seeds[extension.label];
+			const seed = seedSession(messages, copy, extension.path);
+			const sessionFile = path.join(workDir, `${name}.session.jsonl`);
+			const serialized = [seed.header, ...seed.entries].map((item) => JSON.stringify(item)).join("\n") + "\n";
+			await Bun.write(sessionFile, serialized);
+			const savedSeed = path.join(resultsRoot, `${name}.seed.jsonl`);
+			await Bun.write(savedSeed, serialized);
+			seedRecord = {
+				source: savedSeed,
+				fingerprint: new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex"),
+				messages: messages.length,
+			};
+			sessionArgs.splice(0, sessionArgs.length, "--session", sessionFile);
+		}
+		const command = [
+			"pi",
+			"--mode",
+			"json",
+			...sessionArgs,
+			"-ne",
+			"--no-skills",
+			"--no-context-files",
+			"--no-prompt-templates",
+			"--no-themes",
+			"--no-approve",
+			"--offline",
+			"--model",
+			args.model!,
+			...reasoningArgs,
+			...setupArgs,
+			"-p",
+			seeds ? "Continue with the task." : args.task!,
+		];
+		const inheritedPath = [
+			path.join(copy, "node_modules/.bin"),
+			...(process.env.PATH ?? "").split(path.delimiter),
+		].filter((directory) => directory && (sightread === "on" || !existsSync(path.join(directory, "sightread"))));
+		const startedAt = performance.now();
+		const pi = Bun.spawn(command, {
+			cwd: copy,
+			env: {
+				...process.env,
+				PATH: [sightread === "on" ? sightreadBin : null, ...inheritedPath].filter(Boolean).join(path.delimiter),
+				PI_CODING_AGENT_DIR: agentDir,
+				XDG_RUNTIME_DIR: runtime,
+			},
+			detached: true,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		let exceededBudget = false;
+		let forceTimer: ReturnType<typeof setTimeout> | undefined;
+		let exceededCost = false;
+		const stop = () => {
+			killGroup(pi.pid, "SIGTERM");
+			forceTimer ??= setTimeout(() => killGroup(pi.pid, "SIGKILL"), 2_000);
+		};
+		const timer = setTimeout(() => {
+			exceededBudget = true;
+			stop();
+		}, budgetSeconds * 1000);
+		const observedPromise = observeEvents(pi.stdout, logFile, () => {
+			exceededCost = true;
+			stop();
+		});
+		const stderrPromise = new Response(pi.stderr).text();
+		const [piExitCode, observed, stderr] = await Promise.all([pi.exited, observedPromise, stderrPromise]);
+		clearTimeout(timer);
+		if (forceTimer) clearTimeout(forceTimer);
+		await Bun.write(stderrFile, stderr);
+		const eventSummary = summarizeEvents(observed.events);
+		await Bun.write(
+			`${logFile}.timeline.jsonl`,
+			observed.events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+		);
+		const artifacts = await saveChanges(recordedFixture, copy, path.join(resultsRoot, `${name}.artifacts`));
+		const verification = args.check
+			? await runVerification(args.check, copy, budgetSeconds * 1000 - (performance.now() - startedAt))
+			: null;
+		const changes = await gitStatus(copy);
+		const durationMs = performance.now() - startedAt;
+		exceededBudget ||= durationMs > budgetSeconds * 1000 || verification?.timedOut === true;
+		const verified = piExitCode === 0 && !exceededBudget && !exceededCost && verification?.passed === true;
+
+		const summary = {
+			kind: "run" as const,
+			condition: condition.id,
+			documentation,
+			skill,
+			sightread,
+			task: args.task,
+			taskId: args["task-id"] ?? null,
+			category: args.category ?? null,
+			promptStyle: args["prompt-style"] ?? null,
+			budgetDollars,
+			exceededCost,
+			artifacts,
+			toolNames: conditionTools(setup),
+			report: path.join(resultsRoot, `${name}.md`),
+			name,
+			setup,
+			model: args.model,
+			reasoning: args.reasoning ?? null,
+			repetition,
+			runOrder,
+			budgetSeconds,
+			extension: extension ?? null,
+			startingFixture,
+			seed: seedRecord,
+			seconds: durationMs / 1000,
+			timing: {
+				endToEndMs: durationMs,
+				modelMs: observed.modelMs,
+				toolMs: observed.toolMs,
+				verificationMs: verification?.durationMs ?? 0,
+				unattributedMs: Math.max(0, durationMs - observed.modelMs - observed.toolMs - (verification?.durationMs ?? 0)),
+			},
+			pi: processOutcome(piExitCode, stderr, exceededBudget, observed.invalidLines),
+			...eventSummary,
+			verification,
+			drift: parseDrift(verification?.stdout),
+			verified,
+			changes,
+			log: logFile,
+			timeline: `${logFile}.timeline.jsonl`,
+			stderrLog: stderrFile,
+		};
+		await Bun.write(summary.report, sessionReport(observed.events, summary));
+		return summary;
+	} finally {
+		try {
+			if (sightread === "on" && existsSync(path.join(sightreadBin, "sightread"))) {
+				const stopped = Bun.spawn([path.join(sightreadBin, "sightread"), "stop", "--all"], {
+					env: { ...process.env, XDG_RUNTIME_DIR: runtime },
+					stdout: "ignore",
+					stderr: "ignore",
+				});
+				if ((await stopped.exited) !== 0) console.error(`Could not stop sightread servers for ${name}`);
+			}
+		} finally {
+			await rm(runtime, { recursive: true, force: true });
 		}
 	}
-	const reasoningArgs = ["--thinking", args.reasoning ?? "high"];
-	let seedRecord: { source: string; fingerprint: string; messages: number } | null = null;
-	const sessionArgs = ["--no-session"];
-	if (seeds && extension) {
-		const messages = seeds[extension.label];
-		const seed = seedSession(messages, copy, extension.path);
-		const sessionFile = path.join(workDir, `${name}.session.jsonl`);
-		const serialized = [seed.header, ...seed.entries].map((item) => JSON.stringify(item)).join("\n") + "\n";
-		await Bun.write(sessionFile, serialized);
-		const savedSeed = path.join(resultsRoot, `${name}.seed.jsonl`);
-		await Bun.write(savedSeed, serialized);
-		seedRecord = {
-			source: savedSeed,
-			fingerprint: new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex"),
-			messages: messages.length,
-		};
-		sessionArgs.splice(0, sessionArgs.length, "--session", sessionFile);
-	}
-	const command = [
-		"pi",
-		"--mode",
-		"json",
-		...sessionArgs,
-		"-ne",
-		"--no-skills",
-		"--no-context-files",
-		"--no-prompt-templates",
-		"--no-themes",
-		"--no-approve",
-		"--offline",
-		"--model",
-		args.model!,
-		...reasoningArgs,
-		...setupArgs,
-		"-p",
-		seeds ? "Continue with the task." : args.task!,
-	];
-	const startedAt = performance.now();
-	const pi = Bun.spawn(command, {
-		cwd: copy,
-		env: {
-			...process.env,
-			PATH: [path.join(copy, "node_modules/.bin"), process.env.PATH].filter(Boolean).join(path.delimiter),
-			PI_CODING_AGENT_DIR: agentDir,
-		},
-		detached: true,
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	let exceededBudget = false;
-	let forceTimer: ReturnType<typeof setTimeout> | undefined;
-	let exceededCost = false;
-	const stop = () => {
-		killGroup(pi.pid, "SIGTERM");
-		forceTimer ??= setTimeout(() => killGroup(pi.pid, "SIGKILL"), 2_000);
-	};
-	const timer = setTimeout(() => {
-		exceededBudget = true;
-		stop();
-	}, budgetSeconds * 1000);
-	const observedPromise = observeEvents(pi.stdout, logFile, () => {
-		exceededCost = true;
-		stop();
-	});
-	const stderrPromise = new Response(pi.stderr).text();
-	const [piExitCode, observed, stderr] = await Promise.all([pi.exited, observedPromise, stderrPromise]);
-	clearTimeout(timer);
-	if (forceTimer) clearTimeout(forceTimer);
-	await Bun.write(stderrFile, stderr);
-	const eventSummary = summarizeEvents(observed.events);
-	await Bun.write(`${logFile}.timeline.jsonl`, observed.events.map((event) => JSON.stringify(event)).join("\n") + "\n");
-	const artifacts = await saveChanges(recordedFixture, copy, path.join(resultsRoot, `${name}.artifacts`));
-	const verification = args.check
-		? await runVerification(args.check, copy, budgetSeconds * 1000 - (performance.now() - startedAt))
-		: null;
-	const changes = await gitStatus(copy);
-	const durationMs = performance.now() - startedAt;
-	exceededBudget ||= durationMs > budgetSeconds * 1000 || verification?.timedOut === true;
-	const verified = piExitCode === 0 && !exceededBudget && !exceededCost && verification?.passed === true;
-
-	const summary = {
-		kind: "run" as const,
-		condition: condition.id,
-		documentation,
-		skill,
-		task: args.task,
-		taskId: args["task-id"] ?? null,
-		category: args.category ?? null,
-		promptStyle: args["prompt-style"] ?? null,
-		budgetDollars,
-		exceededCost,
-		artifacts,
-		toolNames: conditionTools(setup),
-		report: path.join(resultsRoot, `${name}.md`),
-		name,
-		setup,
-		model: args.model,
-		reasoning: args.reasoning ?? null,
-		repetition,
-		runOrder,
-		budgetSeconds,
-		extension: extension ?? null,
-		startingFixture,
-		seed: seedRecord,
-		seconds: durationMs / 1000,
-		timing: {
-			endToEndMs: durationMs,
-			modelMs: observed.modelMs,
-			toolMs: observed.toolMs,
-			verificationMs: verification?.durationMs ?? 0,
-			unattributedMs: Math.max(0, durationMs - observed.modelMs - observed.toolMs - (verification?.durationMs ?? 0)),
-		},
-		pi: processOutcome(piExitCode, stderr, exceededBudget, observed.invalidLines),
-		...eventSummary,
-		verification,
-		drift: parseDrift(verification?.stdout),
-		verified,
-		changes,
-		log: logFile,
-		timeline: `${logFile}.timeline.jsonl`,
-		stderrLog: stderrFile,
-	};
-	await Bun.write(summary.report, sessionReport(observed.events, summary));
-	return summary;
 }
 
 async function observeEvents(stream: ReadableStream<Uint8Array>, logFile: string, onCostLimit: () => void) {

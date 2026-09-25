@@ -1,6 +1,6 @@
 // Check complete text for live lookup, trace, details, tour, and overview results.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeResult, type GraphResult } from "../src/model.ts";
 import { createRangeIndex, parseDeclarations, type RangeIndex } from "../src/ranges.ts";
@@ -113,46 +113,75 @@ test("tour text is complete, including sites and nested flow", () => {
 test("overview text is complete", () => {
 	expect(outputs.get("overview")).toBe(
 		[
-			"overview: 0 shown",
-			"",
-			"src/model.ts",
-			"  1-1  greet    function",
-			"  2-2  caller   function",
-			"  3-7  Greeter  class",
-			"src/View.tsx",
-			"  1-1  Row   type",
-			"  2-6  View  function",
-			"",
-			`project: ${realpathSync(root)}`,
-			"",
-			"counts",
-			"  files: 2",
-			"  nodes: 9",
-			"  edges: 13",
-			"  byKind",
-			"    interface: 1",
-			"    type: 1",
-			"    function: 3",
-			"    method: 1",
-			"    class: 1",
-			"    file: 2",
+			"overview: 2 files, 9 symbols, 13 relationships",
 			"",
 			"layers",
-			"  dir: src",
-			"  files: 2",
-			"  exported: 4",
+			"  src  2 files  4 exported",
 			"",
 			"hotspots",
-			"  View",
-			"  Row",
-			"  caller",
-			"  greet",
+			"  1. View    function  src/View.tsx:2-6  fan-in 0, fan-out 2",
+			"  2. Row     type      src/View.tsx:1-1  fan-in 1, fan-out 0",
+			"  3. caller  function  src/model.ts:2-2  fan-in 0, fan-out 1",
+			"  4. greet   function  src/model.ts:1-1  fan-in 1, fan-out 0",
 			"",
 			"publicApi",
-			"  View",
-			"  caller",
-			"  greet",
-			"  Greeter",
+			"  1. View     function  src/View.tsx:2-6",
+			"  2. caller   function  src/model.ts:2-2",
+			"  3. greet    function  src/model.ts:1-1",
+			"  4. Greeter  class     src/model.ts:3-7",
+		].join("\n"),
+	);
+});
+
+test("overview keeps ranked sections, relationship counts, and omits the absolute project", async () => {
+	const request = { type: "overview" };
+	const value = {
+		result: {
+			type: "overview",
+			project: root,
+			counts: { files: 2, nodes: 9, edges: 13, byKind: { function: 3 } },
+			layers: [{ dir: "src", files: 2, exported: 4 }],
+			hotspots: [
+				{
+					id: "src/model.ts#caller:function",
+					name: "caller",
+					kind: "function",
+					file: "src/model.ts",
+					line: 2,
+					fanIn: 5,
+					fanOut: 1,
+				},
+				{
+					id: "src/model.ts#greet:function",
+					name: "greet",
+					kind: "function",
+					file: "src/model.ts",
+					line: 1,
+					fanIn: 2,
+					fanOut: 0,
+				},
+			],
+			publicApi: [
+				{ id: "src/model.ts#greet:function", name: "greet", kind: "function", file: "src/model.ts", line: 1 },
+			],
+		},
+	};
+	const model = await normalizeResult(request, value, ranges);
+	expect(model.sections.hotspots).toEqual(["src/model.ts#caller:function", "src/model.ts#greet:function"]);
+	expect(model.sections.publicApi).toEqual(["src/model.ts#greet:function"]);
+	expect(renderText(model, { color: false })).toBe(
+		[
+			"overview: 2 files, 9 symbols, 13 relationships",
+			"",
+			"layers",
+			"  src  2 files  4 exported",
+			"",
+			"hotspots",
+			"  1. caller  function  src/model.ts:2-2  fan-in 5, fan-out 1",
+			"  2. greet   function  src/model.ts:1-1  fan-in 2, fan-out 0",
+			"",
+			"publicApi",
+			"  1. greet  function  src/model.ts:1-1",
 		].join("\n"),
 	);
 });
@@ -163,7 +192,7 @@ test("TSX ranges use JSX parsing, which differs from TS parsing", async () => {
 	const ts = await parseDeclarations("View.ts", source);
 	expect(tsx.find(({ name }) => name === "View")?.end).toBe(6);
 	expect(ts.find(({ name }) => name === "View")?.end).toBe(5);
-	expect(outputs.get("overview")).toContain("2-6  View");
+	expect(outputs.get("overview")).toContain("src/View.tsx:2-6");
 });
 
 test("test sites use their line and kind in a file group, and file:line in sections", () => {
@@ -202,4 +231,31 @@ test("test sites use their line and kind in a file group, and file:line in secti
 			"  thing.test.ts:8",
 		].join("\n"),
 	);
+});
+
+test("numbered lists stay aligned past nine rows", () => {
+	const nodes = Array.from({ length: 10 }, (_, i) => ({
+		handle: `src/a.ts#f${i}:function`,
+		name: `f${i}`,
+		kind: "function",
+		file: "src/a.ts",
+		ranges: [{ start: i * 10 + 1, end: i * 10 + 1 }],
+		fanIn: 10 - i,
+		fanOut: 0,
+	}));
+	const result = {
+		type: "overview",
+		shown: 10,
+		nodes,
+		edges: [],
+		sections: { hotspots: nodes.map((node) => node.handle) },
+	} as unknown as GraphResult;
+	const rows = renderText(result, { color: false })
+		.split("\n")
+		.filter((line) => /^\s+\d+\. /.test(line));
+	expect(rows).toHaveLength(10);
+	expect(new Set(rows.map((row) => row.indexOf("f")))).toEqual(new Set([rows[0].indexOf("f")]));
+	expect(new Set(rows.map((row) => row.indexOf("fan-in")))).toEqual(new Set([rows[0].indexOf("fan-in")]));
+	expect(rows[9].startsWith("  10. f9")).toBe(true);
+	expect(rows[0].startsWith("   1. f0")).toBe(true);
 });

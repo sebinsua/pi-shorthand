@@ -88,15 +88,17 @@ original fixtures, not general repository performance.
 ### Scale suite
 
 Every earlier study passed 100% in both stock and shorthand conditions, so pass rate could not distinguish
-them. The `scale` suite generates four refactors, each across 10, 40 and 100 consumer files, e.g.
+them. The `scale` suite generates seven task families, each across 10, 40 and 100 consumer files, e.g.
 `rename-symbol-40`:
 
-| Family              | Change                                                         | Decoys that must stay unchanged                                             |
-| ------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `rename-symbol`     | Rename an exported function, through a barrel and aliases      | Same-named legacy function and its importers, shadowing parameters, strings |
-| `options-migration` | Positional `request(url, retries, timeoutMs)` to options       | `cache.request`, file-local `request` functions, strings                    |
-| `move-module`       | Move a module, updating its own import, re-exports and imports | Barrel importers and a same-named legacy module                             |
-| `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it    | `audit.log`, `Math.log`, strings                                            |
+| Family              | Change                                                          | Decoys that must stay unchanged                                             |
+| ------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `rename-symbol`     | Rename an exported function, through a barrel and aliases       | Same-named legacy function and its importers, shadowing parameters, strings |
+| `options-migration` | Positional `request(url, retries, timeoutMs)` to options        | `cache.request`, file-local `request` functions, strings                    |
+| `move-module`       | Move a module, updating its own import, re-exports and imports  | Barrel importers and a same-named legacy module                             |
+| `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it     | `audit.log`, `Math.log`, strings                                            |
+| `impact-report`     | Report direct and transitive feature callers of `applyDiscount` | Legacy and local functions, class methods, strings                          |
+| `method-migration`  | Add `{ fresh: true }` to every `Row.get` call                   | Other `get` methods, local functions, strings                               |
 
 Consumers vary call shape (multi-line calls, variables, `undefined` placeholders, dynamic levels) and directory
 depth. Evaluators check behaviour of every consumer, type-check the fixture, and require zero drift.
@@ -124,6 +126,12 @@ Real-repository refactoring benchmarks with TypeScript instances, such as CodeTa
 suite shows an effect.
 
 ## Conditions
+
+| Dimension     | Values   | Default |
+| ------------- | -------- | ------- |
+| `--sightread` | `off,on` | `off`   |
+
+`on` provides the sightread CLI and skill, and advertises `graph.query` in shorthand; it also works with the `baseline` setup. Each attempt gets a separate runtime directory, and its servers are stopped when the attempt ends.
 
 | `--setups` value | Enabled tools                                                                             |
 | ---------------- | ----------------------------------------------------------------------------------------- |

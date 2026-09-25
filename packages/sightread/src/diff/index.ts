@@ -1,5 +1,6 @@
 // Run one working-tree diff with one parser and the existing graph daemon.
-import type { Project } from "../project.ts";
+import { projectFiles, type Project } from "../project.ts";
+import { resolve } from "node:path";
 import { createPaths } from "../paths.ts";
 import { createDeclarationParser } from "../ranges.ts";
 import { matchChanges } from "./changes.ts";
@@ -18,6 +19,13 @@ export async function runDiff(
 	const parser = createDeclarationParser();
 	try {
 		const matched = await matchChanges(git, project.root, parser);
+		const files = await projectFiles(project);
+		const outside = matched.changed.filter(({ node }) => !files.has(resolve(project.root, node.file)));
+		matched.changed = matched.changed.filter(({ node }) => files.has(resolve(project.root, node.file)));
+		if (outside.length)
+			matched.notes.push(
+				`${outside.length} changed declarations outside the graphed project (${project.tsconfig.slice(project.root.length + 1).replaceAll("\\", "/")})`,
+			);
 		const impact = matched.changed.length ? await collectImpact(git, project, parser, matched) : undefined;
 		const result: DiffResult = {
 			base: git.base,

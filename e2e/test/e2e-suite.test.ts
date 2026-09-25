@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { allTasks, applySolution, materializeTask, taskById } from "../tasks.ts";
 import { saveChanges } from "../artifacts.ts";
@@ -53,9 +55,13 @@ for (const task of allTasks)
 		const root = await directory();
 		await materializeTask(task, root);
 		await applySolution(task, root);
-		const changed = Object.entries(task.solution).flatMap(([file, content]) => (content === null ? [] : [file]));
-		const formatted = await $`node_modules/.bin/oxfmt ${changed}`.cwd(root).nothrow().quiet();
-		expect(formatted.exitCode).toBe(0);
+		const changed = Object.entries(task.solution).flatMap(([file, content]) =>
+			content !== null && /\.[jt]sx?$/.test(file) ? [file] : [],
+		);
+		if (changed.length) {
+			const formatted = await $`node_modules/.bin/oxfmt ${changed}`.cwd(root).nothrow().quiet();
+			expect(formatted.exitCode).toBe(0);
+		}
 		const child = Bun.spawn(["bun", path.resolve("e2e/tasks.ts"), task.id, root], { stdout: "pipe", stderr: "pipe" });
 		const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
 		expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
@@ -195,6 +201,28 @@ test("minimal documentation wrapper changes registration without changing execut
 	expect(conditionTools("replace")).toEqual(["read", "bash", "code"]);
 });
 
+test("sightread off hides graph.query from shipped and minimal code registration", async () => {
+	const root = await directory();
+	await writeFile(
+		path.join(root, "index.ts"),
+		'export default async (pi, findGraph) => pi.registerTool({ name: "code", description: (await findGraph()) ? "graph.query available" : "code only" });',
+	);
+	for (const documentation of ["shipped", "minimal"] as const) {
+		const entry = await extensionEntry(root, documentation, path.join(root, `${documentation}-off.ts`), "off");
+		const wrapper = await readFile(entry, "utf8");
+		expect(wrapper).toContain("extension(proxy, async () => undefined)");
+		const probe = `const extension = (await import(${JSON.stringify(pathToFileURL(entry).href)})).default; await extension({ registerTool(tool) { console.log(tool.description); } });`;
+		const child = Bun.spawn(["bun", "-e", probe], { stdout: "pipe", stderr: "pipe" });
+		const [exit, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+		expect(stdout).not.toContain("graph.query");
+	}
+});
+
 test("session report distinguishes observations from inferred failure causes", () => {
 	const report = sessionReport([
 		{ type: "tool_execution_start", toolName: "bash", args: { command: "echo '```'" } },
@@ -237,6 +265,114 @@ console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content
 		FAKE_CALLS: path.join(root, "calls.jsonl"),
 	};
 }
+
+test("sightread conditions set PATH and skill, record the dimension, and stop servers after passing and failing attempts", async () => {
+	const root = await directory();
+	const fixture = path.join(root, "fixture");
+	const extension = path.join(root, "extension");
+	const results = path.join(root, "results");
+	await materializeTask(allTasks[0]!, fixture);
+	await mkdir(path.join(extension, "packages/sightread/src"), { recursive: true });
+	await mkdir(path.join(extension, "packages/sightread/skills/sightread"), { recursive: true });
+	await writeFile(path.join(extension, "package.json"), JSON.stringify({ pi: { extensions: ["./index.ts"] } }));
+	await writeFile(path.join(extension, "index.ts"), "export default () => {};\n");
+	await writeFile(path.join(extension, "packages/sightread/skills/sightread/SKILL.md"), "# Sightread\n");
+	const cli = path.join(extension, "packages/sightread/src/cli.ts");
+	await writeFile(
+		cli,
+		`#!/usr/bin/env bun
+import { appendFileSync, writeFileSync, rmSync } from "node:fs";
+import * as path from "node:path";
+const sentinel = path.join(process.env.XDG_RUNTIME_DIR, "server");
+if (process.argv.includes("stop")) { appendFileSync(process.env.FAKE_STOPS, process.env.XDG_RUNTIME_DIR + "\\n"); rmSync(sentinel, { force: true }); }
+else writeFileSync(sentinel, "running");
+`,
+	);
+	await chmod(cli, 0o755);
+	await $`git init -q`.cwd(extension);
+	await $`git add .`.cwd(extension);
+	await $`git -c user.name=Test -c user.email=test@example.com -c commit.gpgsign=false commit -qm initial`.cwd(
+		extension,
+	);
+	const env = await fakeEnvironment(root);
+	await writeFile(
+		path.join(root, "bin/pi"),
+		`#!/usr/bin/env bun
+import { appendFileSync, existsSync } from "node:fs";
+import * as path from "node:path";
+const args = process.argv.slice(2);
+const bin = process.env.PATH.split(path.delimiter).find(dir => existsSync(path.join(dir, "sightread")));
+appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ args, bin, runtime: process.env.XDG_RUNTIME_DIR }) + "\\n");
+if (bin) Bun.spawnSync([path.join(bin, "sightread"), "start"], { env: process.env });
+process.exit(process.env.FAKE_FAIL === "1" ? 1 : 0);
+`,
+	);
+	await chmod(path.join(root, "bin/pi"), 0o755);
+	for (const fail of [false, true]) {
+		const child = Bun.spawn(
+			[
+				"bun",
+				path.resolve("e2e/run.ts"),
+				"--repo",
+				fixture,
+				"--task",
+				"Example",
+				"--setups",
+				"baseline,code",
+				"--sightread",
+				"off,on",
+				"--extension",
+				extension,
+				"--check",
+				"true",
+				"--results-dir",
+				results,
+			],
+			{
+				env: { ...env, FAKE_STOPS: path.join(root, "stops.txt"), FAKE_FAIL: fail ? "1" : "0" },
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [exit, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stderr).text(),
+			new Response(child.stdout).text(),
+		]).then(([code, error]) => [code, error]);
+		expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+	}
+	const calls = (await readFile(env.FAKE_CALLS, "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	expect(calls.length).toBe(8);
+	for (const call of calls) {
+		const on = call.args.some((arg: string) => arg.includes("sightread/skills/sightread"));
+		expect(Boolean(call.bin)).toBe(on);
+		expect(call.args.includes("--skill")).toBe(on);
+		expect(call.runtime).toStartWith(realpathSync("/tmp") + "/");
+		expect(await Bun.file(path.join(call.runtime, "server")).exists()).toBe(false);
+	}
+	const stops = (await readFile(path.join(root, "stops.txt"), "utf8")).trim().split("\n");
+	expect(stops.length).toBe(2);
+	const summaries = (await readFile(path.join(results, "summary.jsonl"), "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	expect(
+		summaries
+			.filter((item) => item.kind === "run")
+			.map((item) => item.sightread)
+			.toSorted(),
+	).toEqual(["off", "off", "off", "off", "on", "on", "on", "on"]);
+	expect(
+		summaries
+			.filter((item) => item.kind === "experiment")
+			.every((item) =>
+				item.conditions.every((condition: { sightread: string }) => ["on", "off"].includes(condition.sightread)),
+			),
+	).toBe(true);
+}, 20_000);
 
 test("runner compares conditions from identical fixtures and saves independent review artifacts without a model", async () => {
 	const root = await directory();

@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { rename, writeFile, unlink } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { join, relative, sep } from "node:path";
-import type { Project } from "../project.ts";
+import { nestedProjects, projectFiles, type Project } from "../project.ts";
 import { runQuery } from "../query.ts";
 import { createRangeIndex } from "../ranges.ts";
 import { RequestError, startGraphClient } from "../upstream.ts";
@@ -18,6 +18,7 @@ interface Message {
 	mode?: "text" | "json" | "raw";
 	in?: string;
 	color?: boolean;
+	cwd?: string;
 }
 
 function duration(name: string, fallback: number): number {
@@ -34,6 +35,8 @@ export async function runDaemon(project: Project): Promise<void> {
 	const signature = await projectSignature(project);
 	const client = await startGraphClient(project, { stderr: 2, cacheDirectory: join(paths.directory, "ttsc-cache") });
 	const ranges = createRangeIndex(project.root);
+	const fileCount = projectFiles(project).then((files) => files.size);
+	const nested = nestedProjects(project);
 	let lastUsed = startedAt;
 	let active = 0;
 	let closing = false;
@@ -117,6 +120,10 @@ export async function runDaemon(project: Project): Promise<void> {
 							ranges,
 							root: project.root,
 							tsconfig: relative(project.root, project.tsconfig).replaceAll(sep, "/"),
+							projectFileCount: await fileCount,
+							nestedProjects: nested
+								.map((directory) => relative(message.cwd ?? project.root, directory).replaceAll(sep, "/"))
+								.slice(0, 5),
 						},
 						message.requests ?? [],
 						{
