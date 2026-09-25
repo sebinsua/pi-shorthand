@@ -9,13 +9,13 @@
 		"codemod",
 		"overlay"
 	],
-	"homepage": "https://github.com/sebinsua/pi-shorthand/tree/main/packages/shorthand-code#readme",
-	"bugs": "https://github.com/sebinsua/pi-shorthand/issues",
+	"homepage": "https://github.com/sebinsua/shortsight/tree/main/packages/shorthand-code#readme",
+	"bugs": "https://github.com/sebinsua/shortsight/issues",
 	"license": "MIT",
 	"author": "Seb Insua",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/sebinsua/pi-shorthand.git",
+		"url": "git+https://github.com/sebinsua/shortsight.git",
 		"directory": "packages/shorthand-code"
 	},
 	"bin": {

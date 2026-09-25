@@ -11,13 +11,13 @@
 		"pi-extension",
 		"pi-package"
 	],
-	"homepage": "https://github.com/sebinsua/pi-shorthand/tree/main/packages/pi-shorthand#readme",
-	"bugs": "https://github.com/sebinsua/pi-shorthand/issues",
+	"homepage": "https://github.com/sebinsua/shortsight/tree/main/packages/pi-shorthand#readme",
+	"bugs": "https://github.com/sebinsua/shortsight/issues",
 	"license": "MIT",
 	"author": "Seb Insua",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/sebinsua/pi-shorthand.git",
+		"url": "git+https://github.com/sebinsua/shortsight.git",
 		"directory": "packages/pi-shorthand"
 	},
 	"files": [
@@ -59,6 +59,6 @@
 		"skills": [
 			"./skills"
 		],
-		"image": "https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2"
+		"image": "https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/screenshot.png?v=2"
 	}
 }

@@ -1,6 +1,6 @@
 # pi-shorthand
 
-![A code call in Pi](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2)
+![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/screenshot.png?v=2)
 
 A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.
 
@@ -42,11 +42,11 @@ The `code` tool uses Pi's working directory by default. Pass `cwd` to target ano
 
 ## Without Pi
 
-The engine is published separately as [shorthand-code](https://github.com/sebinsua/pi-shorthand/tree/main/packages/shorthand-code), with a `shorthand` command that runs a program from a file or stdin and prints the same result. See `shorthand --help`.
+The engine is published separately as [shorthand-code](https://github.com/sebinsua/shortsight/tree/main/packages/shorthand-code), with a `shorthand` command that runs a program from a file or stdin and prints the same result. See `shorthand --help`.
 
 ## Code graph (optional)
 
-Install [`sightread`](https://github.com/sebinsua/pi-shorthand/tree/main/packages/sightread) and programs can also ask the TypeScript compiler what calls what, with exact line ranges, before they edit:
+Install [`sightread`](https://github.com/sebinsua/shortsight/tree/main/packages/sightread) and programs can also ask the TypeScript compiler what calls what, with exact line ranges, before they edit:
 
 ```sh
 npm i -g sightread

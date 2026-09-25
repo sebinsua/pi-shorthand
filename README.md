@@ -9,7 +9,7 @@ Each works on its own.
 
 ## `shorthand`
 
-![A code call in Pi](https://raw.githubusercontent.com/sebinsua/pi-shorthand/main/docs/screenshot.png?v=2)
+![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/screenshot.png?v=2)
 
 Instead of a patch, the agent writes a Bun program that can search, rewrite syntax, and rename or move TypeScript symbols. The program edits a private copy of the repository. When it succeeds, its changes are applied and the agent sees the diff. When it fails, finished files are kept and failed edits are rolled back.
 
