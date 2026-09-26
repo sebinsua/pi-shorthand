@@ -12,7 +12,7 @@ Run tests, type-checks and builds separately with the shell tool after editing.
 ## Replace known text
 
 ```ts
-edit({ path: "src/config.ts", oldText: "timeoutMs: 1000", newText: "timeoutMs: 3000" });
+edit({ path: "src/settings.ts", oldText: "pageSize: 20", newText: "pageSize: 50" });
 ```
 
 `edit` replaces exactly one literal occurrence, throwing if it is missing or ambiguous. Include
@@ -30,8 +30,8 @@ await refactor.renameFile({ from: "src/users.ts", to: "src/models/users.ts" });
 await refactor.move({ file: "src/api.ts", symbol: "parseUser", to: "src/users/parse.ts" });
 ```
 
-`refactor.rename` leaves unrelated symbols alone. Use a qualified `symbol` such as `Row.get` when a
-file has several declarations named `get`; an unqualified name works when it identifies one
+`refactor.rename` leaves unrelated symbols alone. Use a qualified `symbol` such as `Session.refresh` when a
+file has several declarations named `refresh`; an unqualified name works when it identifies one
 declaration. `rename`, `move` and `references` also accept a graph node as `file` and use its name
 when `symbol` is omitted. `refactor.renameFile` moves the file and updates imports and exports that
 resolve to it. Read
@@ -51,15 +51,19 @@ import aliases and a second call in the same function, and leaves same-named met
 alone. Each match's `text` is the name as written, and matches go straight to `sg.rewrite`:
 
 ```ts
-const refs = await refactor.references({ file: "src/row.ts", symbol: "Row.get" });
-sg.rewrite(refs, () => "read");
+const refs = await refactor.references({ file: "src/session.ts", symbol: "Session.refresh" });
+sg.rewrite(refs, () => "renew");
 ```
 
 When a reference is being called, `match.call` is the whole call or `new` expression, and a rewrite
-may edit it. That's how to change a call's arguments, including for methods:
+may edit it. That's how to change a call's arguments, including for methods. To add one, append it
+to the last argument, which keeps calls split over lines with a trailing comma valid:
 
 ```ts
-sg.rewrite(refs, (m) => m.call?.replace(m.call.text().replace(/\)$/, ", { fresh: true })")) ?? null);
+sg.rewrite(refs, (m) => {
+	const last = m.call?.field("arguments")?.namedChildren().at(-1);
+	return last ? last.replace(`${last.text()}, { force: true }`) : null;
+});
 ```
 
 ## Code graph
@@ -69,8 +73,8 @@ one request or an array, and names work wherever a symbol is expected:
 
 ```ts
 const [found, callers] = await graph.query([
-	{ type: "lookup", query: "formatPrice" },
-	{ type: "trace", from: "formatPrice", direction: "reverse" },
+	{ type: "lookup", query: "hashPassword" },
+	{ type: "trace", from: "hashPassword", direction: "reverse" },
 ]);
 ```
 
@@ -82,7 +86,7 @@ callers (`direction: "reverse"`) or callees (`"forward"`), and `details` shows w
 Pass nodes to `sg` as its scope to search only those symbols' lines:
 
 ```ts
-sg.rewrite("formatPrice($A)", "formatPrice($A, currency)", callers.nodes);
+sg.rewrite("hashPassword($A)", "hashPassword($A, pepper)", callers.nodes);
 ```
 
 The graph shows the repository before this program's edits: query first, then pass all the nodes
@@ -104,10 +108,10 @@ match. Select the whole statement, including its semicolon, for before/after ins
 
 ## Replace calls while keeping their arguments
 
-Switch logging calls without reproducing their arguments:
+Switch timer calls without reproducing their arguments:
 
 ```ts
-sg.rewrite("console.log($$$ARGS)", "logger.info($$$ARGS)", "src");
+sg.rewrite("setTimeout($$$ARGS)", "scheduler.delay($$$ARGS)", "src");
 ```
 
 `sg.rewrite(pattern, replacement, files?)` discovers, parses and writes matching files. Omit the
@@ -116,12 +120,12 @@ scope for the working directory, or pass a file, directory or glob. `$X` capture
 
 ## Change one argument and preserve the rest
 
-Migrate numeric retry limits to options objects, leaving existing options alone:
+Migrate numeric image qualities to options objects, leaving existing options alone:
 
 ```ts
-sg.rewrite("connect($URL, $RETRIES)", (m) => {
-	const retries = m.node.getMatch("RETRIES")!;
-	return retries.kind() === "number" ? retries.replace(`{ retries: ${retries.text()} }`) : null;
+sg.rewrite("thumbnail($IMAGE, $QUALITY)", (m) => {
+	const quality = m.node.getMatch("QUALITY")!;
+	return quality.kind() === "number" ? quality.replace(`{ quality: ${quality.text()} }`) : null;
 });
 ```
 
@@ -151,9 +155,9 @@ immediately within the editing workspace; select again if a later edit depends o
 ## Write files or replace plain text
 
 ```ts
-await Bun.write("src/defaults.ts", "export const retryLimit = 3;\n");
-const source = await Bun.file("src/config.ts").text();
-await Bun.write("src/config.ts", source.replace("timeoutMs: 1000", "timeoutMs: 3000"));
+await Bun.write("src/defaults.ts", "export const maxPageSize = 100;\n");
+const source = await Bun.file("src/settings.ts").text();
+await Bun.write("src/settings.ts", source.replace("pageSize: 20", "pageSize: 50"));
 ```
 
 Use repository-relative paths. Changes apply on successful exit by default; the tool reports the

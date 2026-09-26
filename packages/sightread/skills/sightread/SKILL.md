@@ -13,7 +13,7 @@ Ask everything you need in one call, as a JSON array. Names work directly, and a
 when the task gives one, like `src/api/users.ts#getUser`:
 
 ```sh
-sightread '[{"type":"references","symbol":"Row.get"},{"type":"trace","from":"Row.get","direction":"reverse"}]'
+sightread '[{"type":"references","symbol":"Session.refresh"},{"type":"trace","from":"Session.refresh","direction":"reverse"}]'
 ```
 
 - To change every use of something, ask for `references`. It lists each use with its line and text,

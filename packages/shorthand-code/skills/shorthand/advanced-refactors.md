@@ -24,17 +24,17 @@ Select and reuse the implementation rather than copying it into the program or s
 This extracts a state-independent method, leaves a delegate, and updates its direct caller:
 
 ```ts
-const pattern = { rule: { kind: "method_definition", has: { field: "name", regex: "^format$" } } };
-const method = sg.one(pattern, "writer.ts");
+const pattern = { rule: { kind: "method_definition", has: { field: "name", regex: "^print$" } } };
+const method = sg.one(pattern, "printer.ts");
 await Bun.write(
-	"table.ts",
-	'import type { Cell, FormatOptions } from "./types";\n' +
-		method.text.replace(/^format\b/, "export function renderTable"),
+	"invoice.ts",
+	'import type { Item, PrintOptions } from "./types";\n' +
+		method.text.replace(/^print\b/, "export function renderInvoice"),
 );
-sg.rewrite(method, (m) => m.node.field("body")!.replace("{ return renderTable(rows, options); }"));
-await Bun.write("writer.ts", 'import { renderTable } from "./table";\n' + (await Bun.file("writer.ts").text()));
-sg.rewrite('import { TableWriter } from "./writer"', 'import { renderTable } from "./table"', "export.ts");
-sg.rewrite("new TableWriter().format($$$ARGS)", "renderTable($$$ARGS)", "export.ts");
+sg.rewrite(method, (m) => m.node.field("body")!.replace("{ return renderInvoice(items, options); }"));
+await Bun.write("printer.ts", 'import { renderInvoice } from "./invoice";\n' + (await Bun.file("printer.ts").text()));
+sg.rewrite('import { InvoicePrinter } from "./printer"', 'import { renderInvoice } from "./invoice"', "notify.ts");
+sg.rewrite("new InvoicePrinter().print($$$ARGS)", "renderInvoice($$$ARGS)", "notify.ts");
 ```
 
 Preserve imports and dependencies; moving source does not remove its dependence on instance state.
