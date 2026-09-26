@@ -207,7 +207,14 @@ try {
 				aggregateRuns(
 					summaries
 						.filter((summary) => summary.condition === label)
-						.map(({ verified, seconds, usage, tools, drift }) => ({ verified, seconds, usage, tools, drift })),
+						.map(({ verified, providerError, seconds, usage, tools, drift }) => ({
+							verified,
+							providerError,
+							seconds,
+							usage,
+							tools,
+							drift,
+						})),
 					budgetSeconds,
 				),
 			]),

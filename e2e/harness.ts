@@ -22,6 +22,8 @@ export interface ChangeRecord {
 
 export interface EventSummary {
 	turns: number;
+	/** The model provider's error when it ended the session, which says nothing about the tools. */
+	providerError?: string;
 	tools: Record<string, number>;
 	failedTools: Record<string, number>;
 	failedCodeCalls: number;
@@ -38,6 +40,7 @@ export interface EventSummary {
 
 export interface RunMeasurement {
 	verified: boolean;
+	providerError?: string;
 	seconds: number;
 	usage: UsageTotals;
 	tools?: Record<string, number>;
@@ -137,6 +140,9 @@ export function summarizeEvents(events: JsonEvent[]): EventSummary {
 		}
 	}
 
+	const last = events.findLast((event) => event.type === "message_end" && event.message?.role === "assistant");
+	const providerError =
+		last?.message?.stopReason === "error" ? string(last.message.errorMessage) || "provider error" : undefined;
 	return {
 		turns: events.filter((event) => event.type === "turn_start").length,
 		tools,
@@ -144,6 +150,7 @@ export function summarizeEvents(events: JsonEvent[]): EventSummary {
 		failedCodeCalls: failedTools.code ?? 0,
 		toolOutcomes,
 		usage,
+		...(providerError ? { providerError } : {}),
 	};
 }
 
@@ -187,12 +194,15 @@ export function pairedOrder(run: number): ["baseline", "candidate"] | ["candidat
 
 const mean = (values: number[]) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0);
 
-export function aggregateRuns(runs: RunMeasurement[], budgetSeconds: number) {
+// Attempts the model provider cut short measure nothing about the tools, so they're counted apart.
+export function aggregateRuns(all: RunMeasurement[], budgetSeconds: number) {
+	const runs = all.filter((run) => !run.providerError);
 	const completed = runs.filter((run) => run.verified);
 	const totalCost = runs.reduce((sum, run) => sum + run.usage.cost.total, 0);
 	const measured = runs.flatMap((run) => (run.drift ? [run.drift] : []));
 	return {
 		attempts: runs.length,
+		providerErrors: all.length - runs.length,
 		verifiedCompletions: completed.length,
 		completionRate: runs.length ? completed.length / runs.length : 0,
 		budgetSeconds,
@@ -213,7 +223,6 @@ export function aggregateRuns(runs: RunMeasurement[], budgetSeconds: number) {
 	};
 }
 
-/** Copies tracked, dirty and untracked source files once, so later source edits cannot mix revisions. */
 // Share installed dependencies with the source, but point workspace packages at the frozen copy,
 // so a run imports the code it froze rather than whatever the source working tree holds later.
 async function linkDependencies(from: string, to: string, root: string): Promise<void> {
@@ -234,6 +243,7 @@ async function linkDependencies(from: string, to: string, root: string): Promise
 	}
 }
 
+/** Copies tracked, dirty and untracked source files once, so later source edits cannot mix revisions. */
 export async function freezeExtension(source: string, destination: string, label: string): Promise<FrozenExtension> {
 	source = path.resolve(source);
 	await mkdir(destination, { recursive: true });

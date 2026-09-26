@@ -110,6 +110,7 @@ test("aggregate results charge failed attempts to verified completions", () => {
 		),
 	).toEqual({
 		attempts: 2,
+		providerErrors: 0,
 		verifiedCompletions: 1,
 		completionRate: 0.5,
 		budgetSeconds: 60,
@@ -119,6 +120,34 @@ test("aggregate results charge failed attempts to verified completions", () => {
 		meanToolCalls: 0,
 		meanOutputTokens: 0,
 		drift: null,
+	});
+});
+
+test("an attempt the model provider ended is counted apart, not as the tool failing", () => {
+	const ended = summarizeEvents([
+		{ type: "turn_start" },
+		{
+			type: "message_end",
+			message: { role: "assistant", stopReason: "error", errorMessage: "Unable to verify model access right now." },
+		},
+	]);
+	expect(ended.providerError).toBe("Unable to verify model access right now.");
+	expect(
+		summarizeEvents([{ type: "message_end", message: { role: "assistant", stopReason: "stop" } }]).providerError,
+	).toBeUndefined();
+	const results = aggregateRuns(
+		[
+			{ verified: false, providerError: ended.providerError, seconds: 20, usage: usage(1) },
+			{ verified: true, seconds: 4, usage: usage(2) },
+		],
+		60,
+	);
+	expect(results).toMatchObject({
+		attempts: 1,
+		providerErrors: 1,
+		verifiedCompletions: 1,
+		completionRate: 1,
+		totalCost: 2,
 	});
 });
 
