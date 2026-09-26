@@ -26,5 +26,5 @@ sightread '[{"type":"references","symbol":"Session.refresh"},{"type":"trace","fr
 Read only the line ranges it gives. After editing, verify with the project's type check. Line numbers
 change when files do, so ask again rather than reuse old ones.
 
-In a monorepo, run it from the package whose code you're asking about. `sightread --help` lists every
-field.
+Run it from where you are. If that's the root of a monorepo, a note names the packages to run it from
+instead. `sightread --help` lists every field.
