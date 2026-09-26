@@ -11,7 +11,7 @@ Each works on its own.
 
 ![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
 
-Instead of a patch, the agent writes a Bun program that can search, rewrite syntax, and rename or move TypeScript symbols. The program edits a private copy of the repository. When it succeeds, its changes are applied and the agent sees the diff. When it fails, finished files are kept and failed edits are rolled back.
+Instead of a patch, the agent writes a Bun program that can search, rewrite syntax, and rename or move TypeScript symbols. The program edits a private copy of the repository, and the agent sees the diff of what it changed. Agents are good at improving things a step at a time, so changes are applied a whole file at a time and the agent is told which worked and which didn't.
 
 ### Install
 
