@@ -127,7 +127,7 @@ test("references include each resolved occurrence and its source line", () => {
 	]);
 	expect(run(JSON.stringify({ type: "references", symbol: "Row.get" })).out).toBe(
 		[
-			"references to Row.get: 7 in 2 files",
+			"references to Row.get (declared at src/row.ts:3): 7 in 2 files",
 			"",
 			"src/use.ts",
 			"   4:38  export function twice() { return row.get(1) + row.get(2); }",

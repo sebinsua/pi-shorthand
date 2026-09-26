@@ -200,7 +200,13 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 					shown: nodes.length,
 					nodes,
 					edges: [],
-					sections: { symbol: ref.name },
+					sections: {
+						symbol: ref.name,
+						declaration: {
+							file: paths.toRepositoryPath(local.split(sep).join("/")),
+							line: source.getLineAndCharacterOfPosition(start).line + 1,
+						},
+					},
 				};
 			}),
 		close: () =>

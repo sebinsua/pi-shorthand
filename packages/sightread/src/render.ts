@@ -113,9 +113,10 @@ export function renderText(result: GraphResult, options: { color: boolean }): st
 	if (result.type === "overview") return overviewText(result, nodes, options.color);
 	if (result.type === "references") {
 		const symbol = String(result.sections.symbol ?? "");
+		const declared = result.sections.declaration as { file: string; line: number } | undefined;
 		const files = new Set(result.nodes.map((node) => node.file));
 		const lines = [
-			`references to ${symbol}: ${result.nodes.length} in ${files.size} ${files.size === 1 ? "file" : "files"}`,
+			`references to ${symbol}${declared ? ` (declared at ${declared.file}:${declared.line})` : ""}: ${result.nodes.length} in ${files.size} ${files.size === 1 ? "file" : "files"}`,
 		];
 		for (const file of files) {
 			const references = result.nodes.filter((node) => node.file === file);
