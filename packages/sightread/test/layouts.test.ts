@@ -97,7 +97,7 @@ test("Vite root chooses the app config, reports it in text and JSON, and indexes
 	const lookup = command(root, JSON.stringify({ type: "lookup", query: "formatPrice" }));
 	expect(lookup.code).toBe(0);
 	expect(lookup.out).toContain("lookup for formatPrice (tsconfig.app.json): 1 shown");
-	expect(lookup.out).toContain("formatPrice  function  src/price.ts:1-1");
+	expect(lookup.out).toContain("formatPrice  exported function  src/price.ts:1-1");
 	const json = command(root, "--json", JSON.stringify({ type: "lookup", query: "View" }));
 	expect(json.code).toBe(0);
 	const result = JSON.parse(json.out) as Array<{

@@ -8,12 +8,15 @@ import {
 	isClassDeclaration,
 	isConstructorDeclaration,
 	isEnumDeclaration,
+	isExportAssignment,
+	isExportDeclaration,
 	isFunctionDeclaration,
 	isGetAccessorDeclaration,
 	isIdentifier,
 	isInterfaceDeclaration,
 	isMethodDeclaration,
 	isMethodSignatureDeclaration,
+	isNamedExports,
 	isPropertyDeclaration,
 	isPropertySignatureDeclaration,
 	isSetAccessorDeclaration,
@@ -32,6 +35,8 @@ export interface Declaration {
 	start: number;
 	end: number;
 	codeStart: number;
+	/** A top-level declaration the module exports, by an `export` modifier or its own export list. */
+	exported?: true;
 }
 
 /** Use the graph's kind for a parsed declaration. */
@@ -59,6 +64,7 @@ export interface SymbolRef {
 export interface RangeIndex {
 	declarations(file: string): Promise<Declaration[] | undefined>;
 	rangesFor(ref: SymbolRef): Promise<Array<{ start: number; end: number }> | undefined>;
+	exportedFor(ref: SymbolRef): Promise<boolean>;
 	close(): Promise<void>;
 }
 
@@ -142,13 +148,7 @@ export function createDeclarationParser(): DeclarationParser {
 	};
 }
 
-function isDefault(node: Node): boolean {
-	return (
-		"modifiers" in node &&
-		Array.isArray(node.modifiers) &&
-		node.modifiers.some((modifier: Node) => modifier.kind === SyntaxKind.DefaultKeyword)
-	);
-}
+const isDefault = (node: Node) => hasModifier(node, SyntaxKind.DefaultKeyword);
 
 // A declaration's own doc comments belong to it; a file's leading `@module` comment does not.
 const fileDoc = /@(?:module|packageDocumentation|file|fileoverview)\b/;
@@ -165,32 +165,55 @@ function documentedStart(sourceFile: SourceFile, node: Node): number {
 	return start;
 }
 
+function hasModifier(node: Node, kind: SyntaxKind): boolean {
+	return (
+		"modifiers" in node &&
+		Array.isArray(node.modifiers) &&
+		node.modifiers.some((modifier: Node) => modifier.kind === kind)
+	);
+}
+
 function collectDeclarations(sourceFile: SourceFile): Declaration[] {
 	const declarations: Declaration[] = [];
 	const line = (position: number) => sourceFile.getLineAndCharacterOfPosition(position).line + 1;
-	const add = (name: string, kind: DeclarationKind, node: Node) => {
+	// Names this module exports through its own `export { a, b as c }` or `export default a`.
+	const listed = new Set<string>();
+	for (const statement of sourceFile.statements) {
+		if (
+			isExportDeclaration(statement) &&
+			!statement.moduleSpecifier &&
+			statement.exportClause &&
+			isNamedExports(statement.exportClause)
+		)
+			for (const element of statement.exportClause.elements) listed.add((element.propertyName ?? element.name).text);
+		else if (isExportAssignment(statement) && isIdentifier(statement.expression)) listed.add(statement.expression.text);
+	}
+	const add = (name: string, kind: DeclarationKind, node: Node, topLevel = false) => {
 		declarations.push({
 			name,
 			kind,
 			start: line(documentedStart(sourceFile, node)),
 			end: line(Math.max(node.getStart(sourceFile), node.end - 1)),
 			codeStart: line(node.getStart(sourceFile)),
+			...(topLevel && (hasModifier(node, SyntaxKind.ExportKeyword) || listed.has(name))
+				? { exported: true as const }
+				: {}),
 		});
 	};
 	const addVariables = (statement: Node, prefix = "") => {
 		if (!isVariableStatement(statement)) return;
 		for (const variable of statement.declarationList.declarations) {
-			if (isIdentifier(variable.name)) add(`${prefix}${variable.name.text}`, "variable", statement);
+			if (isIdentifier(variable.name)) add(`${prefix}${variable.name.text}`, "variable", statement, prefix === "");
 		}
 	};
 	for (const statement of sourceFile.statements) {
 		if (isFunctionDeclaration(statement) && (statement.name || isDefault(statement))) {
 			const name = statement.name?.text ?? "default";
-			add(name, "function", statement);
+			add(name, "function", statement, true);
 			for (const inner of statement.body?.statements ?? []) addVariables(inner, `${name}.`);
 		} else if (isClassDeclaration(statement) && (statement.name || isDefault(statement))) {
 			const name = statement.name?.text ?? "default";
-			add(name, "class", statement);
+			add(name, "class", statement, true);
 			for (const member of statement.members) {
 				if (isConstructorDeclaration(member)) add(`${name}.__constructor`, "method", member);
 				else if (isMethodDeclaration(member) || isGetAccessorDeclaration(member) || isSetAccessorDeclaration(member))
@@ -199,14 +222,14 @@ function collectDeclarations(sourceFile: SourceFile): Declaration[] {
 			}
 		} else if (isInterfaceDeclaration(statement)) {
 			const name = statement.name.text;
-			add(name, "interface", statement);
+			add(name, "interface", statement, true);
 			for (const member of statement.members) {
 				if (isMethodSignatureDeclaration(member)) add(`${name}.${member.name.getText(sourceFile)}`, "method", member);
 				else if (isPropertySignatureDeclaration(member))
 					add(`${name}.${member.name.getText(sourceFile)}`, "property", member);
 			}
-		} else if (isTypeAliasDeclaration(statement)) add(statement.name.text, "type", statement);
-		else if (isEnumDeclaration(statement)) add(statement.name.text, "enum", statement);
+		} else if (isTypeAliasDeclaration(statement)) add(statement.name.text, "type", statement, true);
+		else if (isEnumDeclaration(statement)) add(statement.name.text, "enum", statement, true);
 		else addVariables(statement);
 	}
 	return declarations;
@@ -280,19 +303,14 @@ export function createRangeIndex(root: string, options: { maxFiles?: number } = 
 	return {
 		declarations,
 		async rangesFor(ref) {
-			const parsed = await declarations(ref.file);
-			if (!parsed) return undefined;
-			const matches = parsed.filter(
-				(declaration) =>
-					declaration.name === ref.name &&
-					(declaration.kind === ref.kind ||
-						(ref.kind === "property" && declaration.kind === "variable") ||
-						(ref.kind === "variable" && declaration.kind === "property")),
-			);
+			const matches = await matching(ref);
 			if (!matches.length) return undefined;
 			const mergeable = ["function", "interface", "method", "enum"].includes(ref.kind);
 			const onLine = ref.line === undefined ? [] : matches.filter((declaration) => declaration.codeStart === ref.line);
 			return (mergeable || !onLine.length ? matches : onLine).map(({ start, end }) => ({ start, end }));
+		},
+		async exportedFor(ref) {
+			return (await matching(ref)).some((declaration) => declaration.exported);
 		},
 		async close() {
 			closed = true;
@@ -301,4 +319,16 @@ export function createRangeIndex(root: string, options: { maxFiles?: number } = 
 			cache.clear();
 		},
 	};
+
+	async function matching(ref: SymbolRef): Promise<Declaration[]> {
+		const parsed = await declarations(ref.file);
+		if (!parsed) return [];
+		return parsed.filter(
+			(declaration) =>
+				declaration.name === ref.name &&
+				(declaration.kind === ref.kind ||
+					(ref.kind === "property" && declaration.kind === "variable") ||
+					(ref.kind === "variable" && declaration.kind === "property")),
+		);
+	}
 }

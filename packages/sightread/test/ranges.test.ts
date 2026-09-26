@@ -55,7 +55,7 @@ function entry(declarations: Declaration[], name: string, kind: Declaration["kin
 test("parses every supported declaration and exact source ranges", async () => {
 	const declarations = await parseDeclarations("sample.ts", source);
 	expect(entry(declarations, "outer", "function")).toEqual([
-		{ name: "outer", kind: "function", start: 1, codeStart: 3, end: 6 },
+		{ name: "outer", kind: "function", start: 1, codeStart: 3, end: 6, exported: true },
 	]);
 	expect(entry(declarations, "outer.inner", "variable")).toEqual([
 		{ name: "outer.inner", kind: "variable", start: 4, codeStart: 4, end: 4 },
@@ -71,7 +71,7 @@ test("parses every supported declaration and exact source ranges", async () => {
 	expect(entry(declarations, "Alias", "type")[0]?.start).toBe(19);
 	expect(entry(declarations, "Colour", "enum")[0]?.start).toBe(20);
 	expect(entry(declarations, "Memoed", "variable")).toEqual([
-		{ name: "Memoed", kind: "variable", start: 21, codeStart: 21, end: 24 },
+		{ name: "Memoed", kind: "variable", start: 21, codeStart: 21, end: 24, exported: true },
 	]);
 });
 
@@ -93,6 +93,25 @@ test("a file's @module comment isn't part of the first declaration, but its own 
 	expect(entry(declarations, "first", "variable").map(({ start }) => start)).toEqual([6]);
 	expect(entry(declarations, "second", "variable").map(({ start }) => start)).toEqual([8]);
 	expect(entry(declarations, "third", "function").map(({ start }) => start)).toEqual([13]);
+});
+
+test("marks exactly the top-level declarations a module exports", async () => {
+	const declarations = await parseDeclarations(
+		"sample.ts",
+		[
+			"export function modified() {}",
+			"function listed() {}",
+			"function renamed() {}",
+			"function hidden() {}",
+			"const byDefault = 1;",
+			"export class Box { method() {} }",
+			"export { listed, renamed as alias };",
+			"export default byDefault;",
+		].join("\n"),
+	);
+	const exported = (name: string) => declarations.find((declaration) => declaration.name === name)?.exported ?? false;
+	expect(["modified", "listed", "renamed", "byDefault", "Box"].map(exported)).toEqual([true, true, true, true, true]);
+	expect(["hidden", "Box.method"].map(exported)).toEqual([false, false]);
 });
 
 test("ranges anonymous default declarations using names and kinds from the live graph", async () => {
@@ -134,10 +153,10 @@ test("keeps the TSX extension when parsing a realistic JSX component", async () 
 	const fixtureText = await readFile(itemListFixture, "utf8");
 	const tsx = await parseDeclarations("ItemList.tsx", fixtureText);
 	expect(entry(tsx, "ItemList", "function")).toEqual([
-		{ name: "ItemList", kind: "function", start: 5, codeStart: 6, end: 25 },
+		{ name: "ItemList", kind: "function", start: 5, codeStart: 6, end: 25, exported: true },
 	]);
 	expect(entry(tsx, "after", "function")).toEqual([
-		{ name: "after", kind: "function", start: 29, codeStart: 29, end: 31 },
+		{ name: "after", kind: "function", start: 29, codeStart: 29, end: 31, exported: true },
 	]);
 	const ts = await parseDeclarations("ItemList.ts", fixtureText);
 	expect(entry(ts, "ItemList", "function")[0]?.end).toBe(11);

@@ -6,7 +6,8 @@ export const bold = (value: string, color: boolean) => (color ? `\u001b[1m${valu
 export const dim = (value: string, color: boolean) => (color ? `\u001b[2m${value}\u001b[0m` : value);
 export const unnamedTest = (node: GraphNode) => !!node.site && node.name === basename(node.file);
 export const displayName = (node: GraphNode) => (unnamedTest(node) ? "" : node.name);
-export const displayKind = (node: GraphNode) => node.kind ?? (unnamedTest(node) ? "test" : "reference");
+export const displayKind = (node: GraphNode) =>
+	node.kind ? `${node.exported ? "exported " : ""}${node.kind}` : unnamedTest(node) ? "test" : "reference";
 
 export function range(node: GraphNode): string {
 	if (node.site) return `${node.site.start}${node.site.end === node.site.start ? "" : `-${node.site.end}`}`;

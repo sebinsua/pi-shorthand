@@ -60,8 +60,8 @@ test("lookup ranked text is complete", () => {
 			"lookup for greet: 2 shown",
 			"",
 			"hits",
-			"  = greet    function  src/model.ts:1-1",
-			"    Greeter  class     src/model.ts:3-7",
+			"  = greet    exported function  src/model.ts:1-1",
+			"    Greeter  exported class     src/model.ts:3-7",
 		].join("\n"),
 	);
 });
@@ -72,8 +72,8 @@ test("reverse trace text is complete and each edge has one evidence line", () =>
 			"trace reverse from greet: 1 shown",
 			"",
 			"src/model.ts",
-			"  1-1  greet   function",
-			"  2-2  caller  function",
+			"  1-1  greet   exported function",
+			"  2-2  caller  exported function",
 			"",
 			"hops",
 			"  caller → greet  calls at model.ts:2",
@@ -82,7 +82,9 @@ test("reverse trace text is complete and each edge has one evidence line", () =>
 });
 
 test("details text is complete", () => {
-	expect(outputs.get("details")).toBe(["details: 1 shown", "", "src/model.ts", "  1-1  greet  function"].join("\n"));
+	expect(outputs.get("details")).toBe(
+		["details: 1 shown", "", "src/model.ts", "  1-1  greet  exported function"].join("\n"),
+	);
 });
 
 test("tour text is complete, including sites and nested flow", () => {
@@ -91,8 +93,8 @@ test("tour text is complete, including sites and nested flow", () => {
 			"tour for greet: 2 shown",
 			"",
 			"entrypoints",
-			"    greet   function  src/model.ts:1-1",
-			"    caller  function  src/model.ts:2-2",
+			"    greet   exported function  src/model.ts:1-1",
+			"    caller  exported function  src/model.ts:2-2",
 			"",
 			"src/model.ts",
 			"  2  caller  reference",
@@ -119,16 +121,16 @@ test("overview text is complete", () => {
 			"  src  2 files  4 exported",
 			"",
 			"hotspots",
-			"  1. View    function  src/View.tsx:2-6  fan-in 0, fan-out 2",
-			"  2. Row     type      src/View.tsx:1-1  fan-in 1, fan-out 0",
-			"  3. caller  function  src/model.ts:2-2  fan-in 0, fan-out 1",
-			"  4. greet   function  src/model.ts:1-1  fan-in 1, fan-out 0",
+			"  1. View    exported function  src/View.tsx:2-6  fan-in 0, fan-out 2",
+			"  2. Row     type               src/View.tsx:1-1  fan-in 1, fan-out 0",
+			"  3. caller  exported function  src/model.ts:2-2  fan-in 0, fan-out 1",
+			"  4. greet   exported function  src/model.ts:1-1  fan-in 1, fan-out 0",
 			"",
 			"publicApi",
-			"  1. View     function  src/View.tsx:2-6",
-			"  2. caller   function  src/model.ts:2-2",
-			"  3. greet    function  src/model.ts:1-1",
-			"  4. Greeter  class     src/model.ts:3-7",
+			"  1. View     exported function  src/View.tsx:2-6",
+			"  2. caller   exported function  src/model.ts:2-2",
+			"  3. greet    exported function  src/model.ts:1-1",
+			"  4. Greeter  exported class     src/model.ts:3-7",
 		].join("\n"),
 	);
 });
@@ -177,11 +179,11 @@ test("overview keeps ranked sections, relationship counts, and omits the absolut
 			"  src  2 files  4 exported",
 			"",
 			"hotspots",
-			"  1. caller  function  src/model.ts:2-2  fan-in 5, fan-out 1",
-			"  2. greet   function  src/model.ts:1-1  fan-in 2, fan-out 0",
+			"  1. caller  exported function  src/model.ts:2-2  fan-in 5, fan-out 1",
+			"  2. greet   exported function  src/model.ts:1-1  fan-in 2, fan-out 0",
 			"",
 			"publicApi",
-			"  1. greet  function  src/model.ts:1-1",
+			"  1. greet  exported function  src/model.ts:1-1",
 		].join("\n"),
 	);
 });

@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import { API, type Snapshot } from "typescript/unstable/async";
 import {
 	getTouchingPropertyName,
+	isCallExpression,
 	isClassDeclaration,
 	isEnumDeclaration,
 	isFunctionDeclaration,
@@ -12,6 +13,8 @@ import {
 	isInterfaceDeclaration,
 	isMethodDeclaration,
 	isMethodSignatureDeclaration,
+	isNewExpression,
+	isPropertyAccessExpression,
 	isPropertyDeclaration,
 	isPropertySignatureDeclaration,
 	isSetAccessorDeclaration,
@@ -74,6 +77,15 @@ function findDeclaration(source: SourceFile, name: string): Node | undefined {
 	};
 	visit(source);
 	return found;
+}
+
+// The call or `new` a reference is the callee of, so a call split over lines can be shown whole.
+function enclosingCall(reference: Node): Node | undefined {
+	let callee = reference;
+	if (callee.parent && isPropertyAccessExpression(callee.parent) && callee.parent.name === callee)
+		callee = callee.parent;
+	const call = callee.parent;
+	return call && (isCallExpression(call) || isNewExpression(call)) && call.expression === callee ? call : undefined;
 }
 
 /** Keep one TypeScript language service for a daemon's lifetime, brought up to date before each query. */
@@ -166,7 +178,9 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 					const { line, character } = origin.getLineAndCharacterOfPosition(offset);
 					const end = origin.getLineAndCharacterOfPosition(reference.end);
 					if (!lines.has(origin.fileName)) lines.set(origin.fileName, origin.text.split(/\r\n|\n|\r/));
-					const text = lines.get(origin.fileName)?.[line] ?? "";
+					const call = enclosingCall(reference);
+					const last = call ? origin.getLineAndCharacterOfPosition(call.end).line : line;
+					const text = (lines.get(origin.fileName) ?? []).slice(line, last + 1).join("\n");
 					const outputFile = paths.toRepositoryPath(path.split(sep).join("/"));
 					nodes.push({
 						handle: `${outputFile}#reference:${line + 1}:${character + 1}:${end.character + 1}`,
@@ -175,6 +189,7 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 						line: line + 1,
 						col: character + 1,
 						endCol: end.character + 1,
+						...(last > line ? { endLine: last + 1 } : {}),
 						text,
 						ranges: null,
 					});

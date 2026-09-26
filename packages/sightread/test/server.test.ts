@@ -139,7 +139,7 @@ test("a graph query leaves a clean nested git checkout without node_modules or c
 		delete process.env.TTSC_CACHE_DIR;
 		const result = await cli("--cwd", disposable.root, JSON.stringify({ type: "lookup", query: "cachedSymbol" }));
 		expect(result.code).toBe(0);
-		expect(result.out).toContain("cachedSymbol  function  client/src/model.ts:1-1");
+		expect(result.out).toContain("cachedSymbol  exported function  client/src/model.ts:1-1");
 		const status = git(["status", "--short", "--ignored"]);
 		expect(status.exitCode).toBe(0);
 		expect(status.stdout.toString()).toBe("");
@@ -163,7 +163,7 @@ test("an existing TTSC_CACHE_DIR is kept for the upstream graph child", async ()
 		process.env.TTSC_CACHE_DIR = cache;
 		const result = await cli("--cwd", disposable.root, JSON.stringify({ type: "lookup", query: "customCacheSymbol" }));
 		expect(result.code).toBe(0);
-		expect(result.out).toContain("customCacheSymbol  function  src/model.ts:1-1");
+		expect(result.out).toContain("customCacheSymbol  exported function  src/model.ts:1-1");
 		expect(existsSync(cache)).toBe(true);
 	} finally {
 		await stopServer(current);
@@ -185,7 +185,7 @@ test("a long XDG runtime directory falls back for query, ps, and stop", async ()
 		const query = await cli("--cwd", disposable.root, JSON.stringify({ type: "lookup", query: "fallback" }));
 		expect(query.code).toBe(0);
 		expect(query.err).toBe("");
-		expect(query.out).toContain("fallback  function  src/model.ts:1-1");
+		expect(query.out).toContain("fallback  exported function  src/model.ts:1-1");
 		const listed = await cli("ps");
 		expect(listed.code).toBe(0);
 		expect(listed.out).toContain(disposable.root);
@@ -217,7 +217,7 @@ test("an owned fallback parent is tightened", async () => {
 		const query = await cli("--cwd", disposable.root, JSON.stringify({ type: "lookup", query: "safeFallback" }));
 		expect(query.code).toBe(0);
 		expect(query.err).toBe("");
-		expect(query.out).toContain("safeFallback  function  src/model.ts:1-1");
+		expect(query.out).toContain("safeFallback  exported function  src/model.ts:1-1");
 	} finally {
 		await stopServer(project(disposable.root));
 		process.env.XDG_RUNTIME_DIR = runtime;
@@ -247,11 +247,11 @@ test("a symlinked state parent is never followed", () => {
 test("reuses one daemon for sequential callers", async () => {
 	const one = await connect(project(first.root));
 	const output = await one.query(lookup("greet"), { json: false });
-	expect(output).toContain("greet  function  src/model.ts:1-1");
+	expect(output).toContain("greet  exported function  src/model.ts:1-1");
 	const two = await connect(project(first.root));
 	const warm = await two.query(lookup("greet"), { json: false });
 	expect(two.pid).toBe(one.pid);
-	expect(warm).toContain("greet  function  src/model.ts:1-1");
+	expect(warm).toContain("greet  exported function  src/model.ts:1-1");
 }, 30_000);
 
 test("concurrent callers share one daemon", async () => {
@@ -317,7 +317,7 @@ test("concurrent CLI processes start one server", async () => {
 	for (const output of outputs) {
 		expect(output.code).toBe(0);
 		expect(output.err).toBe("");
-		expect(output.out).toContain("greet  function  src/model.ts:1-1");
+		expect(output.out).toContain("greet  exported function  src/model.ts:1-1");
 	}
 	expect((await listServers()).filter(({ project: root }) => root === first.root)).toHaveLength(1);
 }, 30_000);
@@ -328,7 +328,7 @@ test("replaces a stale socket", async () => {
 	mkdirSync(paths.directory, { recursive: true });
 	writeFileSync(paths.socket, "stale");
 	const one = await connect(project(first.root));
-	expect(await one.query(lookup("greet"), {})).toContain("greet  function  src/model.ts:1-1");
+	expect(await one.query(lookup("greet"), {})).toContain("greet  exported function  src/model.ts:1-1");
 }, 30_000);
 
 test("refreshes source without restarting", async () => {
@@ -338,7 +338,7 @@ test("refreshes source without restarting", async () => {
 		"export function greet() { return 1; }\nexport function freshSymbol() { return greet(); }\n",
 	);
 	const output = await one.query(lookup("freshSymbol"), { json: false });
-	expect(output).toContain("freshSymbol  function  src/model.ts:2-2");
+	expect(output).toContain("freshSymbol  exported function  src/model.ts:2-2");
 	expect((await connect(project(first.root))).pid).toBe(one.pid);
 }, 30_000);
 
@@ -496,7 +496,7 @@ test("a cold start in one project does not block a warm query in another", async
 		await until(async () => existsSync(serverPaths(project(first.root)).lock));
 		const start = performance.now();
 		const output = await (await connect(project(second.root))).query(lookup("other"), {});
-		expect(output).toContain("other  function  src/other.ts:1-1");
+		expect(output).toContain("other  exported function  src/other.ts:1-1");
 		expect(performance.now() - start).toBeLessThan(1500);
 		expect(started).toBe(false);
 		await cold;
@@ -533,7 +533,7 @@ test("a reset query socket does not kill the daemon", async () => {
 		);
 		const start = performance.now();
 		const output = await current.query(lookup("greet"), {});
-		expect(output).toContain("greet  function  src/model.ts:1-1");
+		expect(output).toContain("greet  exported function  src/model.ts:1-1");
 		expect(performance.now() - start).toBeGreaterThanOrEqual(450);
 		expect((await connect(project(first.root))).pid).toBe(current.pid);
 	} finally {

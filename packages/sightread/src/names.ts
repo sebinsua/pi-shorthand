@@ -32,19 +32,35 @@ function closeName(wanted: string, candidate: string): boolean {
 	return previous[right.length] <= limit;
 }
 
+// Agents carry `symbol` over from `references`; take it wherever a request names one symbol.
+function withAliases(request: Record<string, unknown>): Record<string, unknown> {
+	if (typeof request.symbol !== "string") return request;
+	const { symbol, ...rest } = request;
+	if (request.type === "details" && rest.handles === undefined) return { ...rest, handles: [symbol] };
+	if (request.type === "trace" && rest.from === undefined) return { ...rest, from: symbol };
+	return request;
+}
+
+// A name may carry its file, `src/lib/pricing.ts#applyDiscount`, to choose among same-named symbols.
+function qualified(value: string): [file: string, name: string] | undefined {
+	const at = value.lastIndexOf("#");
+	return at > 0 && !fromHandle(value) ? [value.slice(0, at), value.slice(at + 1)] : undefined;
+}
+
 /** Replace bare names in handle fields before sending requests upstream. */
 export async function resolveNamesSettled(
 	client: GraphClient,
-	requests: Record<string, unknown>[],
+	original: Record<string, unknown>[],
 	paths?: PathMapper,
 ): Promise<Array<{ request: Record<string, unknown> } | { error: string }>> {
+	const requests = original.map(withAliases);
 	const names = [
 		...new Set(
 			requests.flatMap((request) =>
 				(fields[String(request.type)] ?? []).flatMap((field) => {
 					const value = request[field];
 					return (Array.isArray(value) ? value : [value]).filter(
-						(item): item is string => typeof item === "string" && !item.includes("#"),
+						(item): item is string => typeof item === "string" && (!item.includes("#") || !!qualified(item)),
 					);
 				}),
 			),
@@ -53,7 +69,8 @@ export async function resolveNamesSettled(
 	if (!names.length) return requests.map((request) => ({ request: convertHandles(request, paths) }));
 	const queries = [
 		...new Set(
-			names.flatMap((name) => {
+			names.flatMap((given) => {
+				const name = qualified(given)?.[1] ?? given;
 				const last = name.split(".").at(-1)!;
 				return [name, last, last.slice(0, 3)];
 			}),
@@ -70,17 +87,22 @@ export async function resolveNamesSettled(
 	};
 	const resolved = new Map<string, string | Error>();
 	for (let index = 0; index < names.length; index++) {
-		const name = names[index];
-		const handles = hitsFor(name);
+		const given = names[index];
+		const [file, name]: [string | undefined, string] = qualified(given) ?? [undefined, given];
+		const inFile = (handle: string) =>
+			file === undefined ||
+			fromHandle(paths?.toRepositoryHandle(handle) ?? handle)?.file === file ||
+			fromHandle(handle)?.file === file;
+		const handles = hitsFor(name).filter(inFile);
 		const exact = handles.filter((handle) => {
 			const parsed = fromHandle(handle);
 			return parsed?.name === name || parsed?.name.split(".").at(-1) === name;
 		});
 		if (exact.length > 1)
 			resolved.set(
-				name,
+				given,
 				new Error(
-					`${name} is ambiguous; use a handle: ${exact
+					`${given} is ambiguous; use a handle: ${exact
 						.slice(0, 10)
 						.map((id) => paths?.toRepositoryHandle(id) ?? id)
 						.join(", ")}`,
@@ -91,9 +113,9 @@ export async function resolveNamesSettled(
 			const candidates = handles.length ? handles : hitsFor(last).length ? hitsFor(last) : hitsFor(last.slice(0, 3));
 			const nearest = candidates.filter((id) => closeName(name, fromHandle(id)!.name));
 			resolved.set(
-				name,
+				given,
 				new Error(
-					`${name} not found${
+					`${given} not found${
 						nearest.length
 							? `; nearest: ${nearest
 									.slice(0, 10)
@@ -103,7 +125,7 @@ export async function resolveNamesSettled(
 					}`,
 				),
 			);
-		} else resolved.set(name, exact[0]);
+		} else resolved.set(given, exact[0]);
 	}
 	return requests.map((request) => {
 		const copy = { ...request };

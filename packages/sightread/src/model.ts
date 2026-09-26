@@ -13,11 +13,15 @@ export interface GraphNode {
 	ranges: { start: number; end: number }[] | null;
 	site?: { start: number; end: number };
 	exact?: true;
+	/** Exported from its module. */
+	exported?: true;
 	fanIn?: number;
 	fanOut?: number;
 	line?: number;
 	col?: number;
 	endCol?: number;
+	/** Last line of a reference's call when it spans several; `text` then holds every line. */
+	endLine?: number;
 	text?: string;
 }
 
@@ -228,6 +232,9 @@ export async function normalizeResult(
 			pending.push(
 				ranges.rangesFor({ name: ref.name, file: ref.file, kind: ref.kind, line: ref.line }).then((found) => {
 					node.ranges = found?.length ? found : null;
+				}),
+				ranges.exportedFor({ name: ref.name, file: ref.file, kind: ref.kind, line: ref.line }).then((exported) => {
+					if (exported) node.exported = true;
 				}),
 			);
 		return handle;

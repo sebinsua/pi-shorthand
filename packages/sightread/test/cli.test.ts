@@ -151,7 +151,7 @@ test("help keeps every line of a multiline field description indented", () => {
 test("lookup and reverse trace print live ranges and edges", () => {
 	const lookup = run("--cwd", fixture.root, JSON.stringify({ type: "lookup", query: "greet" }));
 	expect(lookup.code).toBe(0);
-	expect(lookup.out).toContain("hits\n  = greet  function  src/model.ts:1-1");
+	expect(lookup.out).toContain("hits\n  = greet  exported function  src/model.ts:1-1");
 	const trace = run("--cwd", fixture.root, JSON.stringify({ type: "trace", from: "greet", direction: "reverse" }));
 	expect(trace.code).toBe(0);
 	expect(trace.out).toContain("trace reverse from greet: 1 shown");

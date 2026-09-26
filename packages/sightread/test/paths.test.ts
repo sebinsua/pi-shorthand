@@ -65,7 +65,7 @@ test("text, JSON, library, raw, and round-trip handles use their promised path b
 		expect(lookup.sections.hits).toContain(handle);
 		expect(lookup.nodes.find((node) => node.handle === handle)?.file).toBe("client/src/ui/find.ts");
 		expect(renderText(lookup, { color: false })).toBe(
-			"lookup: 2 shown\n\nhits\n  = findProject  function  client/src/ui/find.ts:1-1\n    callProject  function  client/src/ui/call.ts:2-2",
+			"lookup: 2 shown\n\nhits\n  = findProject  exported function  client/src/ui/find.ts:1-1\n    callProject  exported function  client/src/ui/call.ts:2-2",
 		);
 		for (const node of lookup.nodes) {
 			const details = await graph.query({ type: "details", handles: [node.handle] });
@@ -89,7 +89,7 @@ test("text, JSON, library, raw, and round-trip handles use their promised path b
 		const collision = await graph.query({ type: "details", handles: ["client/src/other.ts#other:function"] });
 		expect(collision.nodes.map((item) => item.handle)).toContain("client/src/other.ts#other:function");
 		expect(cli(JSON.stringify({ type: "lookup", query: "findProject" })).out).toBe(
-			"lookup for findProject: 2 shown\n\nhits\n  = findProject  function  client/src/ui/find.ts:1-1\n    callProject  function  client/src/ui/call.ts:2-2",
+			"lookup for findProject: 2 shown\n\nhits\n  = findProject  exported function  client/src/ui/find.ts:1-1\n    callProject  exported function  client/src/ui/call.ts:2-2",
 		);
 		const json = cli("--json", JSON.stringify({ type: "lookup", query: "findProject" }));
 		expect(json.code).toBe(0);

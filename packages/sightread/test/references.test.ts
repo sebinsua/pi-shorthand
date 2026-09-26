@@ -101,7 +101,7 @@ test("references include each resolved occurrence and its source line", () => {
 			endCol: 54,
 			text: "export function twice() { return row.get(1) + row.get(2); }",
 		},
-		{ file: "src/use.ts", line: 6, col: 4, endCol: 7, text: "  .get(" },
+		{ file: "src/use.ts", line: 6, col: 4, endCol: 7, text: "  .get(\n    3,\n  ); }" },
 		{ file: "src/use.ts", line: 9, col: 42, endCol: 45, text: "export function optional() { return row?.get(0); }" },
 		{
 			file: "src/use.ts",
@@ -133,6 +133,8 @@ test("references include each resolved occurrence and its source line", () => {
 			"   4:38  export function twice() { return row.get(1) + row.get(2); }",
 			"   4:51  export function twice() { return row.get(1) + row.get(2); }",
 			"    6:4  .get(",
+			"           3,",
+			"         ); }",
 			"   9:42  export function optional() { return row?.get(0); }",
 			"  10:64  export function throughInterface(value: Getter) { return value.get(4); }",
 			"  11:60  export function throughExport() { return new ExportedRow().get(5); }",
@@ -248,4 +250,27 @@ test("colour dims each line and keeps its own reference bright", () => {
 		"  4:13  return row.get(1) + row.get(2);",
 		"  4:26  return row.get(1) + row.get(2);",
 	]);
+});
+
+test("a single symbol, qualified by its file, works in details and trace", () => {
+	const output = run(
+		"--json",
+		JSON.stringify([
+			{ type: "details", symbol: "src/row.ts#Row.get" },
+			{ type: "trace", symbol: "src/row.ts#Row.get", direction: "reverse" },
+			{ type: "references", symbol: "src/row.ts#Row.get" },
+		]),
+	);
+	expect(output.code).toBe(0);
+	const [details, trace, references] = JSON.parse(output.out) as Array<{
+		type: string;
+		nodes: Array<{ handle: string; exported?: true; line?: number; endLine?: number }>;
+	}>;
+	expect(details.type).toBe("details");
+	expect(details.nodes.map(({ handle }) => handle)).toContain("src/row.ts#Row.get:method");
+	expect(trace.type).toBe("trace");
+	expect(references.nodes.find(({ line }) => line === 6)?.endLine).toBe(8);
+	const missing = run(JSON.stringify({ type: "details", symbol: "src/use.ts#Row.get" }));
+	expect(missing.code).toBe(1);
+	expect(missing.err).toContain("src/use.ts#Row.get not found");
 });

@@ -8,6 +8,7 @@ const values = [{ result: { type: "lookup", hits: [] }, audit: "keep" }, [{ type
 const ranges: RangeIndex = {
 	declarations: async () => undefined,
 	rangesFor: async () => undefined,
+	exportedFor: async () => false,
 	close: async () => {},
 };
 const client: GraphClient = {
