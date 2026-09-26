@@ -72,6 +72,7 @@ writeFileSync(join(fresh, "src/row.ts"), "export class Row { get(i: number) { re
 afterAll(() => {
 	run("stop");
 	runIn(fresh, "stop");
+	runIn(wide, "stop");
 	rmSync(repository, { recursive: true, force: true });
 	rmSync(runtime, { recursive: true, force: true });
 });
@@ -127,20 +128,21 @@ test("references include each resolved occurrence and its source line", () => {
 	]);
 	expect(run(JSON.stringify({ type: "references", symbol: "Row.get" })).out).toBe(
 		[
-			"references to Row.get (declared at src/row.ts:3): 7 in 2 files",
+			"references to Row.get: 7 in 2 files",
+			"declared at src/row.ts:3  get(i: number) { return i; }",
 			"",
 			"src/use.ts",
-			"   4:38  export function twice() { return row.get(1) + row.get(2); }",
-			"   4:51  export function twice() { return row.get(1) + row.get(2); }",
-			"    6:4  .get(",
-			"           3,",
-			"         ); }",
-			"   9:42  export function optional() { return row?.get(0); }",
-			"  10:64  export function throughInterface(value: Getter) { return value.get(4); }",
-			"  11:60  export function throughExport() { return new ExportedRow().get(5); }",
+			"   4:38  in twice  export function twice() { return row.get(1) + row.get(2); }",
+			"   4:51  in twice  export function twice() { return row.get(1) + row.get(2); }",
+			"    6:4  in multiline  .get(",
+			`${" ".repeat(25)}3,`,
+			`${" ".repeat(23)}); }`,
+			"   9:42  in optional  export function optional() { return row?.get(0); }",
+			"  10:64  in throughInterface  export function throughInterface(value: Getter) { return value.get(4); }",
+			"  11:60  in throughExport  export function throughExport() { return new ExportedRow().get(5); }",
 			"",
 			"src/View.tsx",
-			"  5:32  return <main data-count={row.get(8)}><header><h1>Rows</h1></header><section>",
+			"  5:32  in View  return <main data-count={row.get(8)}><header><h1>Rows</h1></header><section>",
 		].join("\n"),
 	);
 });
@@ -273,4 +275,79 @@ test("a single symbol, qualified by its file, works in details and trace", () =>
 	const missing = run(JSON.stringify({ type: "details", symbol: "src/use.ts#Row.get" }));
 	expect(missing.code).toBe(1);
 	expect(missing.err).toContain("src/use.ts#Row.get not found");
+});
+
+test("each reference names the declaration it sits in and the call it makes", () => {
+	const [result] = JSON.parse(run("--json", JSON.stringify({ type: "references", symbol: "Row.get" })).out) as Array<{
+		nodes: Array<{
+			line: number;
+			col: number;
+			in?: { handle: string; name: string; kind: string; start: number; end: number; exported?: true };
+			call?: { line: number; col: number; endLine: number; endCol: number; arguments: number };
+		}>;
+		sections: { declaration: { file: string; line: number; text: string } };
+	}>;
+	expect(result.sections.declaration).toEqual({ file: "src/row.ts", line: 3, text: "get(i: number) { return i; }" });
+	const at = (line: number, col: number) => result.nodes.find((node) => node.line === line && node.col === col)!;
+	expect(at(4, 38).in).toEqual({
+		handle: "src/use.ts#twice:function",
+		name: "twice",
+		kind: "function",
+		start: 4,
+		end: 4,
+		exported: true,
+	});
+	expect(at(4, 38).call).toEqual({ line: 4, col: 34, endLine: 4, endCol: 44, arguments: 1 });
+	expect(at(6, 4).call).toEqual({ line: 5, col: 38, endLine: 8, endCol: 4, arguments: 1 });
+});
+
+const wide = join(repository, "wide");
+const wideFiles: Record<string, string> = {
+	"tsconfig.json": '{"compilerOptions":{"strict":true,"module":"nodenext"}}\n',
+	"src/target.ts": "export function target() { return 1; }\n",
+	"src/hub.ts": `${Array.from({ length: 40 }, (_, index) => `import { direct${index} } from "./direct${index}.ts";`).join("\n")}\nexport function hub() { return ${Array.from({ length: 40 }, (_, index) => `direct${index}()`).join(" + ")}; }\n`,
+};
+for (let index = 0; index < 40; index++) {
+	wideFiles[`src/direct${index}.ts`] =
+		`import { target } from "./target.ts";\nexport function direct${index}() { return target(); }\n`;
+	wideFiles[`src/outer${index}.ts`] =
+		`import { direct${index} } from "./direct${index}.ts";\n${index % 2 ? "" : "export "}function outer${index}() { return direct${index}(); }\nexport const use${index} = outer${index};\n`;
+}
+for (const [name, contents] of Object.entries(wideFiles)) {
+	mkdirSync(dirname(join(wide, name)), { recursive: true });
+	writeFileSync(join(wide, name), contents);
+}
+
+test("a reverse trace past the graph's limit is walked to the end through references", () => {
+	const output = runIn(wide, "--json", JSON.stringify({ type: "trace", from: "target", direction: "reverse" }));
+	expect(output.code).toBe(0);
+	const [result] = JSON.parse(output.out) as Array<{
+		shown: number;
+		raise?: string;
+		note?: string;
+		nodes: Array<{ name: string; exported?: true }>;
+	}>;
+	const names = new Set(result.nodes.map(({ name }) => name));
+	expect(result.raise).toBeUndefined();
+	expect(result.note).toContain("complete");
+	// 40 direct callers, the hub that calls them all, 40 outer callers, and the 40 variables that use those.
+	expect(result.shown).toBe(121);
+	for (let index = 0; index < 40; index++)
+		for (const name of [`direct${index}`, `outer${index}`, `use${index}`]) expect(names.has(name)).toBe(true);
+	expect(names.has("hub")).toBe(true);
+	expect(result.nodes.find(({ name }) => name === "outer1")?.exported).toBeUndefined();
+	expect(result.nodes.find(({ name }) => name === "outer0")?.exported).toBe(true);
+	const text = runIn(wide, JSON.stringify({ type: "trace", from: "target", direction: "reverse" })).out;
+	expect(text).toStartWith("trace reverse from target: 121 shown\n");
+	expect(text).toEndWith(
+		"note: complete: past the graph's 32-symbol limit, callers were followed through compiler references",
+	);
+});
+
+test("a forward trace at the graph's limit says so instead of advising a raise", () => {
+	const [result] = JSON.parse(
+		runIn(wide, "--json", JSON.stringify({ type: "trace", from: "hub", direction: "forward", maxNodes: 100 })).out,
+	) as Array<{ raise?: string; note?: string }>;
+	expect(result.raise).toBeUndefined();
+	expect(result.note).toBe("truncated at the graph's 32-symbol limit; trace again from the symbols at its edge");
 });

@@ -17,7 +17,8 @@ sightread '[{"type":"references","symbol":"Session.refresh"},{"type":"trace","fr
 ```
 
 - To change every use of something, ask for `references`. It lists each use with its line and text,
-  the whole call when it spans lines, which is enough to edit without reading the file.
+  the whole call when it spans lines, and the declaration it's in, which is enough to edit without
+  reading the file.
 - To see what a change affects, ask for `trace` with `"direction": "reverse"`; for what something
   calls, `"forward"`.
 - For what a symbol uses and contains, `details`. To get your bearings, `overview`. For a branch,

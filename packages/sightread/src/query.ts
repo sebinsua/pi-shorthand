@@ -75,6 +75,47 @@ function filterIn(result: GraphResult, directory: string): GraphResult {
 }
 
 /** Run one request or a batch and return exactly what the CLI prints. */
+// The graph returns at most this many symbols per trace, however many are asked for.
+const GRAPH_TRACE_LIMIT = 32;
+const WALK_LIMIT = 1000;
+
+// A reverse trace the graph cut short is walked to the end through compiler references, so "what does this
+// affect" has a complete answer. Other traces at the graph's limit say so, rather than advising a raise
+// that can't happen.
+async function completeTrace(
+	context: QueryContext,
+	request: Record<string, unknown>,
+	model: GraphResult,
+	paths: ReturnType<typeof createPaths> | undefined,
+): Promise<void> {
+	if (model.error || model.type !== "trace" || model.raise !== "trace.maxNodes") return;
+	const asked = typeof request.maxNodes === "number" ? request.maxNodes : 0;
+	if (request.direction === "reverse" && request.to === undefined && context.references && paths) {
+		const start = String(model.sections.start);
+		const walked = await context.references.walk(
+			start,
+			{ maxNodes: WALK_LIMIT, ...(typeof request.maxDepth === "number" ? { maxDepth: request.maxDepth } : {}) },
+			paths,
+		);
+		model.nodes = [...model.nodes.filter((node) => node.handle === start), ...walked.nodes];
+		model.edges = walked.edges;
+		model.sections = {
+			start,
+			direction: "reverse",
+			hops: walked.edges.map((_, index) => index),
+			reached: walked.nodes.map((node) => node.handle),
+		};
+		model.shown = walked.nodes.length;
+		delete model.raise;
+		model.note = walked.truncated
+			? `stopped at ${WALK_LIMIT} symbols; trace from a narrower symbol`
+			: `complete: past the graph's ${GRAPH_TRACE_LIMIT}-symbol limit, callers were followed through compiler references`;
+	} else if (asked >= GRAPH_TRACE_LIMIT || model.shown >= GRAPH_TRACE_LIMIT) {
+		delete model.raise;
+		model.note = `truncated at the graph's ${GRAPH_TRACE_LIMIT}-symbol limit; trace again from the symbols at its edge`;
+	}
+}
+
 export async function runQuery(
 	context: QueryContext,
 	requests: Record<string, unknown>[],
@@ -115,6 +156,7 @@ export async function runQuery(
 					: normalizeResult(requests[index], result.value, context.ranges, paths),
 		),
 	);
+	await Promise.all(models.map((model, index) => completeTrace(context, requests[index], model, paths)));
 	for (const model of models) if (context.tsconfig) model.tsconfig = context.tsconfig;
 	for (const model of models) model.nestedProjects = context.nestedProjects ?? [];
 	const filtered = options.in

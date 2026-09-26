@@ -165,7 +165,7 @@ function documentedStart(sourceFile: SourceFile, node: Node): number {
 	return start;
 }
 
-function hasModifier(node: Node, kind: SyntaxKind): boolean {
+export function hasModifier(node: Node, kind: SyntaxKind): boolean {
 	return (
 		"modifiers" in node &&
 		Array.isArray(node.modifiers) &&
@@ -173,10 +173,8 @@ function hasModifier(node: Node, kind: SyntaxKind): boolean {
 	);
 }
 
-function collectDeclarations(sourceFile: SourceFile): Declaration[] {
-	const declarations: Declaration[] = [];
-	const line = (position: number) => sourceFile.getLineAndCharacterOfPosition(position).line + 1;
-	// Names this module exports through its own `export { a, b as c }` or `export default a`.
+/** Names a module exports through its own `export { a, b as c }` or `export default a`. */
+export function listedExports(sourceFile: SourceFile): Set<string> {
 	const listed = new Set<string>();
 	for (const statement of sourceFile.statements) {
 		if (
@@ -188,6 +186,13 @@ function collectDeclarations(sourceFile: SourceFile): Declaration[] {
 			for (const element of statement.exportClause.elements) listed.add((element.propertyName ?? element.name).text);
 		else if (isExportAssignment(statement) && isIdentifier(statement.expression)) listed.add(statement.expression.text);
 	}
+	return listed;
+}
+
+function collectDeclarations(sourceFile: SourceFile): Declaration[] {
+	const declarations: Declaration[] = [];
+	const line = (position: number) => sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+	const listed = listedExports(sourceFile);
 	const add = (name: string, kind: DeclarationKind, node: Node, topLevel = false) => {
 		declarations.push({
 			name,

@@ -109,22 +109,31 @@ function edgeLines(edges: GraphEdge[], nodes: Map<string, GraphNode>, color: boo
 
 /** Render one model with one mention of each symbol's location. */
 export function renderText(result: GraphResult, options: { color: boolean }): string {
+	if (result.note) return `${renderText({ ...result, note: undefined }, options)}\n\nnote: ${result.note}`;
 	const nodes = new Map(result.nodes.map((node) => [node.handle, node]));
 	if (result.type === "overview") return overviewText(result, nodes, options.color);
 	if (result.type === "references") {
 		const symbol = String(result.sections.symbol ?? "");
-		const declared = result.sections.declaration as { file: string; line: number } | undefined;
+		const declared = result.sections.declaration as { file: string; line: number; text?: string } | undefined;
 		const files = new Set(result.nodes.map((node) => node.file));
 		const lines = [
-			`references to ${symbol}${declared ? ` (declared at ${declared.file}:${declared.line})` : ""}: ${result.nodes.length} in ${files.size} ${files.size === 1 ? "file" : "files"}`,
+			`references to ${symbol}: ${result.nodes.length} in ${files.size} ${files.size === 1 ? "file" : "files"}`,
+			...(declared
+				? [`declared at ${declared.file}:${declared.line}${declared.text ? `  ${declared.text}` : ""}`]
+				: []),
 		];
 		for (const file of files) {
 			const references = result.nodes.filter((node) => node.file === file);
 			const width = Math.max(...references.map((node) => `${node.line}:${node.col}`.length));
 			lines.push("", bold(file, options.color));
 			for (const node of references) {
-				const [first, ...rest] = referenceLines(node, options.color, " ".repeat(width + 4));
-				lines.push(`  ${dim(`${node.line}:${node.col}`.padStart(width), options.color)}  ${first}`, ...rest);
+				const label = node.in ? `in ${node.in.name}  ` : "";
+				const container = label ? `${dim(label.trimEnd(), options.color)}  ` : "";
+				const [first, ...rest] = referenceLines(node, options.color, " ".repeat(width + 4 + label.length));
+				lines.push(
+					`  ${dim(`${node.line}:${node.col}`.padStart(width), options.color)}  ${container}${first}`,
+					...rest,
+				);
 			}
 		}
 		return lines.join("\n");

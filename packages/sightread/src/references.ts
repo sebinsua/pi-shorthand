@@ -6,6 +6,7 @@ import {
 	getTouchingPropertyName,
 	isCallExpression,
 	isClassDeclaration,
+	isConstructorDeclaration,
 	isEnumDeclaration,
 	isFunctionDeclaration,
 	isGetAccessorDeclaration,
@@ -18,18 +19,48 @@ import {
 	isPropertyDeclaration,
 	isPropertySignatureDeclaration,
 	isSetAccessorDeclaration,
+	isSourceFile,
 	isTypeAliasDeclaration,
 	isVariableDeclaration,
+	isVariableStatement,
+	SyntaxKind,
 	type Node,
 	type SourceFile,
 } from "typescript/unstable/ast";
-import { fromHandle, type GraphNode, type GraphResult } from "./model.ts";
+import { fromHandle, type GraphEdge, type GraphNode, type GraphResult } from "./model.ts";
 import type { PathMapper } from "./paths.ts";
 import { projectFiles, type Project } from "./project.ts";
+import { hasModifier, listedExports } from "./ranges.ts";
 
 export interface ReferenceIndex {
 	query(request: Record<string, unknown>, paths: PathMapper): Promise<GraphResult>;
+	/** Every declaration that reaches `start` through compiler references, breadth first. */
+	walk(
+		start: string,
+		limits: { maxNodes: number; maxDepth?: number },
+		paths: PathMapper,
+	): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; truncated: boolean }>;
 	close(): Promise<void>;
+}
+
+interface Container {
+	handle: string;
+	name: string;
+	kind: string;
+	start: number;
+	end: number;
+	exported?: true;
+}
+
+interface Found {
+	file: string;
+	line: number;
+	col: number;
+	endCol: number;
+	endLine?: number;
+	text: string;
+	container?: Container;
+	call?: { line: number; col: number; endLine: number; endCol: number; arguments: number };
 }
 
 function declarationName(node: Node): string | undefined {
@@ -88,6 +119,64 @@ function enclosingCall(reference: Node): Node | undefined {
 	return call && (isCallExpression(call) || isNewExpression(call)) && call.expression === callee ? call : undefined;
 }
 
+// The declaration a reference sits in, named the way the graph names symbols: a class member, or else the
+// top-level function, class, variable or type. Imports, re-exports and module-level statements have none.
+function containerOf(reference: Node, source: SourceFile, file: string): Container | undefined {
+	let member: Node | undefined;
+	let top: Node | undefined;
+	for (let node = reference.parent; node; node = node.parent) {
+		const owner = node.parent;
+		if (
+			!member &&
+			owner &&
+			isClassDeclaration(owner) &&
+			(isMethodDeclaration(node) ||
+				isGetAccessorDeclaration(node) ||
+				isSetAccessorDeclaration(node) ||
+				isPropertyDeclaration(node) ||
+				isConstructorDeclaration(node))
+		)
+			member = node;
+		if (owner && isSourceFile(owner)) {
+			top = node;
+			break;
+		}
+	}
+	if (!top) return undefined;
+	const line = (position: number) => source.getLineAndCharacterOfPosition(position).line + 1;
+	const span = (node: Node) => ({
+		start: line(node.getStart(source)),
+		end: line(Math.max(node.getStart(source), node.end - 1)),
+	});
+	const exported = (name: string) =>
+		hasModifier(top, SyntaxKind.ExportKeyword) || listedExports(source).has(name) ? { exported: true as const } : {};
+	const named = (name: string, kind: string, node: Node, exports = true): Container => ({
+		handle: `${file}#${name}:${kind}`,
+		name,
+		kind,
+		...span(node),
+		...(exports ? exported(name) : {}),
+	});
+	if (isFunctionDeclaration(top) && top.name) return named(top.name.text, "function", top);
+	if (isClassDeclaration(top) && top.name) {
+		if (!member) return named(top.name.text, "class", top);
+		const name = isConstructorDeclaration(member)
+			? "__constructor"
+			: (member as unknown as { name: Node }).name.getText(source);
+		return named(`${top.name.text}.${name}`, isPropertyDeclaration(member) ? "property" : "method", member, false);
+	}
+	if (isVariableStatement(top)) {
+		const declaration = top.declarationList.declarations.find(
+			(item) => item.pos <= reference.pos && reference.end <= item.end && isIdentifier(item.name),
+		);
+		return declaration && isIdentifier(declaration.name) ? named(declaration.name.text, "variable", top) : undefined;
+	}
+	if (isInterfaceDeclaration(top)) return named(top.name.text, "interface", top);
+	if (isTypeAliasDeclaration(top)) return named(top.name.text, "type", top);
+	if (isEnumDeclaration(top)) return named(top.name.text, "enum", top);
+	return undefined;
+}
+
 /** Keep one TypeScript language service for a daemon's lifetime, brought up to date before each query. */
 export function createReferenceIndex(project: Project): ReferenceIndex {
 	const api = new API({ cwd: project.root });
@@ -135,6 +224,84 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 		return result;
 	};
 
+	// Every reference TypeScript resolves to the symbol `handle` names, with where it sits and the call it makes.
+	const collect = async (handle: string, includeDeclaration: boolean, paths: PathMapper) => {
+		const ref = fromHandle(handle);
+		if (!ref) throw new Error(`${handle} not found`);
+		const current = await refresh();
+		const file = resolve(project.root, ref.file);
+		const local = relative(project.root, file);
+		if (local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) throw new Error(`${handle} not found`);
+		const home = await current.getDefaultProjectForFile(file);
+		const source = await home?.program.getSourceFile(file);
+		const declaration = source && findDeclaration(source, ref.name);
+		if (!home || !source || !declaration) throw new Error(`${handle} not found`);
+		const start = declaration.getStart(source);
+		const entries = await home.checker.getReferencedSymbolsForNode(getTouchingPropertyName(source, start), start);
+		const found: Found[] = [];
+		const seen = new Set<string>();
+		const lines = new Map<string, string[]>();
+		const text = (origin: SourceFile) => {
+			if (!lines.has(origin.fileName)) lines.set(origin.fileName, origin.text.split(/\r\n|\n|\r/));
+			return lines.get(origin.fileName)!;
+		};
+		for (const entry of entries.flatMap((item) => item.references)) {
+			const reference = await entry.resolve(home);
+			if (!reference) continue;
+			const origin = reference.getSourceFile();
+			const offset = reference.getStart(origin);
+			if (
+				declarationName(reference) &&
+				(!includeDeclaration || origin.fileName !== source.fileName || offset !== start)
+			)
+				continue;
+			const path = relative(project.root, origin.fileName);
+			if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) continue;
+			const key = `${origin.fileName}:${offset}:${reference.end}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const position = (at: number) => origin.getLineAndCharacterOfPosition(at);
+			const { line, character } = position(offset);
+			const call = enclosingCall(reference);
+			const last = call ? position(call.end).line : line;
+			const outputFile = paths.toRepositoryPath(path.split(sep).join("/"));
+			const container = containerOf(reference, origin, outputFile);
+			found.push({
+				file: outputFile,
+				line: line + 1,
+				col: character + 1,
+				endCol: position(reference.end).character + 1,
+				...(last > line ? { endLine: last + 1 } : {}),
+				text: text(origin)
+					.slice(line, last + 1)
+					.join("\n"),
+				...(container ? { container } : {}),
+				...(call
+					? {
+							call: {
+								line: position(call.getStart(origin)).line + 1,
+								col: position(call.getStart(origin)).character + 1,
+								endLine: last + 1,
+								endCol: position(call.end).character + 1,
+								arguments: (call as unknown as { arguments?: readonly Node[] }).arguments?.length ?? 0,
+							},
+						}
+					: {}),
+			});
+		}
+		found.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.col - b.col);
+		const declared = source.getLineAndCharacterOfPosition(start).line;
+		return {
+			name: ref.name,
+			found,
+			declaration: {
+				file: paths.toRepositoryPath(local.split(sep).join("/")),
+				line: declared + 1,
+				text: text(source)[declared]?.trim() ?? "",
+			},
+		};
+	};
+
 	return {
 		query: (request, paths) =>
 			serially(async () => {
@@ -144,69 +311,68 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 					throw new Error(
 						`request.includeDeclaration must be boolean (got ${JSON.stringify(request.includeDeclaration)})`,
 					);
-				const ref = fromHandle(request.symbol);
-				if (!ref) throw new Error(`${request.symbol} not found`);
-				const current = await refresh();
-				const file = resolve(project.root, ref.file);
-				const local = relative(project.root, file);
-				if (local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local))
-					throw new Error(`${request.symbol} not found`);
-				const home = await current.getDefaultProjectForFile(file);
-				const source = await home?.program.getSourceFile(file);
-				const declaration = source && findDeclaration(source, ref.name);
-				if (!home || !source || !declaration) throw new Error(`${request.symbol} not found`);
-				const start = declaration.getStart(source);
-				const entries = await home.checker.getReferencedSymbolsForNode(getTouchingPropertyName(source, start), start);
-				const nodes: GraphNode[] = [];
-				const seen = new Set<string>();
-				const lines = new Map<string, string[]>();
-				for (const handle of entries.flatMap((entry) => entry.references)) {
-					const reference = await handle.resolve(home);
-					if (!reference) continue;
-					const origin = reference.getSourceFile();
-					const offset = reference.getStart(origin);
-					if (
-						declarationName(reference) &&
-						(request.includeDeclaration !== true || origin.fileName !== source.fileName || offset !== start)
-					)
-						continue;
-					const path = relative(project.root, origin.fileName);
-					if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) continue;
-					const key = `${origin.fileName}:${offset}:${reference.end}`;
-					if (seen.has(key)) continue;
-					seen.add(key);
-					const { line, character } = origin.getLineAndCharacterOfPosition(offset);
-					const end = origin.getLineAndCharacterOfPosition(reference.end);
-					if (!lines.has(origin.fileName)) lines.set(origin.fileName, origin.text.split(/\r\n|\n|\r/));
-					const call = enclosingCall(reference);
-					const last = call ? origin.getLineAndCharacterOfPosition(call.end).line : line;
-					const text = (lines.get(origin.fileName) ?? []).slice(line, last + 1).join("\n");
-					const outputFile = paths.toRepositoryPath(path.split(sep).join("/"));
-					nodes.push({
-						handle: `${outputFile}#reference:${line + 1}:${character + 1}:${end.character + 1}`,
-						name: ref.name,
-						file: outputFile,
-						line: line + 1,
-						col: character + 1,
-						endCol: end.character + 1,
-						...(last > line ? { endLine: last + 1 } : {}),
-						text,
-						ranges: null,
-					});
-				}
-				nodes.sort((a, b) => a.file.localeCompare(b.file) || a.line! - b.line! || a.col! - b.col!);
+				const { name, found, declaration } = await collect(request.symbol, request.includeDeclaration === true, paths);
+				const nodes: GraphNode[] = found.map(({ container, ...item }) => ({
+					handle: `${item.file}#reference:${item.line}:${item.col}:${item.endCol}`,
+					name,
+					...item,
+					...(container ? { in: container } : {}),
+					ranges: null,
+				}));
 				return {
 					type: "references",
 					shown: nodes.length,
 					nodes,
 					edges: [],
-					sections: {
-						symbol: ref.name,
-						declaration: {
-							file: paths.toRepositoryPath(local.split(sep).join("/")),
-							line: source.getLineAndCharacterOfPosition(start).line + 1,
-						},
-					},
+					sections: { symbol: name, declaration },
+				};
+			}),
+		walk: (start, limits, paths) =>
+			serially(async () => {
+				const nodes = new Map<string, GraphNode>();
+				const edges = new Map<string, GraphEdge>();
+				const depth = new Map([[start, 0]]);
+				const queue = [start];
+				let truncated = false;
+				while (queue.length) {
+					const target = queue.shift()!;
+					const level = depth.get(target)!;
+					if (limits.maxDepth !== undefined && level >= limits.maxDepth) continue;
+					const { found } = await collect(target, false, paths);
+					for (const item of found) {
+						const container = item.container;
+						if (!container || container.handle === target) continue;
+						const kind = item.call ? "calls" : "references";
+						const key = `${container.handle}\u0000${target}\u0000${kind}`;
+						if (!edges.has(key))
+							edges.set(key, {
+								from: container.handle,
+								to: target,
+								kind,
+								at: { file: item.file, line: item.line, col: item.col, endCol: item.endCol },
+							});
+						if (nodes.has(container.handle) || container.handle === start) continue;
+						if (nodes.size >= limits.maxNodes) {
+							truncated = true;
+							continue;
+						}
+						const { handle, name, kind: symbolKind, start: from, end, exported } = container;
+						nodes.set(handle, {
+							handle,
+							name,
+							kind: symbolKind,
+							file: item.file,
+							ranges: [{ start: from, end }],
+							...(exported ? { exported } : {}),
+						});
+						depth.set(handle, level + 1);
+						queue.push(handle);
+					}
+				}
+				return {
+					nodes: [...nodes.values()],
+					edges: [...edges.values()].filter((edge) => nodes.has(edge.from)),
+					truncated,
 				};
 			}),
 		close: () =>
