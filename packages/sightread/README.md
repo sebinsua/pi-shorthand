@@ -51,7 +51,7 @@ Pass an array to ask several questions at once. The requests you'll use most:
 
 ## What a branch changes
 
-`sightread diff [base]` lists the declarations changed since `base` (by default, where your branch left the default branch), what calls them, and the tests that use them:
+`sightread diff [base]` lists the declarations changed since `base` (by default, where your branch left the default branch, or your uncommitted changes when you are on it), what calls them, and the tests that use them:
 
 ```
 diff against main (1f2b8f79e012): formatPrice edited · used by 2 · tested by 0 files

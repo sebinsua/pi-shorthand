@@ -25,8 +25,14 @@ export interface GraphNode {
 	text?: string;
 	/** The declaration a reference sits in, as the graph names it. */
 	in?: { handle: string; name: string; kind: string; start: number; end: number; exported?: true };
-	/** The call a reference is the callee of: its range (1-based, UTF-16, exclusive end) and argument count. */
-	call?: { line: number; col: number; endLine: number; endCol: number; arguments: number };
+	/** The call a reference is the callee of, and each of its arguments: ranges are 1-based, UTF-16, exclusive end. */
+	call?: {
+		line: number;
+		col: number;
+		endLine: number;
+		endCol: number;
+		arguments: Array<{ line: number; col: number; endLine: number; endCol: number }>;
+	};
 }
 
 export interface GraphEdge {

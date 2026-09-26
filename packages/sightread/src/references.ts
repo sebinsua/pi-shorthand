@@ -60,7 +60,14 @@ interface Found {
 	endLine?: number;
 	text: string;
 	container?: Container;
-	call?: { line: number; col: number; endLine: number; endCol: number; arguments: number };
+	call?: { line: number; col: number; endLine: number; endCol: number; arguments: Range[] };
+}
+
+interface Range {
+	line: number;
+	col: number;
+	endLine: number;
+	endCol: number;
 }
 
 function declarationName(node: Node): string | undefined {
@@ -261,6 +268,11 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 			if (seen.has(key)) continue;
 			seen.add(key);
 			const position = (at: number) => origin.getLineAndCharacterOfPosition(at);
+			const range = (node: Node): Range => {
+				const from = position(node.getStart(origin));
+				const to = position(node.end);
+				return { line: from.line + 1, col: from.character + 1, endLine: to.line + 1, endCol: to.character + 1 };
+			};
 			const { line, character } = position(offset);
 			const call = enclosingCall(reference);
 			const last = call ? position(call.end).line : line;
@@ -279,11 +291,8 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 				...(call
 					? {
 							call: {
-								line: position(call.getStart(origin)).line + 1,
-								col: position(call.getStart(origin)).character + 1,
-								endLine: last + 1,
-								endCol: position(call.end).character + 1,
-								arguments: (call as unknown as { arguments?: readonly Node[] }).arguments?.length ?? 0,
+								...range(call),
+								arguments: [...((call as unknown as { arguments?: readonly Node[] }).arguments ?? [])].map(range),
 							},
 						}
 					: {}),

@@ -252,11 +252,13 @@ test("a tab in a tracked filename survives NUL-delimited git paths", async () =>
 	expect(value.changed.map((node: { file: string }) => node.file)).toEqual(["client/src/a\tb.ts"]);
 }, 30_000);
 
-test("default base reports when no other branch exists and explicit HEAD works", async () => {
+test("with no other branch the default base is HEAD, and explicit HEAD works", async () => {
 	const f = fixture({ "client/src/View.tsx": tsx });
-	await expect(runDiff(f.project, undefined, { json: false, color: false })).rejects.toThrow(
-		"no default branch found; pass diff [base]",
+	f.put("client/src/View.tsx", tsx.replace("No items", "Nothing here"));
+	expect(await runDiff(f.project, undefined, { json: false, color: false })).toStartWith(
+		`diff against HEAD (${f.sha.slice(0, 12)}) in client: ItemList edited`,
 	);
+	f.put("client/src/View.tsx", tsx);
 	expect(await f.run()).toBe(
 		`diff against ${f.sha.slice(0, 12)} in client: 0 changed · used by 0 · tested by 0 files\n\n(no changes)`,
 	);

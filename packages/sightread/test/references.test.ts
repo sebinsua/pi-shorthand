@@ -283,7 +283,13 @@ test("each reference names the declaration it sits in and the call it makes", ()
 			line: number;
 			col: number;
 			in?: { handle: string; name: string; kind: string; start: number; end: number; exported?: true };
-			call?: { line: number; col: number; endLine: number; endCol: number; arguments: number };
+			call?: {
+				line: number;
+				col: number;
+				endLine: number;
+				endCol: number;
+				arguments: Array<{ line: number; col: number; endLine: number; endCol: number }>;
+			};
 		}>;
 		sections: { declaration: { file: string; line: number; text: string } };
 	}>;
@@ -297,8 +303,20 @@ test("each reference names the declaration it sits in and the call it makes", ()
 		end: 4,
 		exported: true,
 	});
-	expect(at(4, 38).call).toEqual({ line: 4, col: 34, endLine: 4, endCol: 44, arguments: 1 });
-	expect(at(6, 4).call).toEqual({ line: 5, col: 38, endLine: 8, endCol: 4, arguments: 1 });
+	expect(at(4, 38).call).toEqual({
+		line: 4,
+		col: 34,
+		endLine: 4,
+		endCol: 44,
+		arguments: [{ line: 4, col: 42, endLine: 4, endCol: 43 }],
+	});
+	expect(at(6, 4).call).toEqual({
+		line: 5,
+		col: 38,
+		endLine: 8,
+		endCol: 4,
+		arguments: [{ line: 7, col: 5, endLine: 7, endCol: 6 }],
+	});
 });
 
 const wide = join(repository, "wide");

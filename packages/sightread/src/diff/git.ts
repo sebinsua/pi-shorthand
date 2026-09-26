@@ -50,7 +50,8 @@ export interface GitChanges {
  * Where the current branch left the default branch, when no base is given.
  *
  * Tries `origin/HEAD`, then the branch `origin/HEAD` names (from the ref, or offline from
- * `git remote show -n origin`), then a local `main`, then `master`, skipping the current branch.
+ * `git remote show -n origin`), then a local `main`, then `master`, skipping the current branch. With
+ * none of those, the base is `HEAD`, so the diff is the uncommitted changes.
  * The fallbacks exist because a bare clone has no `refs/remotes/origin/*`, so worktrees made from
  * one never have `origin/HEAD`.
  */
@@ -78,7 +79,8 @@ async function defaultBase(repository: string): Promise<{ revision: string; ref:
 			// Try the next local or offline ref.
 		}
 	}
-	throw new Error("no default branch found; pass diff [base]");
+	// On the only branch, or on the default branch itself, the changes to show are the uncommitted ones.
+	return { revision: (await git(repository, ["rev-parse", "HEAD"])).trim(), ref: "HEAD" };
 }
 
 /** Resolve the revision and enumerate all paths, including untracked and renamed files. */
