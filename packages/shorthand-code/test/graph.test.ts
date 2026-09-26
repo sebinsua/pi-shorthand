@@ -73,8 +73,16 @@ async function run(
 	program: string,
 	testHooks: RunOptions["testHooks"] = {},
 	env: Record<string, string> = {},
+	graph?: boolean,
 ): Promise<RunResult> {
-	const input: RunOptions = { cwd, program, rollback: "all", timeoutMs: 2000, testHooks };
+	const input: RunOptions = {
+		cwd,
+		program,
+		rollback: "all",
+		timeoutMs: 2000,
+		testHooks,
+		...(graph === undefined ? {} : { graph }),
+	};
 	const child = Bun.spawn(["bun", runner], {
 		stdin: new Response(JSON.stringify(input)),
 		stdout: "pipe",
@@ -254,11 +262,9 @@ test("a five-second graph cold start is excluded from the default timeout", asyn
 	expect(outcome.output).toContain("2");
 }, 45_000);
 
-test("an unavailable graph explains how to install it", async () => {
+test("a graph the caller doesn't offer is unavailable to the program, and explains how to install it", async () => {
 	const { cwd } = await fixture();
-	const outcome = await run(cwd, 'await graph.query({ type: "lookup", query: "Service" });', {
-		graphUnavailable: true,
-	});
+	const outcome = await run(cwd, 'await graph.query({ type: "lookup", query: "Service" });', {}, {}, false);
 	expect(outcome.exitCode).toBe(1);
 	expect(outcome.output).toContain(
 		"graph needs the sightread package; install it alongside shorthand-code (npm i -g sightread)",

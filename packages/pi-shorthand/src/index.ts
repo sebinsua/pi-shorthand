@@ -111,6 +111,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 						program: params.program,
 						timeoutMs: (params.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
 						rollback: params.rollback ?? "file",
+						graph: graphAvailable,
 					},
 					signal,
 					(step) => (latest = step),

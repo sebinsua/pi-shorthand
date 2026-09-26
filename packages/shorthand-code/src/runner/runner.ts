@@ -43,6 +43,8 @@ export interface RunOptions {
 	program: string;
 	timeoutMs: number;
 	rollback: "all" | "file";
+	/** false when the caller doesn't offer `graph.query`, so a program can't reach it either. */
+	graph?: boolean;
 	testHooks?: RunTestHooks;
 }
 
@@ -53,7 +55,6 @@ interface RunTestHooks {
 	workspaceCleanupFailure?: boolean;
 	finalCleanupDelayMs?: number;
 	graphColdStartDelayMs?: number;
-	graphUnavailable?: boolean;
 }
 
 interface ApplicationTestHooks {
@@ -593,7 +594,7 @@ async function runProgram(
 	const outcomeFile = await fs.open(outcomePath, "w");
 	const graphProxy = await openGraphProxy(tempDir, options.cwd, repo, {
 		delayMs: options.testHooks?.graphColdStartDelayMs,
-		resolve: options.testHooks?.graphUnavailable ? async () => undefined : undefined,
+		resolve: options.graph === false ? async () => undefined : undefined,
 	});
 	try {
 		const [command, ...args] = overlay.wrap(
