@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, readlink, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, readlink, symlink } from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { Drift } from "./tasks/drift.ts";
@@ -214,6 +214,26 @@ export function aggregateRuns(runs: RunMeasurement[], budgetSeconds: number) {
 }
 
 /** Copies tracked, dirty and untracked source files once, so later source edits cannot mix revisions. */
+// Share installed dependencies with the source, but point workspace packages at the frozen copy,
+// so a run imports the code it froze rather than whatever the source working tree holds later.
+async function linkDependencies(from: string, to: string, root: string): Promise<void> {
+	if (!(await lstat(from).catch(() => null))) return;
+	await mkdir(to, { recursive: true });
+	for (const name of (await readdir(from)).toSorted()) {
+		const entry = path.join(from, name);
+		const info = await lstat(entry);
+		if (name.startsWith("@") && info.isDirectory()) {
+			await linkDependencies(entry, path.join(to, name), root);
+			continue;
+		}
+		const target = info.isSymbolicLink() ? path.resolve(from, await readlink(entry)) : undefined;
+		const local = target ? path.relative(root, target) : "..";
+		const workspace = !local.startsWith("..") && !path.isAbsolute(local) && !local.startsWith("node_modules");
+		// The copy mirrors the source's layout, so a link relative to the source resolves inside the copy.
+		await symlink(workspace ? path.relative(from, target!) : entry, path.join(to, name));
+	}
+}
+
 export async function freezeExtension(source: string, destination: string, label: string): Promise<FrozenExtension> {
 	source = path.resolve(source);
 	await mkdir(destination, { recursive: true });
@@ -222,9 +242,7 @@ export async function freezeExtension(source: string, destination: string, label
 	const files = listed.stdout.toString().split("\0").filter(Boolean).toSorted();
 	const fingerprint = await fingerprintFiles(source, files);
 	for (const file of files) await copyEntry(path.join(source, file), path.join(destination, file));
-	const dependencies = path.join(source, "node_modules");
-	if (await lstat(dependencies).catch(() => null))
-		await symlink(dependencies, path.join(destination, "node_modules"), "dir");
+	await linkDependencies(path.join(source, "node_modules"), path.join(destination, "node_modules"), source);
 	if ((await fingerprintFiles(destination, files)) !== fingerprint) {
 		throw new Error(`Frozen extension differs from its source: ${source}`);
 	}

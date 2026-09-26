@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
@@ -218,4 +218,28 @@ test("paired revisions are frozen separately from an identical dirty fixture", a
 	expect((await lstat(path.join(frozenBaseline.path, "bin", "tool"))).mode & 0o111).toBe(0o111);
 	expect(pairedOrder(1)).toEqual(["baseline", "candidate"]);
 	expect(pairedOrder(2)).toEqual(["candidate", "baseline"]);
+});
+
+test("a frozen extension imports its own workspace packages, not the source's later edits", async () => {
+	const root = await mkdtemp(path.join(tmpdir(), "pi-shorthand-freeze-"));
+	temporary.push(root);
+	const source = path.join(root, "source");
+	await mkdir(path.join(source, "packages/lib"), { recursive: true });
+	await mkdir(path.join(source, "node_modules/@scope/dep"), { recursive: true });
+	await Bun.write(path.join(source, ".gitignore"), "node_modules\n");
+	await Bun.write(path.join(source, "packages/lib/index.js"), "export default 'frozen';\n");
+	await Bun.write(path.join(source, "packages/lib/package.json"), '{"name":"lib","type":"module","main":"index.js"}\n');
+	await Bun.write(path.join(source, "node_modules/@scope/dep/package.json"), '{"name":"@scope/dep"}\n');
+	await symlink("../packages/lib", path.join(source, "node_modules/lib"));
+	await $`git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm base`.cwd(source);
+	const frozen = await freezeExtension(source, path.join(root, "frozen"), "candidate");
+	await Bun.write(path.join(source, "packages/lib/index.js"), "export default 'edited later';\n");
+
+	expect(await realpath(path.join(frozen.path, "node_modules/lib"))).toBe(
+		await realpath(path.join(frozen.path, "packages/lib")),
+	);
+	expect(await realpath(path.join(frozen.path, "node_modules/@scope/dep"))).toBe(
+		await realpath(path.join(source, "node_modules/@scope/dep")),
+	);
+	expect((await import(path.join(frozen.path, "node_modules/lib/index.js"))).default).toBe("frozen");
 });

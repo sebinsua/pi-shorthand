@@ -39,9 +39,10 @@ test("the extension loads under Node, the way Pi loads it", () => {
 		const extension = await createJiti(import.meta.url).import(${JSON.stringify(entry)});
 		let tool;
 		await extension.default({ on() {}, registerTool(registered) { tool = registered; } });
-		console.log(tool.name);
+		console.log(tool.name, tool.description.includes("graph.query"));
 	`;
 	const result = Bun.spawnSync(["node", "--input-type=module", "-e", script]);
 	expect(result.stderr.toString()).toBe("");
-	expect(result.stdout.toString().trim()).toBe("code");
+	// sightread is a workspace package here, so Node must find it and the tool must offer graph.query.
+	expect(result.stdout.toString().trim()).toBe("code true");
 });
