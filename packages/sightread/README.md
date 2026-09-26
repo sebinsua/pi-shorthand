@@ -41,10 +41,11 @@ hops
 
 Pass an array to ask several questions at once. The requests you'll use most:
 
-- `lookup` finds symbols by name.
-- `trace` follows what calls something, or what it calls.
+- `references` lists every use of a symbol with its line, so each one can be edited without opening the file.
+- `trace` follows what calls something, or what it calls, to see what a change affects.
 - `details` shows what a symbol calls, uses and contains.
 - `tour` and `overview` sketch a feature or the whole project.
+- `lookup` finds symbols when you only half know the name.
 
 `sightread --help` lists every field, with examples. Names work wherever a request asks for a symbol, and paths are relative to the repository, so you can pass them straight to other tools. Add `--json` for scripts, or `--in packages/api` to keep results to one part of a monorepo.
 
